@@ -517,7 +517,11 @@ fn parse_slots(controller: &str, actions: &Value, slots: &mut Vec<Slot>) -> Resu
             .as_str()
             .context("Action has no UUID")?
             .to_owned();
-        let settings = action.get("Settings").cloned().unwrap_or_else(|| json!({}));
+        let settings = action
+            .get("Settings")
+            .filter(|v| !v.is_null())
+            .cloned()
+            .unwrap_or_else(|| json!({}));
         ensure!(settings.is_object(), "Action settings must be an object");
         let states = action.get("States").cloned().unwrap_or_else(|| json!([]));
         ensure!(states.is_array(), "Action States must be an array");

@@ -5,6 +5,9 @@ mod layout;
 mod package;
 mod profile;
 mod render;
+mod system_actions;
+mod system_editor;
+mod system_keyboard;
 mod webview;
 
 use anyhow::Result;

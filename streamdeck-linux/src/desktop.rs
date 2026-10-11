@@ -417,6 +417,10 @@ impl Desktop {
             ));
         });
         ui.separator();
+        let system_status = string(&self.snapshot, "system_status");
+        if !system_status.is_empty() {
+            ui.label(system_status);
+        }
         if !self.error.is_empty() {
             ui.colored_label(Color32::from_rgb(255, 172, 163), &self.error);
         }
@@ -746,7 +750,7 @@ impl Desktop {
                 json!({"command":"open_inspector","context":slot.as_ref().unwrap()["context"]}),
             );
         }
-        ui.label("Plugin action");
+        ui.label("Action");
         let actions = self.snapshot["actions"]
             .as_array()
             .cloned()
@@ -815,7 +819,7 @@ impl Desktop {
             if ui.text_edit_singleline(&mut draft.title).labelled_by(title_label.id).changed() { draft.dirty = true; }
             ui.add_space(8.0);
             ui.label(RichText::new("Settings").strong());
-            self.settings_editor(ui, &mut draft);
+            self.settings_editor(ui, &mut draft, slot.as_ref().map(|s|string(s,"uuid")).unwrap_or(""));
             ui.horizontal(|ui| {
                 if ui.add(egui::Button::new("Save changes").fill(Color32::from_rgb(35, 79, 68))).clicked() {
                     match draft.settings_to_save() {
@@ -838,8 +842,20 @@ impl Desktop {
         });
         self.drafts.insert(selection, draft);
     }
-    fn settings_editor(&mut self, ui: &mut egui::Ui, draft: &mut Draft) {
+    fn settings_editor(&mut self, ui: &mut egui::Ui, draft: &mut Draft, assigned_action: &str) {
         ui.add_enabled_ui(!draft.raw_dirty, |ui| {
+            if let Some(changed) = crate::system_editor::edit(
+                ui,
+                assigned_action,
+                self.selected.controller(),
+                &mut draft.settings,
+            ) {
+                if changed {
+                    draft.numbers = numeric_strings(&draft.settings);
+                    draft.dirty = true;
+                }
+                return;
+            }
             if let Some(settings) = draft.settings.as_object_mut() {
                 if settings.is_empty() {
                     ui.small("This action has no saved settings yet.");

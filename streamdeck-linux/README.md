@@ -61,6 +61,34 @@ at its printed loopback address; it is not the native application's interface.
 Native mode exposes only the plugin WebSocket endpoint, not the
 browser editor or its HTTP control routes.
 
+## Built-in Linux actions
+
+Choose **Website**, **Open application, file or folder**, **Hotkey**, or **Media
+control** from the native action picker. Each has dedicated settings controls.
+Website supports a default/selected browser or a bounded background HTTP request.
+Open uses a Linux executable or the desktop file association; imported Windows
+paths stay editable and produce an explicit error until mapped to a Linux target.
+Profile strings are never evaluated as shell commands.
+
+Hotkeys use a persistent Linux uinput keyboard. Key down/up owns and releases the
+shortcut; page changes and shutdown release departing holds. Dial shortcuts map
+to counterclockwise, clockwise, and press/tap independently. Media keys include
+transport and volume/mute; the System volume dial maps rotation to volume steps
+and press/tap to mute. Volume state feedback is not implemented yet.
+
+The host needs write access to `/dev/uinput` for keyboard/media actions. It does
+not change permissions automatically. Qt shortcut identities are translated to
+Linux physical key codes; arbitrary keyboard-layout equivalence and Coalesce
+behavior remain unverified. The kernel device was created/removed in testing,
+but event readback could not run with current event-node permissions. No desktop
+shortcut or real audio change is claimed as verified by the automated tests.
+
+The latest action result appears in the native window. Network work runs outside
+the editor and input worker. `--simulate` prevents USB access only: configured
+System actions and plugins can still perform their normal OS/network operations.
+Close/Open Application activation, text entry, hotkey switch, soundboard and
+other desktop actions remain on the parity ledger.
+
 ## Commands
 
 ```sh
@@ -122,7 +150,7 @@ completion criterion replaces the desktop parity goal.
 2. Separate hardware/editor targets, inactive-state image/title updates, alerts,
    animation, and native-reference visual validation of layout font/bar details.
 3. Windows acceptance of exported profiles, folder auto-exit, multi-actions,
-   built-in hotkeys/audio/application actions, and automatic profile selection.
+   text/hotkey-switch/audio actions, application activation, and automatic profile selection.
 4. Native Windows/macOS plugin binaries and platform-specific dependencies.
    These do not become Linux programs simply by reproducing the WebSocket API.
 5. USB reconnect recovery, more device models, plugin supervision, tray/autostart,
@@ -147,6 +175,7 @@ python tests/webview_interop.py
 python tests/native_lifecycle.py
 python tests/profile_interop.py
 python tests/bundled_profiles_interop.py
+python tests/system_interop.py
 ```
 
 The optional installer test needs the local Windows artifacts. The sample

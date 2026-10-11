@@ -304,7 +304,9 @@ fn export_action(
     if native {
         raw["Name"] = json!(slot.name);
     }
-    if native || raw.get("Settings").is_some() || slot.settings != json!({}) {
+    if (native || raw.get("Settings").is_some() || slot.settings != json!({}))
+        && !(raw.get("Settings") == Some(&Value::Null) && slot.settings == json!({}))
+    {
         raw["Settings"] = slot.settings.clone();
     }
     if native || raw.get("State").is_some() || slot.state != 0 {

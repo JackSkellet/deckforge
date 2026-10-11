@@ -234,6 +234,8 @@ enum HeldControl {
     Dial(u8),
 }
 struct Host {
+    system_actions: Option<crate::system_actions::Worker>,
+    system_status: String,
     library: Library,
     profile_assets: HashMap<PathBuf, profile::ProfileBundle>,
     diagnostics: bool,
@@ -394,7 +396,11 @@ impl Host {
             index,
             uuid: uuid.into(),
             name: action.name.clone(),
-            settings: json!({}),
+            settings: if controller == "Encoder" && uuid == crate::system_actions::MULTIMEDIA {
+                json!({"actionIdx":18})
+            } else {
+                crate::system_actions::defaults(uuid)
+            },
             title,
             state: 0,
             feedback: json!({}),
@@ -440,6 +446,13 @@ impl Host {
             .map(|(control, context)| (*control, context.clone()))
             .collect();
         for (control, context) in departing {
+            if let Some(slot) = self.slots.iter().find(|slot| slot.context == context)
+                && slot.uuid == crate::system_actions::HOTKEY
+                && let Some(worker) = &self.system_actions
+                && let Err(error) = worker.submit(&context, crate::system_actions::Plan::Release)
+            {
+                self.log(format!("Shortcut release: {error}"));
+            }
             if let Some(slot) = self.slots.iter().find(|slot| slot.context == context) {
                 self.emit(
                     slot,
@@ -467,6 +480,7 @@ impl Host {
         if !pressed && self.released.remove(&control) {
             return Ok(());
         }
+        let owned_release = !pressed && self.held.contains_key(&control);
         let slot = if pressed {
             self.released.remove(&control);
             let slot = self
@@ -528,8 +542,63 @@ impl Host {
                 _ => {}
             }
         }
+        if crate::system_actions::supported(&slot.uuid) {
+            if pressed || owned_release {
+                self.run_system_action(
+                    &slot,
+                    if pressed {
+                        crate::system_actions::Trigger::Down
+                    } else {
+                        crate::system_actions::Trigger::Up
+                    },
+                )?;
+            }
+            return Ok(());
+        }
         self.emit(&slot, if pressed { down } else { up }, json!({}));
         Ok(())
+    }
+    fn run_system_action(
+        &mut self,
+        slot: &Slot,
+        trigger: crate::system_actions::Trigger,
+    ) -> Result<()> {
+        let Some(plan) = crate::system_actions::input_plan(
+            &slot.uuid,
+            &slot.controller,
+            &slot.settings,
+            trigger,
+        )?
+        else {
+            return Ok(());
+        };
+        let worker = self
+            .system_actions
+            .get_or_insert_with(crate::system_actions::Worker::new);
+        worker.submit(&slot.context, plan)?;
+        self.system_status = format!("{} queued", slot.name);
+        Ok(())
+    }
+    fn poll_system_actions(&mut self) {
+        let reports = self
+            .system_actions
+            .as_ref()
+            .map(|worker| worker.drain())
+            .unwrap_or_default();
+        for report in reports {
+            let name = self
+                .slots
+                .iter()
+                .find(|s| s.context == report.context)
+                .or_else(|| self.library.slot(&report.context))
+                .map(|s| s.name.as_str())
+                .unwrap_or("System action");
+            self.system_status = match report.result {
+                Ok(message) => format!("{name}: {message}"),
+                Err(error) => format!("{name} failed: {error:#}"),
+            };
+            self.log(self.system_status.clone());
+        }
     }
     fn input(&mut self, event: InputEvent) -> Result<()> {
         self.log(format!("{event:?}"));
@@ -567,8 +636,20 @@ impl Host {
             .slots
             .iter()
             .find(|s| s.controller == "Encoder" && s.index == index)
+            .cloned()
         {
-            self.emit(slot, name, extra);
+            if crate::system_actions::supported(&slot.uuid) {
+                let trigger = if name == "dialRotate" {
+                    crate::system_actions::Trigger::Rotate(
+                        extra["ticks"].as_i64().unwrap_or(0) as i8
+                    )
+                } else {
+                    crate::system_actions::Trigger::Tap
+                };
+                self.run_system_action(&slot, trigger)?;
+            } else {
+                self.emit(&slot, name, extra);
+            }
         }
         Ok(())
     }
@@ -804,7 +885,7 @@ async fn root(
 }
 fn snapshot(host: &Host) -> Value {
     json!({"library":host.library.snapshot(),"running":host.running,"device":host.device,"firmware":host.firmware,"simulate":host.simulate,"connected":host.hardware.is_some(),
-        "slots":host.slots.iter().map(|s|json!({"available":host.actions.iter().any(|a|a.uuid==s.uuid),"pinned":s.pinned,"context":s.context,"controller":s.controller,"index":s.index,"uuid":s.uuid,"name":s.name,"settings":s.settings,"title":s.title,"state":s.state,"feedback":s.feedback,"layout":s.layout,"preview":s.preview,"has_inspector":host.actions.iter().find(|a|a.uuid==s.uuid).is_some_and(|a|a.raw["PropertyInspectorPath"].is_string()||host.plugins.iter().find(|p|p.id==a.plugin).is_some_and(|p|p.manifest["PropertyInspectorPath"].is_string()))})).collect::<Vec<_>>(),
+        "system_status":host.system_status,"slots":host.slots.iter().map(|s|json!({"available":host.actions.iter().any(|a|a.uuid==s.uuid),"pinned":s.pinned,"context":s.context,"controller":s.controller,"index":s.index,"uuid":s.uuid,"name":s.name,"settings":s.settings,"title":s.title,"state":s.state,"feedback":s.feedback,"layout":s.layout,"preview":s.preview,"has_inspector":host.actions.iter().find(|a|a.uuid==s.uuid).is_some_and(|a|a.raw["PropertyInspectorPath"].is_string()||host.plugins.iter().find(|p|p.id==a.plugin).is_some_and(|p|p.manifest["PropertyInspectorPath"].is_string()))})).collect::<Vec<_>>(),
         "inspectors":host.inspectors.values().map(|i|json!({"context":i.context,"plugin":host.plugins[i.plugin].id,"connected":i.sender.is_some()})).collect::<Vec<_>>(),"actions":host.actions,"logs":host.logs,"plugins":host.plugins.iter().map(|p|json!({"id":p.id,"name":p.name,"connected":p.sender.is_some()})).collect::<Vec<_>>()})
 }
 async fn dashboard(State(state): State<Shared>) -> Json<Value> {
@@ -1330,6 +1411,25 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
     };
     let (plugins, mut actions) = load_plugins(plugin_paths)?;
     actions.extend(library::navigation_actions());
+    for (uuid, name, _) in crate::system_actions::definitions() {
+        if actions.iter().any(|a| a.uuid == uuid) {
+            bail!("Plugin claims built-in action {uuid}");
+        }
+        actions.push(Action {
+            uuid: uuid.into(),
+            name: name.into(),
+            controllers: if matches!(
+                uuid,
+                crate::system_actions::HOTKEY | crate::system_actions::MULTIMEDIA
+            ) {
+                vec!["Keypad".into(), "Encoder".into()]
+            } else {
+                vec!["Keypad".into()]
+            },
+            plugin: "deckforge.system".into(),
+            raw: json!({"States":[{"Title":if uuid==crate::system_actions::OPEN {"Open"} else {name}}],"Encoder":{"layout":"$X1"}}),
+        });
+    }
     let (events_tx, mut events_rx) = mpsc::unbounded_channel::<Result<InputEvent>>();
     let (draw_tx, draw_rx) = std::sync::mpsc::channel();
     let mut deck = if simulate {
@@ -1360,6 +1460,8 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
     library.validate()?;
     let slots = library.visible()?;
     let mut host = Host {
+        system_actions: None,
+        system_status: String::new(),
         library,
         profile_assets: HashMap::new(),
         diagnostics,
@@ -1395,14 +1497,15 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
             .actions
             .iter()
             .find(|a| {
-                a.plugin != "deckforge.navigation" && a.controllers.iter().any(|c| c == "Keypad")
+                !a.plugin.starts_with("deckforge.") && a.controllers.iter().any(|c| c == "Keypad")
             })
             .map(|a| a.uuid.clone());
         let dial = host
             .actions
             .iter()
             .find(|a| {
-                a.controllers.iter().any(|c| c == "Encoder")
+                !a.plugin.starts_with("deckforge.")
+                    && a.controllers.iter().any(|c| c == "Encoder")
                     && a.raw["Encoder"]["layout"]
                         .as_str()
                         .is_none_or(|l| l == "$B1")
@@ -1574,6 +1677,7 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
                 break;
             }
             host.monitor_children();
+            host.poll_system_actions();
         }
     });
     let stop = async move {
@@ -1610,6 +1714,9 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
 }
 
 fn stop_plugins(host: &mut Host) {
+    if let Some(worker) = &host.system_actions {
+        worker.cancel();
+    }
     host.running = false;
     host.close_inspectors(None);
     for plugin in &mut host.plugins {
@@ -1678,6 +1785,8 @@ mod tests {
     }
     fn fixture(root: &Path) -> Host {
         let mut host = Host {
+            system_actions: None,
+            system_status: String::new(),
             library: Library::default(),
             profile_assets: HashMap::new(),
             diagnostics: false,

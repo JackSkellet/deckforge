@@ -55,16 +55,16 @@ The shipped profiles contain real action identifiers and settings; their presenc
 
 | ID | Required behavior | Baseline status and evidence | Evidence needed to pass |
 | --- | --- | --- | --- |
-| AC-01 | Open application/file/folder, close application, open URL and background request | **Missing, A/C.** Shipped fixtures contain system open/website actions. | Configure through GUI and import fixtures; verify Linux path/app translation, URL handling and explicit background-request behavior. Unmappable Windows paths remain visible and editable. [System actions][system] |
-| AC-02 | Hotkey, hotkey switch, modifiers, text entry and optional Enter | **Missing, A/C.** Original Windows key codes/settings are preserved. | Exercise a named Linux application under supported X11/Wayland sessions; verify Unicode, modifier release, repeated presses, focus and held keys without stuck input. [System actions][system] |
-| AC-03 | Multimedia transport, mute and volume | **Missing, A/C.** Multimedia UUID/settings exist in shipped Plus profiles. | Play/pause/seek where supported, mute and change volume against real media players; verify externally changed state feeds back. [System actions][system] |
+| AC-01 | Open application/file/folder, close application, open URL and background request | **Verified subset, A/C/T.** Native Website/Open editors and Linux argv-based execution; actual local background HTTP success/error and executable launch verified. Browser association, Close and Open Application activation/long-press remain open. | Configure through GUI and import fixtures; verify Linux path/app translation, URL handling and explicit background-request behavior. Unmappable Windows paths remain visible and editable. [System actions][system] |
+| AC-02 | Hotkey, hotkey switch, modifiers, text entry and optional Enter | **Partial, A/C/T.** Native shortcut editor, Qt-to-evdev translation, held ownership and exact Plus trigger indices implemented. uinput device creation/removal verified, but event readback skipped for missing event-node read access. Compositor shortcuts, arbitrary layouts, Coalesce, hotkey switch and text remain open. | Exercise a named Linux application under supported X11/Wayland sessions; verify Unicode, modifier release, repeated presses, focus and held keys without stuck input. [System actions][system] |
+| AC-03 | Multimedia transport, mute and volume | **Partial, A/C/T.** Original transport enum and composite volume-dial mapping recovered and implemented through Linux media key events. Real audio/player acceptance and external state feedback remain open. | Play/pause/seek where supported, mute and change volume against real media players; verify externally changed state feeds back. [System actions][system] |
 | AC-04 | Soundboard playback, looping, overlap/restart, fades, volume and output device | **Missing, A/C.** Shipped profiles reference `soundboard.playaudio`; no audio engine exists. | Play supported audio fixtures in each documented mode, route to selected output, stop/retrigger and restart host safely. Verify captured audio and audible output. [Soundboard][soundboard] |
 | AC-05 | Multi Actions, delays, switch/random variants and plugin multi-action context | **Missing, A/C.** Shipped fixtures include routine/delay UUIDs; outgoing events always say `isInMultiAction:false`. | Import/reorder sequences, check measured timing and stateful branches, then verify plugin events with a fixture that consumes multi-action state. Inventory switch/random behavior before marking those variants passed. [Multi Actions][multi], [delay controls][delays] |
 | AC-06 | Dial Stacks | **Missing, A/C.** `com.elgato.streamdeck.dial.stack` appears in shipped profiles. | Load multiple real dial actions; dial push cycles active action and corresponding touch display; settings persist independently. [Dial Stacks][stacks] |
 | AC-07 | Action Trigger adapts key actions to dial directions/press | **Missing, A/C.** Shipped key-adaptor actions are preserved without execution. | Configure three different actions, exercise both rotation directions and press, and verify corresponding plugin key-event semantics. [Action Trigger][trigger] |
 | AC-08 | Action Wheel and Key Logic/Key Stack behaviors | **Missing/Unresolved, A/C.** Shipped `keys.logic`/`keys.stack` descriptors exist; semantics are not fully investigated. | Implement documented wheel selection/activation and record actual 7.6 Key Logic/Stack reference behavior before creating differential tests. [Action Wheel][wheel], [7.4 fixes][release74] |
-| AC-09 | Device brightness, sleep/screensaver and profile/page navigation actions | **Missing, A/C.** `system.keybrightness`, `system.sleep` and page UUIDs exist in installer profiles. | Execute user-configured actions on hardware, verify ranges/state restoration, and ensure navigation targets the correct device. [Preferences][preferences], [screensaver][screensaver] |
-| AC-10 | Built-in/tutorial onboarding and meaningful errors for unavailable actions | **Partial, A/C.** Missing actions are logged; bundled tutorial is an unrun HTML plugin. | Import untouched default Plus profile; every action either works or has an actionable visible compatibility error. Run tutorial screens through the supported browser runtime. [Artifact evidence](../../evidence/elgato-7.6/findings.md) |
+| AC-09 | Device brightness, sleep/screensaver and profile/page navigation actions | **Partial, A/C/T.** Profile/page/folder navigation implemented and process-tested. Brightness, sleep and screensaver remain missing. | Execute user-configured actions on hardware, verify ranges/state restoration, and ensure navigation targets the correct device. [Preferences][preferences], [screensaver][screensaver] |
+| AC-10 | Built-in/tutorial onboarding and meaningful errors for unavailable actions | **Partial, A/C/T.** Native editor explains unavailable imported actions and retains their data; tutorial HTML registers. Broader tutorial screens and every default-profile action remain open. | Import untouched default Plus profile; every action either works or has an actionable visible compatibility error. Run tutorial screens through the supported browser runtime. [Artifact evidence](../../evidence/elgato-7.6/findings.md) |
 
 ## Plugin compatibility and rendering contract
 
@@ -266,3 +266,27 @@ This profile checkpoint passes 69 unit/fixture tests, strict Clippy and all six
 optimized-process suites. App-owned native capture uses a copy of the saved
 user session. The installed build opens the real Plus and connects Counter and
 Layouts; its native HTTP editor routes return 404. Evidence: `../../evidence/profiles/`.
+
+
+### System action evidence update, 2026-10-12
+
+`../../evidence/system-action-contracts.json` records original settings and
+source hashes. `../../evidence/dial-system-contracts.json` adds bounded native
+assembly/RTTI/import evidence: dial Hotkeys indices 0 CCW, 1 CW, 2 press/tap;
+media stop3/fast-forward13/rewind14, and composite18 volume controls. This is
+static shipped-artifact evidence, not Windows runtime or recovered Ghidra source.
+
+`tests/system_interop.py` runs actual localhost GET requests and an isolated
+marker executable through the host, checks HTTP failure reporting, responsiveness,
+release ownership and null-settings preservation. It emits no input and opens no
+USB device or browser. Keyboard ownership/translation/frame tests run without
+injection. The separately gated uinput test creates the exact virtual keyboard,
+but skips before emitting any event when its evdev node cannot be read/grabbed.
+The native editor's new controls have preservation tests and app-owned captures.
+These results do not establish real shortcut/media acceptance or full parity.
+
+This checkpoint passes 94 non-injection tests plus the gated test's default
+no-op path, strict Clippy, and seven optimized-process suites. The explicitly
+enabled uinput probe still skipped event emission because `/dev/input/event31`
+was not readable; it verified virtual-device creation/removal only. Logs and
+native captures are in `../../evidence/system-actions/`.
