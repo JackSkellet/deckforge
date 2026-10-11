@@ -1,0 +1,7 @@
+/.serena/
+/rea/
+/evidence/
+/streamdeck-linux/target/
+/streamdeck-linux/state/
+*.log
+__pycache__/
