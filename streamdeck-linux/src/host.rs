@@ -31,6 +31,7 @@ use std::{
 };
 use tokio::sync::mpsc;
 
+mod audio;
 mod display;
 mod export;
 mod inspectors;
@@ -234,6 +235,9 @@ enum HeldControl {
     Dial(u8),
 }
 struct Host {
+    audio: Option<crate::audio_output::Worker>,
+    audio_outputs: Vec<(String, String)>,
+    audio_active: HashMap<String, usize>,
     system_actions: Option<crate::system_actions::Worker>,
     system_status: String,
     library: Library,
@@ -399,7 +403,8 @@ impl Host {
             settings: if controller == "Encoder" && uuid == crate::system_actions::MULTIMEDIA {
                 json!({"actionIdx":18})
             } else {
-                crate::system_actions::defaults(uuid)
+                crate::audio_output::defaults(uuid)
+                    .unwrap_or_else(|| crate::system_actions::defaults(uuid))
             },
             title,
             state: 0,
@@ -541,6 +546,12 @@ impl Host {
                 "com.elgato.streamdeck.page.indicator" => return Ok(()),
                 _ => {}
             }
+        }
+        if crate::audio_output::supported(&slot.uuid) {
+            if owned_release {
+                self.soundboard_action(&slot)?;
+            }
+            return Ok(());
         }
         if crate::system_actions::supported(&slot.uuid) {
             if pressed || owned_release {
@@ -885,7 +896,7 @@ async fn root(
 }
 fn snapshot(host: &Host) -> Value {
     json!({"library":host.library.snapshot(),"running":host.running,"device":host.device,"firmware":host.firmware,"simulate":host.simulate,"connected":host.hardware.is_some(),
-        "system_status":host.system_status,"slots":host.slots.iter().map(|s|json!({"available":host.actions.iter().any(|a|a.uuid==s.uuid),"pinned":s.pinned,"context":s.context,"controller":s.controller,"index":s.index,"uuid":s.uuid,"name":s.name,"settings":s.settings,"title":s.title,"state":s.state,"feedback":s.feedback,"layout":s.layout,"preview":s.preview,"has_inspector":host.actions.iter().find(|a|a.uuid==s.uuid).is_some_and(|a|a.raw["PropertyInspectorPath"].is_string()||host.plugins.iter().find(|p|p.id==a.plugin).is_some_and(|p|p.manifest["PropertyInspectorPath"].is_string()))})).collect::<Vec<_>>(),
+        "audio_outputs":host.audio_outputs,"audio_active":host.audio_active,"system_status":host.system_status,"slots":host.slots.iter().map(|s|json!({"available":host.actions.iter().any(|a|a.uuid==s.uuid),"pinned":s.pinned,"context":s.context,"controller":s.controller,"index":s.index,"uuid":s.uuid,"name":s.name,"settings":s.settings,"title":s.title,"state":s.state,"feedback":s.feedback,"layout":s.layout,"preview":s.preview,"has_inspector":host.actions.iter().find(|a|a.uuid==s.uuid).is_some_and(|a|a.raw["PropertyInspectorPath"].is_string()||host.plugins.iter().find(|p|p.id==a.plugin).is_some_and(|p|p.manifest["PropertyInspectorPath"].is_string()))})).collect::<Vec<_>>(),
         "inspectors":host.inspectors.values().map(|i|json!({"context":i.context,"plugin":host.plugins[i.plugin].id,"connected":i.sender.is_some()})).collect::<Vec<_>>(),"actions":host.actions,"logs":host.logs,"plugins":host.plugins.iter().map(|p|json!({"id":p.id,"name":p.name,"connected":p.sender.is_some()})).collect::<Vec<_>>()})
 }
 async fn dashboard(State(state): State<Shared>) -> Json<Value> {
@@ -1040,6 +1051,16 @@ fn apply_control(host: &mut Host, r: Value) -> Result<()> {
                 _ => bail!("Invalid simulated event"),
             };
             host.input(event)
+        }
+        "soundboard_refresh" => host
+            .audio
+            .get_or_insert_with(crate::audio_output::Worker::new)
+            .refresh(),
+        "soundboard_stop" => {
+            if let Some(worker) = &host.audio {
+                worker.stop_all();
+            }
+            Ok(())
         }
         "settings" => {
             host.editable()?;
@@ -1411,7 +1432,10 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
     };
     let (plugins, mut actions) = load_plugins(plugin_paths)?;
     actions.extend(library::navigation_actions());
-    for (uuid, name, _) in crate::system_actions::definitions() {
+    for (uuid, name, _) in crate::system_actions::definitions()
+        .into_iter()
+        .chain(crate::audio_output::definitions())
+    {
         if actions.iter().any(|a| a.uuid == uuid) {
             bail!("Plugin claims built-in action {uuid}");
         }
@@ -1460,6 +1484,9 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
     library.validate()?;
     let slots = library.visible()?;
     let mut host = Host {
+        audio: None,
+        audio_outputs: Vec::new(),
+        audio_active: HashMap::new(),
         system_actions: None,
         system_status: String::new(),
         library,
@@ -1626,7 +1653,9 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
             match event {
                 Ok(e) => {
                     if let Err(e) = host.input(e) {
-                        host.log(e.to_string());
+                        host.system_status = format!("Action failed: {e:#}");
+                        let message = host.system_status.clone();
+                        host.log(message);
                     }
                 }
                 Err(e) => {
@@ -1678,6 +1707,7 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
             }
             host.monitor_children();
             host.poll_system_actions();
+            host.poll_audio();
         }
     });
     let stop = async move {
@@ -1714,6 +1744,10 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
 }
 
 fn stop_plugins(host: &mut Host) {
+    if let Some(worker) = &host.audio {
+        worker.cancel();
+    }
+
     if let Some(worker) = &host.system_actions {
         worker.cancel();
     }
@@ -1785,6 +1819,9 @@ mod tests {
     }
     fn fixture(root: &Path) -> Host {
         let mut host = Host {
+            audio: None,
+            audio_outputs: Vec::new(),
+            audio_active: HashMap::new(),
             system_actions: None,
             system_status: String::new(),
             library: Library::default(),

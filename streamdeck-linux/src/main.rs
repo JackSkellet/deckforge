@@ -1,3 +1,4 @@
+mod audio_output;
 mod desktop;
 mod hardware;
 mod host;
@@ -5,6 +6,8 @@ mod layout;
 mod package;
 mod profile;
 mod render;
+mod soundboard;
+mod soundboard_editor;
 mod system_actions;
 mod system_editor;
 mod system_keyboard;

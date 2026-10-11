@@ -421,6 +421,18 @@ impl Desktop {
         if !system_status.is_empty() {
             ui.label(system_status);
         }
+        let voices = self.snapshot["audio_active"]
+            .as_object()
+            .map(|v| v.values().filter_map(Value::as_u64).sum::<u64>())
+            .unwrap_or(0);
+        if voices > 0 {
+            ui.horizontal(|ui| {
+                ui.label(format!("Soundboard: {voices} playing"));
+                if ui.button("Stop soundboard").clicked() {
+                    self.command(json!({"command":"soundboard_stop"}));
+                }
+            });
+        }
         if !self.error.is_empty() {
             ui.colored_label(Color32::from_rgb(255, 172, 163), &self.error);
         }
@@ -844,6 +856,20 @@ impl Desktop {
     }
     fn settings_editor(&mut self, ui: &mut egui::Ui, draft: &mut Draft, assigned_action: &str) {
         ui.add_enabled_ui(!draft.raw_dirty, |ui| {
+            let outputs: Vec<(String, String)> =
+                serde_json::from_value(self.snapshot["audio_outputs"].clone()).unwrap_or_default();
+            if let Some(result) =
+                crate::soundboard_editor::edit(ui, assigned_action, &mut draft.settings, &outputs)
+            {
+                if result.changed {
+                    draft.numbers = numeric_strings(&draft.settings);
+                    draft.dirty = true;
+                }
+                if result.refresh_outputs {
+                    self.command(json!({"command":"soundboard_refresh"}));
+                }
+                return;
+            }
             if let Some(changed) = crate::system_editor::edit(
                 ui,
                 assigned_action,

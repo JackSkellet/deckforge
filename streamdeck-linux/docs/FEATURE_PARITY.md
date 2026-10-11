@@ -58,7 +58,7 @@ The shipped profiles contain real action identifiers and settings; their presenc
 | AC-01 | Open application/file/folder, close application, open URL and background request | **Verified subset, A/C/T.** Native Website/Open editors and Linux argv-based execution; actual local background HTTP success/error and executable launch verified. Browser association, Close and Open Application activation/long-press remain open. | Configure through GUI and import fixtures; verify Linux path/app translation, URL handling and explicit background-request behavior. Unmappable Windows paths remain visible and editable. [System actions][system] |
 | AC-02 | Hotkey, hotkey switch, modifiers, text entry and optional Enter | **Partial, A/C/T.** Native shortcut editor, Qt-to-evdev translation, held ownership and exact Plus trigger indices implemented. uinput device creation/removal verified, but event readback skipped for missing event-node read access. Compositor shortcuts, arbitrary layouts, Coalesce, hotkey switch and text remain open. | Exercise a named Linux application under supported X11/Wayland sessions; verify Unicode, modifier release, repeated presses, focus and held keys without stuck input. [System actions][system] |
 | AC-03 | Multimedia transport, mute and volume | **Partial, A/C/T.** Original transport enum and composite volume-dial mapping recovered and implemented through Linux media key events. Real audio/player acceptance and external state feedback remain open. | Play/pause/seek where supported, mute and change volume against real media players; verify externally changed state feeds back. [System actions][system] |
-| AC-04 | Soundboard playback, looping, overlap/restart, fades, volume and output device | **Missing, A/C.** Shipped profiles reference `soundboard.playaudio`; no audio engine exists. | Play supported audio fixtures in each documented mode, route to selected output, stop/retrigger and restart host safely. Verify captured audio and audible output. [Soundboard][soundboard] |
+| AC-04 | Soundboard playback, looping, overlap/restart, fades, volume and output device | **Verified subset, A/C/T.** Native controls, independent streaming mixer and Pulse/PipeWire transport implement four playback modes, volume, fades, routing and soundboard-wide stop. Captured virtual-sink PCM verifies WAV/embedded MP3, volume and fade envelopes. Audible/physical acceptance, Windows timing/visual equivalence and multichannel downmix remain open. | Play supported audio fixtures in each documented mode, route to selected output, stop/retrigger and restart host safely. Verify captured audio and audible output. [Soundboard][soundboard] |
 | AC-05 | Multi Actions, delays, switch/random variants and plugin multi-action context | **Missing, A/C.** Shipped fixtures include routine/delay UUIDs; outgoing events always say `isInMultiAction:false`. | Import/reorder sequences, check measured timing and stateful branches, then verify plugin events with a fixture that consumes multi-action state. Inventory switch/random behavior before marking those variants passed. [Multi Actions][multi], [delay controls][delays] |
 | AC-06 | Dial Stacks | **Missing, A/C.** `com.elgato.streamdeck.dial.stack` appears in shipped profiles. | Load multiple real dial actions; dial push cycles active action and corresponding touch display; settings persist independently. [Dial Stacks][stacks] |
 | AC-07 | Action Trigger adapts key actions to dial directions/press | **Missing, A/C.** Shipped key-adaptor actions are preserved without execution. | Configure three different actions, exercise both rotation directions and press, and verify corresponding plugin key-event semantics. [Action Trigger][trigger] |
@@ -290,3 +290,30 @@ no-op path, strict Clippy, and seven optimized-process suites. The explicitly
 enabled uinput probe still skipped event emission because `/dev/input/event31`
 was not readable; it verified virtual-device creation/removal only. Logs and
 native captures are in `../../evidence/system-actions/`.
+
+
+### Soundboard evidence update, 2026-10-12
+
+`../../evidence/soundboard-contracts.json` records 15 exact shipped media links,
+resource registry/blob hashes, serialized output device identity and bounded
+Stop Audio dispatch. The host resolves archive media without changing foreign
+source paths. Export tests preserve unchanged media byte-for-byte and embed new
+files using the observed FormatVersion1 resource wrapper. Windows import
+acceptance is still unverified.
+
+`src/soundboard.rs` owns streaming decode, resampling, voice ownership and fades.
+`src/audio_output.rs` owns a nonblocking Pulse connection on a worker thread.
+Explicit device routing is checked against the actual connected output before
+samples are sent. Generated PCM tests and `tests/soundboard_interop.py` distinguish
+pure mixing from actual server-output capture; the latter uses an owned null sink
+and preserves the desktop default. A failed first routing test exposed implicit
+server fallback; its log is retained alongside the correction and passing rerun.
+No claim of exact Windows fade curves or audible hardware acceptance follows
+from these tests. Other feature gaps in this ledger remain open.
+
+This soundboard checkpoint passes 112 non-injection tests plus the default
+gated-keyboard no-op path, strict Clippy and eight optimized-process suites.
+Captured amplitude halves at 50% volume; both fade envelopes are measured.
+Native capture, source/binary hashes and output-routing evidence are retained
+in `../../evidence/soundboard/`. The installed build reconnects the real Plus
+and original Counter/Layouts plugins; soundboard hardware acceptance is pending.

@@ -86,8 +86,35 @@ shortcut or real audio change is claimed as verified by the automated tests.
 The latest action result appears in the native window. Network work runs outside
 the editor and input worker. `--simulate` prevents USB access only: configured
 System actions and plugins can still perform their normal OS/network operations.
-Close/Open Application activation, text entry, hotkey switch, soundboard and
-other desktop actions remain on the parity ledger.
+Close/Open Application activation, text entry, hotkey switch and other desktop
+actions remain on the parity ledger.
+
+## Soundboard
+
+Assign **Play audio** to a key, choose a file, and select Play/Stop, Overlap,
+Restart, or Loop/Stop. Volume and one-to-five-second fades are configurable in
+native controls. **Refresh outputs** lists real PipeWire/PulseAudio devices;
+choose one or the desktop default. An unavailable explicit output produces an
+error instead of silently using another device.
+
+**Stop audio** and the native **Stop soundboard** button stop only Deckforge's
+soundboard voices. Page changes preserve ongoing playback; closing the app stops
+it. The Rust mixer streams mono/stereo audio at 48 kHz, using generic Rodio/Symphonia
+codec libraries and a nonblocking native PulseAudio connection. It does not invoke
+an external player. Mixing is limited to 32 voices, eight per action.
+
+Wrapped profiles with `Resources/manifest.json` now resolve embedded media even
+when the saved path points to another operating system. Playback leaves that path
+intact. Exporting a newly selected audio file embeds a fresh resource; unchanged
+imported media keeps its original bytes. The existing profile limits apply,
+including 32 MiB per embedded asset. Original Windows output IDs are preserved;
+`linuxOutput` records your explicit local mapping.
+
+Generated WAV playback and an unchanged bundled MP3 are tested through a temporary
+virtual audio sink, with captured PCM checks for volume and fades. This proves the
+Linux output path; audible speaker/headphone and physical key acceptance remain
+separate. Exact Windows fade curves/timing, multichannel downmix and hardware
+playback/progress graphics remain open. Export acceptance in Windows is unverified.
 
 ## Commands
 
@@ -176,6 +203,7 @@ python tests/native_lifecycle.py
 python tests/profile_interop.py
 python tests/bundled_profiles_interop.py
 python tests/system_interop.py
+python tests/soundboard_interop.py --binary target/release/deckforge
 ```
 
 The optional installer test needs the local Windows artifacts. The sample

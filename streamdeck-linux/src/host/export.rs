@@ -3,7 +3,7 @@
 use super::*;
 use anyhow::ensure;
 use std::collections::{BTreeMap, HashSet};
-use std::io::Write;
+use std::io::{Read, Write};
 
 impl Host {
     pub(super) fn export_profile(&mut self, path: &Path) -> Result<()> {
@@ -62,12 +62,32 @@ pub(super) fn build_profile_files(
         "Profile ID must be one path component"
     );
     ensure!(!profile.pages.is_empty(), "Cannot export an empty profile");
-    let root = format!("{}.sdProfile/", profile.id);
     let source = profile
         .source
         .as_ref()
         .map(|path| profile::load_bundle(path))
         .transpose()?;
+    let added_audio = profile
+        .pages
+        .iter()
+        .flat_map(|page| &page.slots)
+        .any(|slot| {
+            slot.uuid == "com.elgato.streamdeck.soundboard.playaudio"
+                && slot.settings["path"]
+                    .as_str()
+                    .is_some_and(|path| !path.is_empty())
+                && (slot.raw.as_object().is_none_or(|raw| raw.is_empty())
+                    || slot.settings["path"] != slot.raw["Settings"]["path"])
+        });
+    let wrapped = added_audio
+        || source
+            .as_ref()
+            .is_some_and(|bundle| bundle.manifest_path().starts_with("Profiles/"));
+    let root = format!(
+        "{}{}.sdProfile/",
+        if wrapped { "Profiles/" } else { "" },
+        profile.id
+    );
     let mut files = BTreeMap::new();
     if let Some(source) = &source {
         let manifest = source.manifest_path();
@@ -200,6 +220,30 @@ pub(super) fn build_profile_files(
     if raw.get("Device").is_none() {
         raw["Device"] = json!({"Model":"20GBD9901","UUID":profile.device});
     }
+    if wrapped {
+        raw["Version"] = json!("3.0");
+        if !files.contains_key("package.json") {
+            let package = json!({"FormatVersion":1,"DeviceModel":raw["Device"]["Model"],
+                "RequiredPlugins":if added_audio {vec!["com.elgato.streamdeck.soundboard"]} else {vec![]}});
+            files.insert("package.json".into(), serde_json::to_vec_pretty(&package)?);
+        } else if added_audio {
+            let mut package: Value = serde_json::from_slice(&files["package.json"])?;
+            let required = package
+                .as_object_mut()
+                .context("Package metadata must be an object")?
+                .entry("RequiredPlugins")
+                .or_insert_with(|| json!([]))
+                .as_array_mut()
+                .context("RequiredPlugins must be an array")?;
+            if !required
+                .iter()
+                .any(|id| id == "com.elgato.streamdeck.soundboard")
+            {
+                required.push(json!("com.elgato.streamdeck.soundboard"));
+                files.insert("package.json".into(), serde_json::to_vec_pretty(&package)?);
+            }
+        }
+    }
     files.insert(
         format!("{root}manifest.json"),
         serde_json::to_vec_pretty(&raw)?,
@@ -252,7 +296,7 @@ fn insert_controller_slots(
                 controllers.len() - 1
             }
         };
-        if controllers[index].get("Actions").is_none() {
+        if controllers[index].get("Actions").is_none_or(Value::is_null) {
             controllers[index]["Actions"] = json!({});
         }
         let actions = controllers[index]["Actions"]
@@ -300,6 +344,7 @@ fn export_action(
     if native {
         raw = json!({});
     }
+    embed_audio_resource(slot, native, &mut raw, files)?;
     raw["UUID"] = json!(slot.uuid);
     if native {
         raw["Name"] = json!(slot.name);
@@ -374,6 +419,78 @@ fn export_action(
         raw["States"] = json!(states);
     }
     Ok(raw)
+}
+
+fn embed_audio_resource(
+    slot: &Slot,
+    native: bool,
+    raw: &mut Value,
+    files: &mut BTreeMap<String, Vec<u8>>,
+) -> Result<()> {
+    if slot.uuid != "com.elgato.streamdeck.soundboard.playaudio" {
+        return Ok(());
+    }
+    let path = slot.settings["path"].as_str();
+    // An imported resource is authoritative even if its source machine's path
+    // no longer exists. Keep its registry and compressed payload bytes intact.
+    if !native && path == slot.raw["Settings"]["path"].as_str() {
+        return Ok(());
+    }
+    if let Some(resources) = raw.get_mut("Resources").and_then(Value::as_object_mut) {
+        resources.remove("file");
+    }
+    let Some(path) = path.filter(|p| !p.is_empty()) else {
+        return Ok(());
+    };
+    let path = Path::new(path);
+    let file = fs::File::open(path)
+        .with_context(|| format!("Read soundboard media {} for export", path.display()))?;
+    let metadata = file.metadata()?;
+    ensure!(
+        metadata.is_file(),
+        "Soundboard media must be a regular file"
+    );
+    const LIMIT: u64 = 32 * 1024 * 1024;
+    ensure!(
+        metadata.len() <= LIMIT,
+        "Soundboard media exceeds 32 MiB export limit"
+    );
+    let mut bytes = Vec::new();
+    file.take(LIMIT + 1).read_to_end(&mut bytes)?;
+    ensure!(
+        bytes.len() as u64 <= LIMIT,
+        "Soundboard media exceeds 32 MiB export limit"
+    );
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .context("Soundboard filename must be UTF-8")?;
+    safe_export_path(name)?;
+    let id = uuid::Uuid::new_v4().to_string();
+    let relative = format!("{id}/{name}");
+    let mut registry: Value = match files.get("Resources/manifest.json") {
+        Some(bytes) => serde_json::from_slice(bytes).context("Invalid resource registry")?,
+        None => json!({"resources":{}}),
+    };
+    let resources = registry
+        .as_object_mut()
+        .context("Resource registry must be an object")?
+        .entry("resources")
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .context("Resource map must be an object")?;
+    ensure!(!resources.contains_key(&id), "Resource ID collision");
+    resources.insert(id.clone(), json!({"file":relative}));
+    insert_unique(files, format!("Resources/{relative}"), bytes)?;
+    files.insert(
+        "Resources/manifest.json".into(),
+        serde_json::to_vec_pretty(&registry)?,
+    );
+    if !raw["Resources"].is_object() {
+        raw["Resources"] = json!({});
+    }
+    raw["Resources"]["file"] = json!(id);
+    Ok(())
 }
 
 fn original_image(root: &Path, source: &str) -> Result<Option<(Vec<u8>, String)>> {
@@ -550,7 +667,7 @@ mod tests {
                 .iter()
                 .map(|page| library::Page {
                     id: page.page.clone(),
-                    name: page.page.clone(),
+                    name: page.page_raw["Name"].as_str().unwrap_or("").to_owned(),
                     raw: page.page_raw.clone(),
                     source_manifest: Some(page.manifest_path()),
                     manifest_path: page
@@ -807,6 +924,185 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    #[ignore = "requires Elgato 7.6 resource profile artifacts"]
+    fn original_wrapped_media_exports_byte_exact_even_with_foreign_paths() {
+        let root = std::env::var_os("DECKFORGE_ELGATO_RAW")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                Path::new(env!("CARGO_MANIFEST_DIR")).join("../evidence/elgato-7.6/raw")
+            });
+        let temporary = tempfile::tempdir().unwrap();
+        let mut resources = 0;
+        for file in [
+            "flsKaSPXYxUUvmKtC3TdqgYiqQcKKY",
+            "flsLUxNAo3HxRBo8yay7EbNtFyJC9c",
+        ] {
+            let path = root.join(file);
+            let before = profile::load_bundle(&path).unwrap();
+            let mut runtime = imported(&path);
+            // Exercise the host's regenerated outer profile identity too.
+            runtime.id = uuid::Uuid::new_v4().to_string();
+            let files =
+                build_profile_files(&runtime, &before.current_page, &HashMap::new()).unwrap();
+            let output = temporary.path().join(format!("{file}.streamDeckProfile"));
+            write_archive(&output, &files).unwrap();
+            let after = profile::load_bundle(&output).unwrap();
+            assert_eq!(
+                after.manifest_path(),
+                format!("Profiles/{}.sdProfile/manifest.json", runtime.id)
+            );
+            assert_eq!(after.raw["Version"], "3.0");
+            assert_eq!(after.current_page, before.page_order[0]);
+            for (path, bytes) in before
+                .files()
+                .filter(|(path, _)| path.starts_with("Resources/") || *path == "package.json")
+            {
+                assert_eq!(files.get(path).map(Vec::as_slice), Some(bytes), "{path}");
+            }
+            for action in after
+                .pages
+                .iter()
+                .flat_map(|page| &page.slots)
+                .filter(|slot| slot.uuid == "com.elgato.streamdeck.soundboard.playaudio")
+            {
+                let id = action.raw["Resources"]["file"].as_str().unwrap();
+                assert_eq!(after.resource(id).unwrap(), before.resource(id).unwrap());
+                assert!(
+                    action.settings["path"]
+                        .as_str()
+                        .unwrap()
+                        .starts_with("/Users/")
+                );
+                resources += 1;
+            }
+        }
+        assert_eq!(resources, 15);
+    }
+
+    fn local_wav(directory: &Path, name: &str, sample: i16) -> (PathBuf, Vec<u8>) {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"RIFF");
+        bytes.extend_from_slice(&38u32.to_le_bytes());
+        bytes.extend_from_slice(b"WAVEfmt ");
+        bytes.extend_from_slice(&16u32.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&8000u32.to_le_bytes());
+        bytes.extend_from_slice(&16000u32.to_le_bytes());
+        bytes.extend_from_slice(&2u16.to_le_bytes());
+        bytes.extend_from_slice(&16u16.to_le_bytes());
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&2u32.to_le_bytes());
+        bytes.extend_from_slice(&sample.to_le_bytes());
+        let path = directory.join(name);
+        fs::write(&path, &bytes).unwrap();
+        (path, bytes)
+    }
+
+    #[test]
+    fn new_and_edited_local_audio_embed_reimport_without_stale_references() {
+        let temporary = tempfile::tempdir().unwrap();
+        let (source, current, _, _) = source_fixture(temporary.path());
+        let (wav, bytes) = local_wav(temporary.path(), "sound æ.wav", 73);
+        let mut runtime = imported(&source);
+        let slot = &mut runtime
+            .pages
+            .iter_mut()
+            .find(|page| page.id == current)
+            .unwrap()
+            .slots[0];
+        slot.uuid = "com.elgato.streamdeck.soundboard.playaudio".into();
+        slot.raw = json!({});
+        slot.settings = json!({"path":wav,"actionType":1,"volume":50});
+        slot.states = json!([{}]);
+        let output = temporary.path().join("audio.streamDeckProfile");
+        let files = build_profile_files(&runtime, &current, &HashMap::new()).unwrap();
+        write_archive(&output, &files).unwrap();
+        let loaded = profile::load_bundle(&output).unwrap();
+        let action = &loaded.page(&current).unwrap().slots[0];
+        let first_id = action.raw["Resources"]["file"].as_str().unwrap().to_owned();
+        let (member, restored) = loaded.resource(&first_id).unwrap();
+        assert!(member.ends_with("/sound æ.wav"));
+        assert_eq!(restored, bytes);
+        assert!(loaded.manifest_path().starts_with("Profiles/"));
+        assert_eq!(
+            serde_json::from_slice::<Value>(&files["package.json"]).unwrap()["FormatVersion"],
+            1
+        );
+        // Changing the foreign/source path must replace the action reference,
+        // while retaining old source blobs for lossless/shared-resource export.
+        let mut edited = imported(&output);
+        let (replacement, replacement_bytes) = local_wav(temporary.path(), "replacement.wav", -91);
+        let slot = &mut edited
+            .pages
+            .iter_mut()
+            .find(|p| p.id == current)
+            .unwrap()
+            .slots[0];
+        slot.settings["path"] = json!(replacement);
+        let output2 = temporary.path().join("edited.streamDeckProfile");
+        let changed = build_profile_files(&edited, &current, &HashMap::new()).unwrap();
+        write_archive(&output2, &changed).unwrap();
+        let loaded2 = profile::load_bundle(&output2).unwrap();
+        let second_id = loaded2.page(&current).unwrap().slots[0].raw["Resources"]["file"]
+            .as_str()
+            .unwrap();
+        assert_ne!(second_id, first_id);
+        assert_eq!(loaded2.resource(second_id).unwrap().1, replacement_bytes);
+        assert_eq!(loaded2.resource(&first_id).unwrap().1, bytes);
+        // Clearing a previously embedded path must not replay its stale resource.
+        edited
+            .pages
+            .iter_mut()
+            .find(|p| p.id == current)
+            .unwrap()
+            .slots[0]
+            .settings["path"] = json!("");
+        let cleared = build_profile_files(&edited, &current, &HashMap::new()).unwrap();
+        let page = &edited
+            .pages
+            .iter()
+            .find(|p| p.id == current)
+            .unwrap()
+            .manifest_path;
+        let raw: Value =
+            serde_json::from_slice(&cleared[&format!("Profiles/{}.sdProfile/{page}", edited.id)])
+                .unwrap();
+        assert!(
+            raw["Controllers"][0]["Actions"]["0,0"]["Resources"]
+                .get("file")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn oversized_media_is_rejected_before_export() {
+        let temporary = tempfile::tempdir().unwrap();
+        let (source, current, _, _) = source_fixture(temporary.path());
+        let huge = temporary.path().join("too-big.wav");
+        fs::File::create(&huge)
+            .unwrap()
+            .set_len(32 * 1024 * 1024 + 1)
+            .unwrap();
+        let mut runtime = imported(&source);
+        let slot = &mut runtime
+            .pages
+            .iter_mut()
+            .find(|p| p.id == current)
+            .unwrap()
+            .slots[0];
+        slot.uuid = "com.elgato.streamdeck.soundboard.playaudio".into();
+        slot.raw = json!({});
+        slot.settings = json!({"path":huge});
+        assert!(
+            build_profile_files(&runtime, &current, &HashMap::new())
+                .unwrap_err()
+                .to_string()
+                .contains("32 MiB")
+        );
     }
 
     #[test]

@@ -98,6 +98,34 @@ impl ProfileBundle {
             .asset(path)
     }
 
+    /// Resolve an exported resource token through its registry. Return the safe
+    /// full archive path and original bytes, not the stale source machine path.
+    pub fn resource(&self, id: &str) -> Result<(String, Vec<u8>)> {
+        safe_path(id)?;
+        ensure!(!id.contains('/'), "Resource ID must be one path component");
+        let registry = json_file(&self.files, "Resources/manifest.json")?;
+        let relative = registry["resources"]
+            .get(id)
+            .and_then(|entry| entry.get("file"))
+            .and_then(Value::as_str)
+            .with_context(|| format!("Resource {id} has no file mapping"))?;
+        safe_path(relative)?;
+        let path = if relative.starts_with("Resources/") {
+            relative.to_owned()
+        } else {
+            format!("Resources/{relative}")
+        };
+        ensure!(
+            path != "Resources/manifest.json",
+            "Resource cannot reference its registry"
+        );
+        let bytes = self
+            .files
+            .get(&path)
+            .with_context(|| format!("Resource {id} archive file is missing: {path}"))?;
+        Ok((path, bytes.clone()))
+    }
+
     pub fn manifest_path(&self) -> String {
         format!("{}manifest.json", self.pages[0].root)
     }
@@ -280,6 +308,9 @@ fn parse_bundle(files: BTreeMap<String, Vec<u8>>) -> Result<ProfileBundle> {
         .filter(|p| {
             p.as_str() == "manifest.json"
                 || (p.ends_with(".sdProfile/manifest.json") && p.matches('/').count() == 1)
+                || (p.starts_with("Profiles/")
+                    && p.ends_with(".sdProfile/manifest.json")
+                    && p.matches('/').count() == 2)
         })
         .cloned()
         .collect();
@@ -289,9 +320,19 @@ fn parse_bundle(files: BTreeMap<String, Vec<u8>>) -> Result<ProfileBundle> {
         roots.len()
     );
     let raw = json_file(&files, &roots[0])?;
+    if roots[0].starts_with("Profiles/") {
+        let package = json_file(&files, "package.json")?;
+        ensure!(
+            package["FormatVersion"] == 1,
+            "Unsupported wrapped profile package version"
+        );
+    }
     let root = roots[0].trim_end_matches("manifest.json").to_owned();
     let uuid = root
         .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .unwrap_or("")
         .trim_end_matches(".sdProfile")
         .to_owned();
     let name = raw["Name"]
@@ -365,19 +406,27 @@ fn parse_bundle(files: BTreeMap<String, Vec<u8>>) -> Result<ProfileBundle> {
         .and_then(Value::as_str)
         .map(canonical_page_id)
         .unwrap_or_else(|| pages[0].page.clone());
-    let current_page = raw
+    let mut current_page = raw
         .pointer("/Pages/Current")
         .and_then(Value::as_str)
         .map(canonical_page_id)
         .unwrap_or_else(|| default_page.clone());
+    if current_page == "00000000-0000-0000-0000-000000000000"
+        && !pages.iter().any(|page| page.page == current_page)
+    {
+        current_page = page_order
+            .first()
+            .context("Zero Current page requires a declared first page")?
+            .clone();
+        warnings.push(format!(
+            "Current page is the zero UUID sentinel; selected first declared page {current_page}"
+        ));
+    }
     for id in page_order.iter().chain([&default_page, &current_page]) {
-        if !pages.iter().any(|page| &page.page == id)
-            && !warnings
-                .iter()
-                .any(|w| w == &format!("Referenced profile page {id} is missing"))
-        {
-            warnings.push(format!("Referenced profile page {id} is missing"));
-        }
+        ensure!(
+            pages.iter().any(|page| &page.page == id),
+            "Referenced profile page {id} is missing"
+        );
     }
     // Retain the old selected-page API's list of top-level/default/current IDs.
     if !pages[0].page.is_empty() {
@@ -504,6 +553,9 @@ fn decoded_uuid(token: &str) -> Option<String> {
 }
 
 fn parse_slots(controller: &str, actions: &Value, slots: &mut Vec<Slot>) -> Result<()> {
+    if actions.is_null() {
+        return Ok(());
+    }
     for (position, action) in actions
         .as_object()
         .context("Controller Actions must be an object")?
@@ -581,6 +633,133 @@ pub(crate) fn encoded_uuid(uuid: &str) -> Option<String> {
 mod tests {
     use super::*;
     use std::io::{Cursor, Write};
+
+    #[test]
+    fn wrapped_resource_registry_and_current_sentinel_are_strict() {
+        let id = "37aea345-7227-420a-bff0-988d1b05aeaa";
+        let root = "Profiles/example.sdProfile/manifest.json";
+        let mut files=BTreeMap::from([
+            ("package.json".into(),br#"{"FormatVersion":1}"#.to_vec()),
+            (root.into(),serde_json::to_vec(&json!({"Name":"Wrapped","Version":"3.0","Pages":{"Default":id,"Current":"00000000-0000-0000-0000-000000000000","Pages":[id]}})).unwrap()),
+            (format!("Profiles/example.sdProfile/Profiles/{id}/manifest.json"),br#"{"Controllers":[{"Type":"Keypad","Actions":null}]}"#.to_vec()),
+            ("Resources/manifest.json".into(),br#"{"resources":{"media":{"file":"media/sound.wav"}}}"#.to_vec()),
+            ("Resources/media/sound.wav".into(),b"original-media".to_vec()),
+        ]);
+        let bundle = parse_bundle(files.clone()).unwrap();
+        assert_eq!(bundle.uuid, "example");
+        assert_eq!(bundle.current_page, id);
+        assert!(
+            bundle
+                .warnings
+                .iter()
+                .any(|w| w.contains("zero UUID sentinel"))
+        );
+        assert_eq!(
+            bundle.resource("media").unwrap(),
+            (
+                "Resources/media/sound.wav".into(),
+                b"original-media".to_vec()
+            )
+        );
+        assert!(bundle.resource("../media").is_err());
+        assert!(bundle.resource("missing").is_err());
+        for path in [
+            "../outside.wav",
+            "/etc/passwd",
+            "C:\\media.wav",
+            "Resources/manifest.json",
+            "media/missing.wav",
+        ] {
+            files.insert(
+                "Resources/manifest.json".into(),
+                serde_json::to_vec(&json!({"resources":{"media":{"file":path}}})).unwrap(),
+            );
+            assert!(
+                parse_bundle(files.clone())
+                    .unwrap()
+                    .resource("media")
+                    .is_err(),
+                "{path}"
+            );
+        }
+        files.insert(
+            "Resources/manifest.json".into(),
+            br#"{"resources":{"media":{"file":"Resources/media/sound.wav"}}}"#.to_vec(),
+        );
+        assert!(
+            parse_bundle(files.clone())
+                .unwrap()
+                .resource("media")
+                .is_ok()
+        );
+        let mut raw: Value = serde_json::from_slice(&files[root]).unwrap();
+        raw["Pages"]["Current"] = json!("missing-page");
+        files.insert(root.into(), serde_json::to_vec(&raw).unwrap());
+        assert!(
+            parse_bundle(files)
+                .unwrap_err()
+                .to_string()
+                .contains("missing")
+        );
+    }
+
+    #[test]
+    #[ignore = "requires Elgato 7.6 resource profile artifacts"]
+    fn actual_wrapped_soundboard_resources_match_original_mp3_bytes() {
+        let root = std::env::var_os("DECKFORGE_ELGATO_RAW")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                Path::new(env!("CARGO_MANIFEST_DIR")).join("../evidence/elgato-7.6/raw")
+            });
+        let mut count = 0;
+        for file in [
+            "flsKaSPXYxUUvmKtC3TdqgYiqQcKKY",
+            "flsLUxNAo3HxRBo8yay7EbNtFyJC9c",
+        ] {
+            let path = root.join(file);
+            let bundle = load_bundle(&path).unwrap();
+            assert!(bundle.manifest_path().starts_with("Profiles/"));
+            assert!(!bundle.uuid.contains('/'));
+            assert_eq!(bundle.current_page, bundle.page_order[0]);
+            assert!(
+                bundle
+                    .warnings
+                    .iter()
+                    .any(|w| w.contains("zero UUID sentinel"))
+            );
+            let mut archive = zip::ZipArchive::new(fs::File::open(path).unwrap()).unwrap();
+            let registry: Value =
+                serde_json::from_reader(archive.by_name("Resources/manifest.json").unwrap())
+                    .unwrap();
+            for action in bundle
+                .pages
+                .iter()
+                .flat_map(|p| &p.slots)
+                .filter(|s| s.uuid == "com.elgato.streamdeck.soundboard.playaudio")
+            {
+                let id = action.raw["Resources"]["file"].as_str().unwrap();
+                let expected = format!(
+                    "Resources/{}",
+                    registry["resources"][id]["file"].as_str().unwrap()
+                );
+                let mut original = Vec::new();
+                archive
+                    .by_name(&expected)
+                    .unwrap()
+                    .read_to_end(&mut original)
+                    .unwrap();
+                assert_eq!(bundle.resource(id).unwrap(), (expected, original));
+                assert!(
+                    action.settings["path"]
+                        .as_str()
+                        .unwrap()
+                        .starts_with("/Users/")
+                );
+                count += 1;
+            }
+        }
+        assert_eq!(count, 15);
+    }
 
     fn fixture(name: &str) -> std::path::PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
