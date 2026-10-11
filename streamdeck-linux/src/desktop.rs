@@ -163,10 +163,61 @@ fn numeric_strings(settings: &Value) -> HashMap<String, String> {
 fn string<'a>(value: &'a Value, key: &str) -> &'a str {
     value[key].as_str().unwrap_or("")
 }
+fn page_label(page: &Value) -> String {
+    let name = string(page, "name");
+    let name = if name.trim().is_empty() {
+        "Untitled page"
+    } else {
+        name
+    };
+    if page["folder"] == true {
+        format!("Folder · {name}")
+    } else {
+        name.to_owned()
+    }
+}
+fn export_file_name(name: &str) -> String {
+    let name: String = name
+        .chars()
+        .map(|c| {
+            if c.is_control() || matches!(c, '/' | '\\') {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect();
+    let name = name.trim().trim_matches('.');
+    format!(
+        "{}.streamDeckProfile",
+        if name.is_empty() { "Profile" } else { name }
+    )
+}
 
 struct Preview {
     encoded: String,
     texture: Option<TextureHandle>,
+}
+#[derive(Default)]
+struct NameDraft {
+    id: String,
+    name: String,
+    original: String,
+}
+impl NameDraft {
+    fn reconcile(&mut self, id: &str, name: &str) {
+        if self.id != id || self.name == self.original {
+            self.id = id.to_owned();
+            self.name = name.to_owned();
+            self.original = name.to_owned();
+        }
+    }
+}
+#[derive(Clone)]
+struct PendingDelete {
+    profile: bool,
+    id: String,
+    name: String,
 }
 struct Desktop {
     controller: Controller,
@@ -181,7 +232,9 @@ struct Desktop {
     profile_path: String,
     new_setting: String,
     new_kind: u8,
-    confirm_import: bool,
+    profile_name: NameDraft,
+    page_name: NameDraft,
+    pending_delete: Option<PendingDelete>,
     capture: Option<Capture>,
 }
 impl Desktop {
@@ -202,7 +255,9 @@ impl Desktop {
             profile_path: String::new(),
             new_setting: String::new(),
             new_kind: 0,
-            confirm_import: false,
+            profile_name: NameDraft::default(),
+            page_name: NameDraft::default(),
+            pending_delete: None,
             capture: None,
         }
     }
@@ -369,6 +424,197 @@ impl Desktop {
             ui.colored_label(ACCENT, &self.notice);
         }
     }
+    fn profile_navigation(&mut self, ui: &mut egui::Ui) {
+        let library = self.snapshot["library"].clone();
+        let profiles = library["profiles"].as_array().cloned().unwrap_or_default();
+        let active_profile = string(&library, "active_profile");
+        let profile = profiles.iter().find(|p| string(p, "id") == active_profile);
+        let active_page = string(&library, "active_page");
+        let pages = profile
+            .and_then(|p| p["pages"].as_array())
+            .cloned()
+            .unwrap_or_default();
+        let pin_page = profile.map(|p| string(p, "pin_page")).unwrap_or("");
+        let page = pages.iter().find(|p| string(p, "id") == active_page);
+        let order = profile.and_then(|p| p["page_order"].as_array());
+        ui.horizontal_wrapped(|ui| {
+            ui.label("Profile");
+            egui::ComboBox::from_id_salt("profile_picker")
+                .selected_text(profile.map(|p| string(p, "name")).unwrap_or("No profile"))
+                .width(210.0)
+                .show_ui(ui, |ui| {
+                    for profile in &profiles {
+                        let id = string(profile, "id");
+                        if ui
+                            .selectable_label(id == active_profile, string(profile, "name"))
+                            .clicked()
+                            && id != active_profile
+                        {
+                            self.command(json!({"command":"profile_select","id":id}));
+                        }
+                    }
+                });
+            ui.label("Page");
+            egui::ComboBox::from_id_salt("page_picker")
+                .selected_text(if active_page == pin_page {
+                    "Pinned actions".into()
+                } else {
+                    page.map(page_label).unwrap_or_else(|| "No page".into())
+                })
+                .width(210.0)
+                .show_ui(ui, |ui| {
+                    for page in &pages {
+                        let id = string(page, "id");
+                        if ui
+                            .selectable_label(id == active_page, page_label(page))
+                            .clicked()
+                            && id != active_page
+                        {
+                            self.command(json!({"command":"page_select","id":id}));
+                        }
+                    }
+                });
+            if ui
+                .add_enabled(active_page != pin_page, egui::Button::new("Pinned actions"))
+                .clicked()
+            {
+                self.command(json!({"command":"page_select","id":pin_page}));
+            }
+            for (label, direction) in [("Previous page", -1), ("Next page", 1)] {
+                if ui
+                    .add_enabled(order.is_some_and(|o| o.len() > 1), egui::Button::new(label))
+                    .clicked()
+                {
+                    self.command(json!({"command":"page_step","direction":direction}));
+                }
+            }
+            if ui
+                .add_enabled(
+                    library["folder_depth"].as_u64().unwrap_or(0) > 0,
+                    egui::Button::new(if active_page == pin_page {
+                        "Back to page"
+                    } else {
+                        "Back from folder"
+                    }),
+                )
+                .clicked()
+            {
+                self.command(json!({"command":"folder_back"}));
+            }
+        });
+        ui.separator();
+    }
+    fn profile_management(&mut self, ui: &mut egui::Ui) {
+        let library = self.snapshot["library"].clone();
+        let active_id = string(&library, "active_profile");
+        let profile = library["profiles"]
+            .as_array()
+            .and_then(|ps| ps.iter().find(|p| string(p, "id") == active_id))
+            .cloned()
+            .unwrap_or(json!({}));
+        let page_id = string(&library, "active_page");
+        let page = profile["pages"]
+            .as_array()
+            .and_then(|ps| ps.iter().find(|p| string(p, "id") == page_id))
+            .cloned()
+            .unwrap_or(json!({}));
+        self.profile_name
+            .reconcile(active_id, string(&profile, "name"));
+        self.page_name.reconcile(page_id, string(&page, "name"));
+        egui::CollapsingHeader::new("Manage profiles & pages").show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                if ui.button("New profile").clicked() && self.command(json!({"command":"profile_create","name":"New profile"})) {
+                    self.notice = "Profile created".into();
+                }
+                if ui.add_enabled(!active_id.is_empty(), egui::Button::new("Duplicate profile")).clicked()
+                    && self.command(json!({"command":"profile_duplicate","id":active_id,"name":format!("{} copy",string(&profile,"name"))})) {
+                    self.notice = "Profile duplicated".into();
+                }
+                if ui.add_enabled(!active_id.is_empty(), egui::Button::new("Export profile…")).clicked()
+                    && let Some(mut path) = rfd::FileDialog::new().set_title("Export Elgato profile")
+                        .add_filter("Stream Deck profile", &["streamDeckProfile"])
+                        .set_file_name(export_file_name(string(&profile,"name"))).save_file() {
+                    if path.extension().is_none() { path.set_extension("streamDeckProfile"); }
+                    if self.command(json!({"command":"export_profile","path":path})) {
+                        self.notice = format!("Profile exported to {}", path.display());
+                    }
+                }
+            });
+            ui.add_enabled_ui(!active_id.is_empty(), |ui| {
+                let label = ui.label("Profile name");
+                ui.horizontal(|ui| {
+                    ui.add(egui::TextEdit::singleline(&mut self.profile_name.name).desired_width((ui.available_width()-115.0).max(140.0))).labelled_by(label.id);
+                    if ui.add_enabled(!self.profile_name.name.trim().is_empty(),egui::Button::new("Rename")).clicked()
+                        && self.command(json!({"command":"profile_rename","id":active_id,"name":self.profile_name.name.trim()})) {
+                        self.profile_name.original = self.profile_name.name.clone(); self.notice = "Profile renamed".into();
+                    }
+                });
+                if ui.button("Delete profile…").clicked() {
+                    self.pending_delete = Some(PendingDelete { profile: true, id: active_id.to_owned(), name: string(&profile,"name").to_owned() });
+                }
+                ui.separator();
+                ui.horizontal_wrapped(|ui| {
+                    if ui.button("New page").clicked() && self.command(json!({"command":"page_create","name":"New page"})) {
+                        self.notice = "Page created".into();
+                    }
+                    if ui.add_enabled(!page_id.is_empty(),egui::Button::new("Duplicate page")).clicked()
+                        && self.command(json!({"command":"page_duplicate","id":page_id,"name":format!("{} copy",string(&page,"name"))})) {
+                        self.notice = "Page duplicated".into();
+                    }
+                });
+                ui.add_enabled_ui(!page_id.is_empty(), |ui| {
+                    let label = ui.label("Page name");
+                    ui.horizontal(|ui| {
+                        ui.add(egui::TextEdit::singleline(&mut self.page_name.name).desired_width((ui.available_width()-115.0).max(140.0))).labelled_by(label.id);
+                        if ui.add_enabled(!self.page_name.name.trim().is_empty(),egui::Button::new("Rename")).clicked()
+                            && self.command(json!({"command":"page_rename","id":page_id,"name":self.page_name.name.trim()})) {
+                            self.page_name.original = self.page_name.name.clone(); self.notice = "Page renamed".into();
+                        }
+                    });
+                    ui.horizontal_wrapped(|ui| {
+                        let order = profile["page_order"].as_array();
+                        let position = order.and_then(|order| order.iter().position(|id| id == page_id));
+                        for (label, direction, enabled) in [
+                            ("Move earlier", -1, position.is_some_and(|p| p > 0)),
+                            ("Move later", 1, position.is_some_and(|p| order.is_some_and(|o| p + 1 < o.len())))
+                        ] {
+                            if ui.add_enabled(enabled,egui::Button::new(label)).clicked() {
+                                self.command(json!({"command":"page_move","id":page_id,"direction":direction}));
+                            }
+                        }
+                        if ui.button("Delete page…").clicked() {
+                            self.pending_delete = Some(PendingDelete { profile: false, id: page_id.to_owned(), name: page_label(&page) });
+                        }
+                    });
+                });
+            });
+        });
+    }
+    fn deletion_dialog(&mut self, ctx: &egui::Context) {
+        let Some(target) = self.pending_delete.clone() else {
+            return;
+        };
+        let kind = if target.profile { "profile" } else { "page" };
+        let response = egui::Modal::new(egui::Id::new("delete_library_item")).show(ctx, |ui| {
+            ui.set_max_width(420.0);
+            ui.heading(format!("Delete {kind}?"));
+            ui.label(format!("Delete {kind} \"{}\"{}?", target.name,
+                if target.profile { " and all of its pages" } else { " and its assigned actions" }));
+            ui.label("This cannot be undone.");
+            ui.horizontal(|ui| {
+                if ui.button("Cancel").clicked() { self.pending_delete = None; }
+                if ui.add(egui::Button::new(format!("Delete {kind}")).fill(Color32::from_rgb(105,39,43))).clicked() {
+                    self.pending_delete = None;
+                    if self.command(json!({"command":if target.profile { "profile_delete" } else { "page_delete" },"id":target.id})) {
+                        self.notice = format!("{} deleted", if target.profile { "Profile" } else { "Page" });
+                    }
+                }
+            });
+        });
+        if response.should_close() {
+            self.pending_delete = None;
+        }
+    }
     fn device(&mut self, ui: &mut egui::Ui) {
         ui.heading("Your controls");
         ui.label("Select a key or dial to edit its action.");
@@ -452,6 +698,25 @@ impl Desktop {
                 .filter(|s| !s.is_empty())
                 .unwrap_or("No action assigned"),
         );
+        if let Some(slot) = &slot {
+            if slot["available"] == false {
+                ui.colored_label(
+                    Color32::YELLOW,
+                    "This action is unavailable. Its saved settings are retained.",
+                );
+                ui.label(string(slot, "uuid"));
+            }
+            let mut pinned = slot["pinned"].as_bool().unwrap_or(false);
+            if ui
+                .checkbox(&mut pinned, "Pin across pages")
+                .on_hover_text("Keep this control on every page in this profile")
+                .changed()
+            {
+                self.command(
+                    json!({"command":"slot_pin","context":slot["context"],"pinned":pinned}),
+                );
+            }
+        }
         let stale = draft.dirty
             && draft.context != slot.as_ref().map(|s| string(s, "context")).unwrap_or("");
         if stale {
@@ -520,6 +785,30 @@ impl Desktop {
             }
             if ui.add_enabled(slot.is_some(), egui::Button::new("Test press")).clicked() { self.test_press(selection); }
         });
+        if !selection.dial {
+            let active_profile = string(&self.snapshot["library"], "active_profile");
+            let readonly =
+                self.snapshot["library"]["profiles"]
+                    .as_array()
+                    .is_some_and(|profiles| {
+                        profiles.iter().any(|profile| {
+                            string(profile, "id") == active_profile && profile["readonly"] == true
+                        })
+                    });
+            if ui
+                .add_enabled(!readonly, egui::Button::new("Create folder here"))
+                .on_hover_text(
+                    "Assign a new folder to this key. Rename it using Manage profiles & pages.",
+                )
+                .clicked()
+                && self.command(
+                    json!({"command":"folder_create","name":"New folder","index":selection.index}),
+                )
+            {
+                draft.dirty = false;
+                self.notice = "Folder created".into();
+            }
+        }
         ui.add_space(8.0);
         ui.add_enabled_ui(slot.is_some() && !stale, |ui| {
             let title_label = ui.label("Title on device");
@@ -657,6 +946,8 @@ impl Desktop {
     }
     fn library(&mut self, ui: &mut egui::Ui) {
         ui.add_space(16.0);
+        self.profile_management(ui);
+        ui.add_space(8.0);
         ui.heading("Plugins & profiles");
         if let Some(plugins) = self.snapshot["plugins"].as_array() {
             if plugins.is_empty() {
@@ -735,28 +1026,15 @@ impl Desktop {
         if ui
             .add_enabled(
                 !self.profile_path.trim().is_empty(),
-                egui::Button::new("Import profile…"),
+                egui::Button::new("Import profile"),
             )
             .clicked()
+            && self.command(json!({"command":"import_profile","path":self.profile_path.trim()}))
         {
-            self.confirm_import = true;
+            self.notice = "Profile added to your library. Existing profiles are preserved.".into();
+            self.profile_path.clear();
         }
-        if self.confirm_import {
-            ui.label("Import replaces the current assignments. Unfinished edits stay in this window until you discard them.");
-            ui.horizontal(|ui| {
-                if ui.button("Replace assignments").clicked() {
-                    self.confirm_import = false;
-                    if self.command(
-                        json!({"command":"import_profile","path":self.profile_path.trim()}),
-                    ) {
-                        self.notice = "Profile imported".into();
-                    }
-                }
-                if ui.button("Cancel").clicked() {
-                    self.confirm_import = false;
-                }
-            });
-        }
+        ui.small("Import adds a profile to your library.");
     }
 }
 
@@ -773,6 +1051,7 @@ impl eframe::App for Desktop {
             .inner_margin(20)
             .show(ui, |ui| {
                 self.toolbar(ui);
+                self.profile_navigation(ui);
                 let available = ui.available_width();
                 if available > 920.0 {
                     let left_width = (available * 0.52).clamp(440.0, 580.0);
@@ -812,12 +1091,35 @@ impl eframe::App for Desktop {
                     });
                 }
             });
+        self.deletion_dialog(ui.ctx());
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn profile_name_polling_preserves_edits_but_resets_on_selection_change() {
+        let mut name = NameDraft::default();
+        name.reconcile("profile-a", "Original");
+        name.name = "Unfinished rename".into();
+        name.reconcile("profile-a", "Remote rename");
+        assert_eq!(name.name, "Unfinished rename");
+        name.reconcile("profile-b", "Another profile");
+        assert_eq!(name.name, "Another profile");
+        name.reconcile("profile-b", "Updated externally");
+        assert_eq!(name.name, "Updated externally");
+    }
+    #[test]
+    fn export_filename_cannot_introduce_directories() {
+        assert_eq!(
+            export_file_name("../../Desk\\work"),
+            "_.._Desk_work.streamDeckProfile"
+        );
+        assert_eq!(export_file_name("..."), "Profile.streamDeckProfile");
+        assert_eq!(export_file_name("Musikk æ"), "Musikk æ.streamDeckProfile");
+        assert!(!export_file_name("name\nnext").contains('\n'));
+    }
     #[test]
     fn polling_preserves_unsaved_settings_and_title() {
         let old = json!({"context":"one","uuid":"counter","title":"Before","settings":{"count":1}});

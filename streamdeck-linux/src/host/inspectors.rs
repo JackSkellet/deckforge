@@ -232,6 +232,7 @@ impl Host {
                     sender.send(self.settings_event(&self.slots[slot_index], message.get("id")));
             }
             "setSettings" => {
+                self.editable()?;
                 if !payload.is_object() {
                     bail!("Settings must be an object");
                 }

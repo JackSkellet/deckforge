@@ -7,6 +7,7 @@ use std::{
     fs,
     io::Read,
     path::Path,
+    sync::Arc,
 };
 
 const MAX_FILES: usize = 10_000;
@@ -37,7 +38,7 @@ pub struct LoadedProfile {
     pub raw: Value,
     pub page_raw: Value,
     #[serde(skip)]
-    files: BTreeMap<String, Vec<u8>>,
+    files: Arc<BTreeMap<String, Vec<u8>>>,
     #[serde(skip)]
     root: String,
     #[serde(skip)]
@@ -57,17 +58,73 @@ impl LoadedProfile {
         bail!("Embedded profile asset not found: {path}")
     }
 
-    pub fn warn_unknown_actions(&mut self, known: &HashSet<String>) {
-        let mut seen = HashSet::new();
-        for slot in &self.slots {
-            if !known.contains(&slot.uuid) && seen.insert(&slot.uuid) {
-                self.warnings.push(format!(
-                    "Action {} is preserved but has no installed handler",
-                    slot.uuid
-                ));
-            }
+    /// Archive path of this page's manifest, for lossless export updates.
+    pub fn manifest_path(&self) -> String {
+        format!("{}manifest.json", self.page_root)
+    }
+}
+
+/// The entire profile, including hidden folder pages and untouched archive assets.
+/// Each page shares the same immutable archive storage, so selecting a page does
+/// not reread the ZIP or copy its images.
+#[derive(Debug, Clone, Serialize)]
+pub struct ProfileBundle {
+    pub name: String,
+    pub uuid: String,
+    pub raw: Value,
+    pub default_page: String,
+    pub current_page: String,
+    /// Declared top-level page order. Folder/default pages remain in `pages`.
+    pub page_order: Vec<String>,
+    pub pages: Vec<LoadedProfile>,
+    pub warnings: Vec<String>,
+    #[serde(skip)]
+    files: Arc<BTreeMap<String, Vec<u8>>>,
+}
+
+impl ProfileBundle {
+    pub fn page(&self, id: &str) -> Option<&LoadedProfile> {
+        let id = if id == "default" {
+            self.default_page.clone()
+        } else {
+            canonical_page_id(id)
+        };
+        self.pages.iter().find(|p| p.page == id)
+    }
+
+    pub fn asset(&self, page: &str, path: &str) -> Result<Vec<u8>> {
+        self.page(page)
+            .with_context(|| format!("Unknown profile page {page}"))?
+            .asset(path)
+    }
+
+    pub fn manifest_path(&self) -> String {
+        format!("{}manifest.json", self.pages[0].root)
+    }
+
+    /// Original safe archive paths and bytes, including unknown files. Exporters
+    /// can replace selected manifest entries while retaining every other file.
+    pub fn files(&self) -> impl Iterator<Item = (&str, &[u8])> {
+        self.files
+            .iter()
+            .map(|(path, data)| (path.as_str(), data.as_slice()))
+    }
+}
+
+pub fn load_bundle(path: &Path) -> Result<ProfileBundle> {
+    let mut bundle = parse_bundle(read_files(path)?)?;
+    if bundle.uuid.is_empty() && path.is_dir() {
+        bundle.uuid = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .trim_end_matches(".sdProfile")
+            .to_owned();
+        for page in &mut bundle.pages {
+            page.uuid = bundle.uuid.clone();
         }
     }
+    Ok(bundle)
 }
 
 /// Load the currently selected page, falling back to the default page.
@@ -77,17 +134,21 @@ pub fn load(path: &Path) -> Result<LoadedProfile> {
 
 /// Select a page by UUID, encoded directory name, or the literal "default".
 pub fn load_page(path: &Path, selected: Option<&str>) -> Result<LoadedProfile> {
-    let files = read_files(path)?;
-    let mut loaded = parse(files, selected)?;
-    if loaded.uuid.is_empty() && path.is_dir() {
-        loaded.uuid = path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("")
-            .trim_end_matches(".sdProfile")
-            .to_owned();
+    select_page(&load_bundle(path)?, selected)
+}
+
+fn select_page(bundle: &ProfileBundle, selected: Option<&str>) -> Result<LoadedProfile> {
+    if bundle.pages.len() == 1 && bundle.pages[0].page.is_empty() {
+        ensure!(
+            selected.is_none(),
+            "A page-only profile cannot select another page"
+        );
     }
-    Ok(loaded)
+    let page = selected.unwrap_or(&bundle.current_page);
+    bundle
+        .page(page)
+        .cloned()
+        .with_context(|| format!("Selected page {page} is missing; refusing to guess another page"))
 }
 
 fn safe_path(path: &str) -> Result<()> {
@@ -208,7 +269,12 @@ fn json_file(files: &BTreeMap<String, Vec<u8>>, path: &str) -> Result<Value> {
         .with_context(|| format!("Invalid JSON in {path}"))
 }
 
+#[cfg(test)]
 fn parse(files: BTreeMap<String, Vec<u8>>, selected: Option<&str>) -> Result<LoadedProfile> {
+    select_page(&parse_bundle(files)?, selected)
+}
+
+fn parse_bundle(files: BTreeMap<String, Vec<u8>>) -> Result<ProfileBundle> {
     let roots: Vec<_> = files
         .keys()
         .filter(|p| {
@@ -222,84 +288,163 @@ fn parse(files: BTreeMap<String, Vec<u8>>, selected: Option<&str>) -> Result<Loa
         "Expected one profile root manifest, found {}",
         roots.len()
     );
-    let root_manifest = &roots[0];
-    let raw = json_file(&files, root_manifest)?;
-    let root = root_manifest.trim_end_matches("manifest.json").to_owned();
+    let raw = json_file(&files, &roots[0])?;
+    let root = roots[0].trim_end_matches("manifest.json").to_owned();
     let uuid = root
         .trim_end_matches('/')
         .trim_end_matches(".sdProfile")
         .to_owned();
-    let mut warnings = Vec::new();
-    let mut pages: Vec<String> = raw
+    let name = raw["Name"]
+        .as_str()
+        .unwrap_or("Imported profile")
+        .to_owned();
+    let files = Arc::new(files);
+    let page_order: Vec<String> = raw
         .pointer("/Pages/Pages")
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
         .filter_map(Value::as_str)
-        .map(str::to_owned)
+        .map(canonical_page_id)
         .collect();
-    for key in ["Default", "Current"] {
-        if let Some(id) = raw
-            .pointer(&format!("/Pages/{key}"))
-            .and_then(Value::as_str)
-            && !pages.iter().any(|p| p == id)
+    let mut warnings = Vec::new();
+    let mut pages = Vec::new();
+    if raw.get("Controllers").is_some() || raw.get("Actions").is_some() {
+        pages.push(make_page(
+            &name,
+            &uuid,
+            "",
+            &[],
+            raw.clone(),
+            raw.clone(),
+            files.clone(),
+            &root,
+            &root,
+        )?);
+    } else {
+        let prefix = format!("{root}Profiles/");
+        let mut seen = HashSet::new();
+        for manifest in files.keys() {
+            let Some(directory) = manifest
+                .strip_prefix(&prefix)
+                .and_then(|p| p.strip_suffix("/manifest.json"))
+                .filter(|p| !p.is_empty() && !p.contains('/'))
+            else {
+                continue;
+            };
+            let id = canonical_page_id(directory);
+            ensure!(seen.insert(id.clone()), "Ambiguous profile page ID {id}");
+            let page_root = manifest.trim_end_matches("manifest.json");
+            let page_raw = json_file(&files, manifest)?;
+            pages.push(make_page(
+                &name,
+                &uuid,
+                &id,
+                &page_order,
+                raw.clone(),
+                page_raw,
+                files.clone(),
+                &root,
+                page_root,
+            )?);
+        }
+        ensure!(!pages.is_empty(), "Profile contains no embedded pages");
+        // Present declared pages first, then every hidden page in canonical order.
+        pages.sort_by_key(|p| {
+            (
+                page_order
+                    .iter()
+                    .position(|id| id == &p.page)
+                    .unwrap_or(usize::MAX),
+                p.page.clone(),
+            )
+        });
+    }
+    let default_page = raw
+        .pointer("/Pages/Default")
+        .and_then(Value::as_str)
+        .map(canonical_page_id)
+        .unwrap_or_else(|| pages[0].page.clone());
+    let current_page = raw
+        .pointer("/Pages/Current")
+        .and_then(Value::as_str)
+        .map(canonical_page_id)
+        .unwrap_or_else(|| default_page.clone());
+    for id in page_order.iter().chain([&default_page, &current_page]) {
+        if !pages.iter().any(|page| &page.page == id)
+            && !warnings
+                .iter()
+                .any(|w| w == &format!("Referenced profile page {id} is missing"))
         {
-            pages.push(id.to_owned());
+            warnings.push(format!("Referenced profile page {id} is missing"));
         }
     }
-    let selected = if selected == Some("default") {
-        Some(
-            raw.pointer("/Pages/Default")
-                .and_then(Value::as_str)
-                .context("Profile has no default page")?,
-        )
-    } else {
-        selected
-    };
-    let page = selected
-        .or_else(|| raw.pointer("/Pages/Current").and_then(Value::as_str))
-        .or_else(|| raw.pointer("/Pages/Default").and_then(Value::as_str))
-        .or_else(|| pages.first().map(String::as_str))
-        .map(str::to_owned);
-    let (page, page_root, page_data) =
-        if raw.get("Controllers").is_some() || raw.get("Actions").is_some() {
-            ensure!(
-                selected.is_none(),
-                "A page-only profile cannot select another page"
-            );
-            (String::new(), root.clone(), raw.clone())
-        } else {
-            let page = page.context("Profile has no page selection")?;
-            safe_path(&page)?;
-            let mut candidates = vec![format!("{root}Profiles/{page}/")];
-            if let Some(encoded) = encoded_uuid(&page) {
-                candidates.push(format!("{root}Profiles/{encoded}/"));
+    // Retain the old selected-page API's list of top-level/default/current IDs.
+    if !pages[0].page.is_empty() {
+        let mut compatibility_pages = page_order.clone();
+        for id in [&default_page, &current_page] {
+            if !compatibility_pages.contains(id) {
+                compatibility_pages.push(id.clone());
             }
-            let page_root = candidates
-                .into_iter()
-                .find(|p| files.contains_key(&format!("{p}manifest.json")))
-                .with_context(|| {
-                    format!("Selected page {page} is missing; refusing to guess another page")
-                })?;
-            let data = json_file(&files, &format!("{page_root}manifest.json"))?;
-            (page, page_root, data)
-        };
+        }
+        for page in &mut pages {
+            page.pages = compatibility_pages.clone();
+        }
+    }
+    Ok(ProfileBundle {
+        name,
+        uuid,
+        raw,
+        default_page,
+        current_page,
+        page_order,
+        pages,
+        warnings,
+        files,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn make_page(
+    name: &str,
+    uuid: &str,
+    page: &str,
+    pages: &[String],
+    raw: Value,
+    page_data: Value,
+    files: Arc<BTreeMap<String, Vec<u8>>>,
+    root: &str,
+    page_root: &str,
+) -> Result<LoadedProfile> {
     let mut slots = Vec::new();
+    let mut warnings = Vec::new();
     if let Some(controllers) = page_data.get("Controllers").and_then(Value::as_array) {
         for controller in controllers {
             let kind = controller
                 .get("Type")
                 .and_then(Value::as_str)
-                .context("Controller has no Type")?;
+                .unwrap_or("{Unknown}");
             if !["Keypad", "Encoder"].contains(&kind) {
                 warnings.push(format!("Unsupported controller {kind} is preserved"));
+                let mut unknown_slots = Vec::new();
+                // Unknown controller schemas must survive even when their action
+                // coordinates/settings differ from current key/dial conventions.
+                match parse_slots(kind, &controller["Actions"], &mut unknown_slots) {
+                    Ok(()) => slots.extend(unknown_slots),
+                    Err(error) => warnings.push(format!(
+                        "Controller {kind} remains in raw page data: {error}"
+                    )),
+                }
+            } else {
+                parse_slots(kind, &controller["Actions"], &mut slots)?;
             }
-            parse_slots(kind, &controller["Actions"], &mut slots)?;
         }
     } else if page_data.get("Actions").is_some() {
         parse_slots("Keypad", &page_data["Actions"], &mut slots)?;
     } else {
-        bail!("Page contains no Controllers or Actions");
+        warnings.push(
+            "Page has no recognized Controllers or Actions; raw page is preserved".to_owned(),
+        );
     }
     let mut occupied = HashSet::new();
     for slot in &slots {
@@ -313,21 +458,49 @@ fn parse(files: BTreeMap<String, Vec<u8>>, selected: Option<&str>) -> Result<Loa
     }
     slots.sort_by_key(|s| (s.controller.clone(), s.row, s.column));
     Ok(LoadedProfile {
-        name: raw["Name"]
-            .as_str()
-            .unwrap_or("Imported profile")
-            .to_owned(),
-        uuid,
-        page,
-        pages,
+        name: name.to_owned(),
+        uuid: uuid.to_owned(),
+        page: page.to_owned(),
+        pages: pages.to_vec(),
         slots,
         warnings,
         raw,
         page_raw: page_data,
         files,
-        root,
-        page_root,
+        root: root.to_owned(),
+        page_root: page_root.to_owned(),
     })
+}
+
+/// Normalize UUID references and Elgato's encoded page-directory tokens. Opaque
+/// non-UUID IDs stay verbatim, so future profile formats retain their identity.
+pub fn canonical_page_id(id: &str) -> String {
+    decoded_uuid(id)
+        .or_else(|| uuid::Uuid::parse_str(id).ok().map(|u| u.to_string()))
+        .unwrap_or_else(|| id.to_owned())
+}
+
+fn decoded_uuid(token: &str) -> Option<String> {
+    let token = token.to_ascii_uppercase();
+    let encoded = token.strip_suffix('Z')?;
+    if encoded.len() != 26 {
+        return None;
+    }
+    let alphabet = b"0123456789ABCDEFGHIJKLMNOPQRSTVW";
+    let (mut buffer, mut bits) = (0u32, 0u32);
+    let mut bytes = Vec::with_capacity(16);
+    for ch in encoded.bytes() {
+        let value = alphabet.iter().position(|&c| c == ch)? as u32;
+        buffer = (buffer << 5) | value;
+        bits += 5;
+        if bits >= 8 {
+            bits -= 8;
+            bytes.push((buffer >> bits) as u8);
+        }
+    }
+    let id = uuid::Uuid::from_slice(&bytes).ok()?.to_string();
+    // The final two bits are padding; reject aliases with nonzero padding.
+    (encoded_uuid(&id)? == token).then_some(id)
 }
 
 fn parse_slots(controller: &str, actions: &Value, slots: &mut Vec<Slot>) -> Result<()> {
@@ -373,7 +546,7 @@ fn parse_slots(controller: &str, actions: &Value, slots: &mut Vec<Slot>) -> Resu
 
 /// Elgato fixtures encode UUID bytes as base32hex, skipping U, followed by Z.
 /// Verified against all twelve page references in the six official profiles.
-fn encoded_uuid(uuid: &str) -> Option<String> {
+pub(crate) fn encoded_uuid(uuid: &str) -> Option<String> {
     let compact: String = uuid.chars().filter(|c| *c != '-').collect();
     if compact.len() != 32 || !compact.is_ascii() {
         return None;
@@ -432,18 +605,124 @@ mod tests {
     }
 
     #[test]
+    fn whole_official_profiles_share_storage_and_resolve_every_page_alias() {
+        for name in ["sdp", "sd-mini", "sd-mobile", "sd-neo", "sd", "sdxl"] {
+            let bundle = load_bundle(&fixture(&format!("{name}.streamDeckProfile"))).unwrap();
+            assert_eq!(bundle.pages.len(), 2);
+            assert_eq!(bundle.page_order, vec![bundle.current_page.clone()]);
+            assert!(bundle.page("default").unwrap().slots.is_empty());
+            assert!(bundle.warnings.is_empty());
+            for page in &bundle.pages {
+                assert!(Arc::ptr_eq(&bundle.files, &page.files));
+                assert_eq!(page.page, canonical_page_id(&page.page.to_uppercase()));
+                let encoded = encoded_uuid(&page.page).unwrap();
+                assert_eq!(bundle.page(&encoded).unwrap().page, page.page);
+                assert_eq!(
+                    bundle.page(&page.page.to_uppercase()).unwrap().page,
+                    page.page
+                );
+                let bytes = bundle
+                    .files()
+                    .find(|(path, _)| *path == page.manifest_path())
+                    .unwrap()
+                    .1;
+                assert_eq!(
+                    serde_json::from_slice::<Value>(bytes).unwrap(),
+                    page.page_raw
+                );
+            }
+            let root = bundle
+                .files()
+                .find(|(path, _)| *path == bundle.manifest_path())
+                .unwrap()
+                .1;
+            assert_eq!(serde_json::from_slice::<Value>(root).unwrap(), bundle.raw);
+        }
+    }
+
+    #[test]
+    fn bundle_keeps_unlisted_folders_unknown_schemas_and_all_assets() {
+        let current = "37aea345-7227-420a-bff0-988d1b05aeaa";
+        let child = "75560e74-1759-4cf4-8cfb-91d738b906c4";
+        let first = encoded_uuid(current).unwrap();
+        let second = encoded_uuid(child).unwrap();
+        let mut files = BTreeMap::new();
+        files.insert(
+            "manifest.json".into(),
+            serde_json::to_vec(&json!({"Name":"Tree","FutureRoot":{"x":1},
+            "Pages":{"Default":current,"Current":current,"Pages":[current]}}))
+            .unwrap(),
+        );
+        files.insert(format!("Profiles/{first}/manifest.json"),serde_json::to_vec(&json!({"Controllers":[{"Type":"Keypad",
+            "Actions":{"0,0":{"UUID":"com.elgato.streamdeck.profile.openchild","Settings":{"ProfileUUID":child},"States":[]}}}]})).unwrap());
+        let unknown = json!({"FuturePage":true,"Controllers":[{"Type":"FutureTouch","Actions":[{"arbitrary":"format"}],"Unrecognized":7}]});
+        files.insert(
+            format!("Profiles/{second}/manifest.json"),
+            serde_json::to_vec(&unknown).unwrap(),
+        );
+        files.insert(format!("Profiles/{second}/Images/icon.png"), vec![1, 2, 3]);
+        files.insert("Images/global.png".into(), vec![4, 5, 6]);
+        files.insert("Unrecognized/file.dat".into(), vec![7, 8]);
+        let bundle = parse_bundle(files).unwrap();
+        assert_eq!(bundle.pages.len(), 2);
+        assert_eq!(bundle.page_order, vec![current]);
+        assert_eq!(bundle.page(child).unwrap().page_raw, unknown);
+        assert_eq!(bundle.raw["FutureRoot"]["x"], 1);
+        assert_eq!(bundle.asset(child, "Images/icon.png").unwrap(), [1, 2, 3]);
+        assert_eq!(bundle.asset(child, "Images/global.png").unwrap(), [4, 5, 6]);
+        assert!(bundle.asset(child, "../Unrecognized/file.dat").is_err());
+        assert!(
+            bundle
+                .files()
+                .any(|(path, bytes)| path == "Unrecognized/file.dat" && bytes == [7, 8])
+        );
+        assert_eq!(
+            bundle.page(current).unwrap().slots[0].settings["ProfileUUID"],
+            child
+        );
+        assert!(bundle.page(child).unwrap().slots.is_empty());
+        assert_eq!(bundle.page(child).unwrap().warnings.len(), 2);
+        assert!(Arc::ptr_eq(&bundle.pages[0].files, &bundle.pages[1].files));
+    }
+
+    #[test]
+    fn encoded_ids_reject_noncanonical_padding_and_ambiguous_pages() {
+        let id = "37aea345-7227-420a-bff0-988d1b05aeaa";
+        let encoded = encoded_uuid(id).unwrap();
+        assert_eq!(decoded_uuid(&encoded).unwrap(), id);
+        assert!(decoded_uuid("6VNA6HBI4T10LFWGJ26HM1DEL9Z").is_none());
+        let mut files = BTreeMap::new();
+        files.insert(
+            "manifest.json".into(),
+            serde_json::to_vec(&json!({"Pages":{"Current":id}})).unwrap(),
+        );
+        for directory in [id, &encoded] {
+            files.insert(
+                format!("Profiles/{directory}/manifest.json"),
+                serde_json::to_vec(&json!({"Actions":{}})).unwrap(),
+            );
+        }
+        assert!(
+            parse_bundle(files)
+                .unwrap_err()
+                .to_string()
+                .contains("Ambiguous profile page ID")
+        );
+    }
+
+    #[test]
     fn preserves_unknown_dials_and_assets() {
         let mut files = BTreeMap::new();
         files.insert("manifest.json".into(),serde_json::to_vec(&json!({"Name":"Custom","Controllers":[{"Type":"Encoder","Actions":{"2,0":{"UUID":"unknown.action","Settings":{"value":42},"States":[{"Image":"Images/dial.png","Title":"Dial"}],"FutureField":true}}}]})).unwrap());
         files.insert("Images/dial.png".into(), vec![1, 2, 3]);
-        let mut loaded = parse(files, None).unwrap();
-        loaded.warn_unknown_actions(&HashSet::new());
+        let loaded = parse(files, None).unwrap();
+        assert_eq!(loaded.slots[0].uuid, "unknown.action");
         assert_eq!(loaded.slots[0].column, 2);
         assert_eq!(loaded.slots[0].raw["FutureField"], true);
         assert_eq!(loaded.slots[0].states[0]["Title"], "Dial");
         assert_eq!(loaded.asset("Images/dial.png").unwrap(), vec![1, 2, 3]);
         assert!(loaded.asset("../secret").is_err());
-        assert_eq!(loaded.warnings.len(), 1);
+        assert!(loaded.warnings.is_empty());
     }
 
     #[test]
@@ -548,6 +827,30 @@ mod tests {
             ),
         ] {
             let path = root.join(file);
+            let bundle = load_bundle(&path).unwrap();
+            assert_eq!(bundle.pages.len(), 8);
+            assert_eq!(bundle.page_order.len(), 2);
+            let mut counts: Vec<_> = bundle.pages.iter().map(|p| p.slots.len()).collect();
+            counts.sort_unstable();
+            assert_eq!(
+                counts,
+                if file == "flsysF8Fq6CoTq162E1zc6fyeIlKcw" {
+                    vec![0, 0, 5, 10, 10, 11, 11, 15]
+                } else {
+                    vec![0, 0, 7, 10, 10, 11, 11, 15]
+                }
+            );
+            for page in &bundle.pages {
+                assert!(uuid::Uuid::parse_str(&page.page).is_ok());
+                assert!(Arc::ptr_eq(&page.files, &bundle.files));
+                for action in &page.slots {
+                    if action.uuid == "com.elgato.streamdeck.profile.openchild" {
+                        let target = action.settings["ProfileUUID"].as_str().unwrap();
+                        assert!(bundle.page(target).is_some(), "Missing folder {target}");
+                    }
+                }
+                println!("{file} {}: {} slots", page.page, page.slots.len());
+            }
             let loaded = load(&path).unwrap();
             assert_eq!(loaded.raw["Device"]["Model"], "20GBD9901");
             assert_eq!(loaded.name, "Default Profile");

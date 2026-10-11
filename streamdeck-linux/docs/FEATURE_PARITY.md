@@ -39,14 +39,14 @@ Desktop interaction requirements come from the official [plugin setup guide][plu
 | ID | Required behavior | Baseline status and evidence | Evidence needed to pass |
 | --- | --- | --- | --- |
 | PR-01 | Read existing `.streamDeckProfile` archives/directories without losing unknown data | **Verified subset, A/T.** Six SDK sample profiles and two shipped Plus profiles import; raw fields, settings, states and images are retained. | Expand corpus to user exports from supported app versions and device types. Compare complete logical trees and assets, including missing plugins and non-ASCII names. [Profiles][profiles] |
-| PR-02 | Profile library: create, rename, duplicate, delete, select and bind to device | **Missing, C.** A single CLI-selected current page becomes active slots. | Perform each operation through native GUI, restart, and verify stable per-profile identities and device associations. [Preferences][preferences] |
-| PR-03 | Pages: create/reorder/delete, next/previous/go-to and page indicator | **Partial, A/C.** Page metadata and encoded UUID folders parse; active page navigation is absent. | Import both shipped Plus profiles; change every page with GUI, action and swipe; verify boundary behavior and action disappearance/appearance ordering. [Pages release][pages] |
-| PR-04 | Nested folders, return-to-parent and configured auto-exit | **Partial, A/T.** Folder UUID references resolve in parser tests; host does not execute folder navigation. | Traverse nested folders from shipped profiles; return to exact parent/page; check per-folder and per-action auto-exit timers. [Auto folder exit][autoexit] |
-| PR-05 | Pinned actions/folders with page-specific overrides | **Missing, C.** Default page parses but no inheritance/rendering rule is implemented. | A pinned slot appears across pages, a page override wins locally, and unpin preserves intended assignments. Do not assume an empty Default page means pins are unsupported. [Pinned actions][pinned] |
-| PR-06 | Export profiles and action-sharing files; interoperable import/export round trip | **Missing, C.** Import is read-only; session JSON is not an Elgato export. | Linux export imports into official Windows app; Windows export reimports into Linux with equivalent pages, folders, actions, settings and assets. [Profiles][profiles], [sharing][sharing] |
+| PR-02 | Profile library: create, rename, duplicate, delete, select and bind to device | **Verified subset, C/T.** Native library create/rename/duplicate/delete/select and restart persistence implemented for one Plus device; multi-device bindings remain open. | Perform each operation through native GUI, restart, and verify stable per-profile identities and device associations. [Preferences][preferences] |
+| PR-03 | Pages: create/reorder/delete, next/previous/go-to and page indicator | **Verified subset, A/C/T.** Native page CRUD/reorder, next/previous/indicator and swipe navigation implemented. Held controls release before disappearing; stable pinned contexts retain ownership. Serialized go-to settings and physical swipe acceptance remain open. | Import both shipped Plus profiles; change every page with GUI, action and swipe; verify boundary behavior and action disappearance/appearance ordering. [Pages release][pages] |
+| PR-04 | Nested folders, return-to-parent and configured auto-exit | **Verified subset, A/T.** Shipped folder/back links navigate, with per-profile folder cursor restoration. Configured auto-exit remains missing. | Traverse nested folders from shipped profiles; return to exact parent/page; check per-folder and per-action auto-exit timers. [Auto folder exit][autoexit] |
+| PR-05 | Pinned actions/folders with page-specific overrides | **Verified subset, C/T.** Pins span pages/folders, local overrides win, hidden pins have a dedicated editor, and unpin preserves placements. Mapping the Default page to pin storage remains an inference until a nonempty Windows pin export is obtained. | A pinned slot appears across pages, a page override wins locally, and unpin preserves intended assignments. Do not assume an empty Default page means pins are unsupported. [Pinned actions][pinned] |
+| PR-06 | Export profiles and action-sharing files; interoperable import/export round trip | **Partial, A/C/T.** Original-format profile ZIP export preserves source fields, assets and duplicate-page references; both shipped Plus round trips pass. Windows app acceptance and action-sharing files remain unverified. | Linux export imports into official Windows app; Windows export reimports into Linux with equivalent pages, folders, actions, settings and assets. [Profiles][profiles], [sharing][sharing] |
 | PR-07 | Backup/restore all profiles and migrations without data loss | **Missing, A/C.** Binary contains `ProfilesV2`, `ProfilesV3` and a migration literal; no migration control flow was recovered. | Restore `.StreamDeckProfilesBackup`; test interrupted migration, old backups, rollback and missing-plugin preservation against real fixtures. [Backups][backups] |
 | PR-08 | Smart Profiles switch according to focused application | **Missing, C.** No focus monitoring or application bindings. | On supported Linux desktop sessions, focus configured apps, return to default, and verify editing does not cause disruptive switching. Record compositor-specific restrictions honestly. [Smart Profiles][smart] |
-| PR-09 | Plugin-bundled profiles and authorized profile switching | **Missing, C.** Manifest `Profiles` is not acted upon; `switchToProfile` is unsupported. | Unchanged official Lights Out plugin installs/activates its declared profile and returns correctly. Validate device/page and manifest profile-access rules. [SDK profiles][profiles] |
+| PR-09 | Plugin-bundled profiles and authorized profile switching | **Verified subset, A/C/T.** Unchanged Lights Out auto-imports its Plus profile and runs real game/image logic. SDK switching validates registration, device, declared profile and page; read-only and persisted bundle bindings tested. | Unchanged official Lights Out plugin installs/activates its declared profile and returns correctly. Validate device/page and manifest profile-access rules. [SDK profiles][profiles] |
 | PR-10 | Embedded resources, dependency discovery and repair of missing plugins | **Partial, A/C.** Unknown action UUIDs are retained/inactive. General resource import/export and dependency installation are absent. | Import a 7.1+ profile containing media/resources; install a missing plugin and regain function without recreating action settings. [Resources][resources], [7.1 release][release71] |
 
 ## Built-in actions and action composition
@@ -101,14 +101,14 @@ The shipped profiles contain real action identifiers and settings; their presenc
 | HW-01 | Stream Deck+ discovery, serial selection and device identity | **Verified subset, H.** Recorded real `0fd9:0084` and firmware `2.0.3.4`; one active device per host. | Native device picker, correct serial persistence, attach/detach while app is running and another device present. [Plus HID][hidplus] |
 | HW-02 | Eight key images and full touch-strip output | **Verified subset, H/U.** Real JPEG writes and user confirmation recorded in README; no new hardware test in this document pass. | Repeat across restarts/profile changes; measure sustained updates and verify orientation, no stale slots and no dropped frames under plugin load. [Plus HID][hidplus] |
 | HW-03 | Key transitions, dial push/release, rotation while pressed | **Verified subset, H/T.** Live key/dial inputs observed and decoder tests exist. | Exercise all positions, simultaneous/rapid controls and reconnect; verify exact plugin events and no stuck press state. [Plus HID][hidplus] |
-| HW-04 | Touch tap/hold and swipe navigation | **Partial, C/T.** Packets decode and tap routing exists. Swipe is logged as unimplemented; full touch acceptance unproven. | Physically tap/hold all four segments and swipe between real pages. Compare local coordinates, direction, hold semantics and visible effects. [Touch guide][touch] |
+| HW-04 | Touch tap/hold and swipe navigation | **Partial, C/T.** Tap routing and swipe page navigation implemented; full physical touch/hold/swipe acceptance remains open. | Physically tap/hold all four segments and swipe between real pages. Compare local coordinates, direction, hold semantics and visible effects. [Touch guide][touch] |
 | HW-05 | Per-action/dial/whole-strip backgrounds | **Partial, C.** Fixed renderer background and imported key images; full touch background layers absent. | Configure and import all three official touch-strip layers; verify composition and retained settings. [Touch guide][touch] |
 | HW-06 | Brightness, naming, sleep, lock behavior, screensaver and wake | **Missing, C.** Firmware query exists; persistent device controls not exercised. | Set values through GUI, observe physical device; lock/unlock and timer wake restore correct profile without spurious actions. [Preferences][preferences], [screensaver][screensaver] |
 | HW-07 | USB reconnect, suspend/resume and startup permission handling | **Partial, C.** Disconnect is logged; user must restart host. | Unplug/replug same and different serials, suspend/resume, and start without access; recover automatically with actionable permission UI and intact state. [Device protocol][hidgeneral] |
 | HW-08 | Multiple devices and cross-device profile actions | **Missing, C.** One connected device per host instance. | Operate two devices concurrently with independent profiles; switch one device from another and test removal while the other remains active. [Multiple devices][devices] |
 | HW-09 | Other models, Neo Infobar, + XL, Mobile/virtual devices and Network Dock | **Missing/Unresolved, D/C.** HID implementation targets Plus only. | Inventory 7.6 supported surfaces and transport contracts; implement each, then run real hardware/network/mobile acceptance. Simulated layouts alone are insufficient. [7.6 release][release76], [7.1 release][release71], [layouts][layouts] |
 | HW-10 | Firmware inspection/update workflow | **Partial, C/H.** Current firmware can be read; updater absent. | Separate update eligibility from write operations; validate correct model/image and recovery using authorized devices. Retain explicit unresolved status until a safe supported update path exists. [Preferences][preferences], [7.1 release][release71] |
-| OS-01 | Native package, launcher, autostart and clean uninstall | **Missing, C.** Workspace executable and shell launcher only. | Install/uninstall on a clean supported Linux system; launcher works outside repository; data migration/retention and login lifecycle are verified. User desktop requirement; [7.6 autostart fix][release76]. |
+| OS-01 | Native package, launcher, autostart and clean uninstall | **Partial, C/T/H/U.** Per-user optimized binary and validated desktop launcher installed, settings migrated with original retained. Clean-machine uninstall/autostart remain open. | Install/uninstall on a clean supported Linux system; launcher works outside repository; data migration/retention and login lifecycle are verified. User desktop requirement; [7.6 autostart fix][release76]. |
 | OS-02 | Audio routing and per-app/input/output controls | **Missing/Unresolved, A/C.** Shipped Plus profile includes volume-controller actions; no Linux audio integration. | Imported actions control real Linux input/output/app streams with equivalent mute/volume feedback and reconnect behavior. A placeholder volume number is insufficient. [7.1 plugin note][release71], [soundboard][soundboard] |
 | OS-03 | OAuth/account-backed and companion-app integrations | **Missing/Unresolved, D/A.** No account UI/credential flow; platform companion apps may be unavailable on Linux. | Keep a named compatibility matrix for real plugins and required services; validate actual login, refresh, actions and logout using supported APIs. Preserve unresolved dependencies instead of claiming universal compatibility. [7.6 plugins][release76], [preferences][preferences] |
 | OS-04 | MCP/virtual-deck control introduced before 7.6 | **Missing/Unresolved, D/C.** No MCP endpoint or virtual-deck runtime. | Inspect the official 7.4 contract; authorize a client, enumerate/configure its virtual deck, and exercise real actions with connection/revocation tests. [7.4 release][release74] |
@@ -238,7 +238,31 @@ Native mode now exposes its plugin WebSocket only; the browser editor/control
 HTTP routes are confined to the explicit diagnostic `serve` mode. This is a
 verified transport distinction, not a claim of complete desktop parity.
 
-Remaining lifecycle boundary: rapid reassignment can reject late messages for a
-retired action context. The layout interop test waits for startup responses before
-reassigning; page/folder lifecycle and late-message semantics still need broader
-acceptance alongside PR-02/PR-03/PL-05.
+The following profile pass adds ownership-aware retirement: late messages from
+the owning plugin are ignored for removed contexts, while hidden-page settings
+still persist. Unknown and cross-plugin contexts remain rejected.
+
+
+### Profile library evidence update, 2026-10-12
+
+The native editor now manages profiles, pages, folders and pinned actions.
+`tests/profile_interop.py` drives real plugin lifecycle events, hidden-page settings,
+local pin overrides, folder return, export/reimport and restart persistence. It
+imports a hash-pinned Windows Plus archive and compares original manifest fields
+and asset bytes. Exporter unit tests cover both shipped Plus archives, duplicates,
+deletions and root-only profiles. User confirmation of the new native management
+and physical swipe workflows is still pending.
+
+`tests/bundled_profiles_interop.py` runs the unchanged Lights Out HTML plugin and
+checks actual SVG-backed PNG pixels after a game move. A generated SDK caller
+checks declared-profile access, lazy import, read-only edits, return/cursor behavior
+and invalid requests without unwanted imports. Neither suite opens USB.
+
+Default-page pin storage is inferred from the available artifacts and official
+pin behavior. Windows acceptance of exported archives is not established. Smart
+profiles, folder auto-exit, full backups and action-sharing files remain open.
+
+This profile checkpoint passes 69 unit/fixture tests, strict Clippy and all six
+optimized-process suites. App-owned native capture uses a copy of the saved
+user session. The installed build opens the real Plus and connects Counter and
+Layouts; its native HTTP editor routes return 404. Evidence: `../../evidence/profiles/`.

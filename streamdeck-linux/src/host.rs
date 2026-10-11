@@ -21,7 +21,7 @@ use image::{DynamicImage, GenericImage, Rgb, RgbImage};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet, VecDeque},
     fs::{self, File},
     io::Cursor,
     path::{Path, PathBuf},
@@ -32,8 +32,11 @@ use std::{
 use tokio::sync::mpsc;
 
 mod display;
+mod export;
 mod inspectors;
+mod library;
 use inspectors::Inspector;
+use library::Library;
 
 type Shared = Arc<Mutex<Host>>;
 
@@ -127,6 +130,14 @@ struct Slot {
     feedback: Value,
     layout: String,
     #[serde(default)]
+    raw: Value,
+    #[serde(default)]
+    image_changed: bool,
+    #[serde(default)]
+    title_changed: bool,
+    #[serde(skip)]
+    pinned: bool,
+    #[serde(default)]
     states: Value,
     #[serde(default, with = "image_serde")]
     background: Option<DynamicImage>,
@@ -205,6 +216,8 @@ mod image_serde {
 #[derive(Serialize, Deserialize, Default)]
 struct Saved {
     #[serde(default)]
+    library: Option<Library>,
+    #[serde(default)]
     plugins: Vec<PathBuf>,
     slots: Vec<Slot>,
     #[serde(default)]
@@ -215,7 +228,14 @@ enum Draw {
     Strip(DynamicImage),
     Stop,
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum HeldControl {
+    Key(u8),
+    Dial(u8),
+}
 struct Host {
+    library: Library,
+    profile_assets: HashMap<PathBuf, profile::ProfileBundle>,
     diagnostics: bool,
     running: bool,
     inspectors: HashMap<String, Inspector>,
@@ -233,6 +253,9 @@ struct Host {
     logs: Vec<String>,
     simulate: bool,
     dial_pressed: [bool; 4],
+    held: HashMap<HeldControl, String>,
+    released: HashSet<HeldControl>,
+    retired: VecDeque<(String, String)>,
 }
 
 fn action_payload(slot: &Slot) -> Value {
@@ -240,82 +263,9 @@ fn action_payload(slot: &Slot) -> Value {
 }
 impl Host {
     fn import_profile(&mut self, path: &Path) -> Result<()> {
-        let mut imported = profile::load(path)?;
-        // Preserve the previous working session before replacing its active page.
-        if self.state_path.exists() {
-            fs::copy(
-                &self.state_path,
-                self.state_path.with_extension("before-import.json"),
-            )?;
-        }
-        self.close_inspectors(None);
-        for slot in &self.slots {
-            self.emit(slot, "willDisappear", json!({}));
-        }
-
-        imported.warn_unknown_actions(&self.actions.iter().map(|a| a.uuid.clone()).collect());
-        self.slots.clear();
-        for s in &imported.slots {
-            if !((s.controller == "Keypad" && s.column < 4 && s.row < 2)
-                || (s.controller == "Encoder" && s.column < 4 && s.row == 0))
-            {
-                self.log(format!(
-                    "Preserved in source but not placed: out-of-range {} {},{}",
-                    s.controller, s.column, s.row
-                ));
-                continue;
-            }
-            let index = if s.controller == "Encoder" {
-                s.column
-            } else {
-                s.row * 4 + s.column
-            };
-            let state = s.raw["State"].as_u64().unwrap_or(0);
-            let name = s.raw["Name"].as_str().unwrap_or(&s.uuid).to_owned();
-            let mut background = None;
-            if let Some(path) = s.states[state as usize]["Image"].as_str() {
-                background = imported
-                    .asset(path)
-                    .ok()
-                    .and_then(|bytes| image::load_from_memory(&bytes).ok());
-            }
-            self.slots.push(Slot {
-                context: uuid::Uuid::new_v4().to_string(),
-                controller: s.controller.clone(),
-                index,
-                uuid: s.uuid.clone(),
-                name: name.clone(),
-                settings: s.settings.clone(),
-                title: s.states[state as usize]["Title"]
-                    .as_str()
-                    .unwrap_or(&name)
-                    .into(),
-                state,
-                feedback: json!({}),
-                layout: "$B1".into(),
-                states: s.states.clone(),
-                background,
-                layout_cache: None,
-                image_cache: HashMap::new(),
-                display_warnings: Vec::new(),
-                preview: String::new(),
-            });
-            if !self.actions.iter().any(|a| a.uuid == s.uuid) {
-                self.log(format!(
-                    "Profile action {} has no installed compatible plugin; retained, inactive",
-                    s.uuid
-                ));
-            }
-        }
-        for warning in &imported.warnings {
-            self.log(warning);
-        }
-
-        for slot in &self.slots {
-            self.emit(slot, "willAppear", json!({}));
-        }
-        self.render()?;
-        self.persist()
+        self.sync_visible();
+        let id = self.import_library(path, None, false)?;
+        self.select_profile(&id, None)
     }
     fn log(&mut self, message: impl Into<String>) {
         let message = message.into();
@@ -325,20 +275,34 @@ impl Host {
             self.logs.remove(0);
         }
     }
-    fn persist(&self) -> Result<()> {
+    fn persist(&mut self) -> Result<()> {
+        self.sync_visible();
         let pending = self.state_path.with_extension("tmp");
         #[derive(Serialize)]
         struct View<'a> {
+            library: &'a Library,
             plugins: Vec<&'a Path>,
             slots: &'a [Slot],
             globals: &'a HashMap<String, Value>,
         }
         let data = serde_json::to_vec_pretty(&View {
+            library: &self.library,
             plugins: self.plugins.iter().map(|p| p.root.as_path()).collect(),
             slots: &self.slots,
             globals: &self.globals,
         })?;
-        fs::write(&pending, data)?;
+        {
+            use std::io::Write;
+            use std::os::unix::fs::OpenOptionsExt;
+            let mut file = fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(&pending)?;
+            file.write_all(&data)?;
+            file.sync_all()?;
+        }
         fs::rename(pending, &self.state_path)?;
         Ok(())
     }
@@ -418,26 +382,11 @@ impl Host {
                 action.raw["Encoder"]["layout"].as_str().unwrap_or("$B1"),
             )?;
         }
-        let old_context = self
-            .slots
-            .iter()
-            .find(|s| s.controller == controller && s.index == index)
-            .map(|s| s.context.clone());
-        if let Some(context) = old_context {
-            self.close_inspectors(Some(&context));
-        }
-        if let Some(old) = self
-            .slots
-            .iter()
-            .find(|s| s.controller == controller && s.index == index)
-        {
-            self.emit(old, "willDisappear", json!({}));
-        }
-        self.slots
-            .retain(|s| !(s.controller == controller && s.index == index));
+        self.editable()?;
+        self.sync_visible();
         let title = action.raw["States"][0]["Title"]
             .as_str()
-            .unwrap_or(&action.name)
+            .unwrap_or("")
             .to_owned();
         let mut slot = Slot {
             context: uuid::Uuid::new_v4().to_string(),
@@ -453,6 +402,10 @@ impl Host {
                 .as_str()
                 .unwrap_or("$B1")
                 .into(),
+            raw: json!({}),
+            image_changed: false,
+            title_changed: false,
+            pinned: false,
             states: action.raw["States"].clone(),
             background: None,
             layout_cache: None,
@@ -463,50 +416,157 @@ impl Host {
         if let Some(plugin) = self.plugins.iter().find(|p| p.id == action.plugin) {
             slot.background = state_image(&plugin.root, &slot.states, 0);
         }
-        self.emit(&slot, "willAppear", json!({}));
-        self.slots.push(slot);
-        self.render()?;
-        self.persist()
+        self.library.place(slot)?;
+        self.refresh_page()
+    }
+    fn remember_removed(&mut self, context: &str, action: &str) {
+        if let Some(owner) = self
+            .actions
+            .iter()
+            .find(|a| a.uuid == action)
+            .map(|a| a.plugin.clone())
+        {
+            self.retired.push_back((context.into(), owner));
+            while self.retired.len() > 256 {
+                self.retired.pop_front();
+            }
+        }
+    }
+    fn cancel_departing_inputs(&mut self, visible: &HashSet<String>) {
+        let departing: Vec<_> = self
+            .held
+            .iter()
+            .filter(|(_, context)| !visible.contains(*context))
+            .map(|(control, context)| (*control, context.clone()))
+            .collect();
+        for (control, context) in departing {
+            if let Some(slot) = self.slots.iter().find(|slot| slot.context == context) {
+                self.emit(
+                    slot,
+                    if matches!(control, HeldControl::Key(_)) {
+                        "keyUp"
+                    } else {
+                        "dialUp"
+                    },
+                    json!({}),
+                );
+            }
+            self.held.remove(&control);
+            self.released.insert(control);
+        }
+    }
+    fn button_input(&mut self, control: HeldControl, pressed: bool) -> Result<()> {
+        let (controller, index, down, up) = match control {
+            HeldControl::Key(index) if index < 8 => ("Keypad", index, "keyDown", "keyUp"),
+            HeldControl::Dial(index) if index < 4 => {
+                self.dial_pressed[index as usize] = pressed;
+                ("Encoder", index, "dialDown", "dialUp")
+            }
+            _ => bail!("Input outside device geometry"),
+        };
+        if !pressed && self.released.remove(&control) {
+            return Ok(());
+        }
+        let slot = if pressed {
+            self.released.remove(&control);
+            let slot = self
+                .slots
+                .iter()
+                .find(|s| s.controller == controller && s.index == index)
+                .cloned();
+            if let Some(slot) = &slot {
+                self.held.insert(control, slot.context.clone());
+            }
+            slot
+        } else if let Some(context) = self.held.remove(&control) {
+            self.slots
+                .iter()
+                .find(|s| s.context == context)
+                .or_else(|| self.library.slot(&context))
+                .cloned()
+        } else {
+            self.slots
+                .iter()
+                .find(|s| s.controller == controller && s.index == index)
+                .cloned()
+        };
+        let Some(slot) = slot else {
+            return Ok(());
+        };
+        if matches!(control, HeldControl::Key(_)) {
+            match slot.uuid.as_str() {
+                library::OPEN_FOLDER => {
+                    if !pressed {
+                        self.select_page(
+                            slot.settings["ProfileUUID"]
+                                .as_str()
+                                .context("Folder target missing")?,
+                            true,
+                        )?;
+                    }
+                    return Ok(());
+                }
+                library::BACK_FOLDER => {
+                    if !pressed {
+                        self.folder_back()?;
+                    }
+                    return Ok(());
+                }
+                "com.elgato.streamdeck.page.next" => {
+                    if !pressed {
+                        self.step_page(1)?;
+                    }
+                    return Ok(());
+                }
+                "com.elgato.streamdeck.page.previous" => {
+                    if !pressed {
+                        self.step_page(-1)?;
+                    }
+                    return Ok(());
+                }
+                "com.elgato.streamdeck.page.indicator" => return Ok(()),
+                _ => {}
+            }
+        }
+        self.emit(&slot, if pressed { down } else { up }, json!({}));
+        Ok(())
     }
     fn input(&mut self, event: InputEvent) -> Result<()> {
-        let (controller, index, name, extra) = match &event {
-            InputEvent::Key { index, pressed } => (
-                "Keypad",
-                *index,
-                if *pressed { "keyDown" } else { "keyUp" },
-                json!({}),
-            ),
+        self.log(format!("{event:?}"));
+        let (index, name, extra) = match event {
+            InputEvent::Key { index, pressed } => {
+                return self.button_input(HeldControl::Key(index), pressed);
+            }
             InputEvent::DialPress { index, pressed } => {
-                self.dial_pressed[*index as usize] = *pressed;
+                return self.button_input(HeldControl::Dial(index), pressed);
+            }
+            InputEvent::DialRotate { index, ticks } => {
+                let pressed = *self
+                    .dial_pressed
+                    .get(index as usize)
+                    .context("Dial index out of range")?;
                 (
-                    "Encoder",
-                    *index,
-                    if *pressed { "dialDown" } else { "dialUp" },
-                    json!({}),
+                    index,
+                    "dialRotate",
+                    json!({"ticks":ticks,"pressed":pressed}),
                 )
             }
-            InputEvent::DialRotate { index, ticks } => (
-                "Encoder",
-                *index,
-                "dialRotate",
-                json!({"ticks":ticks,"pressed":self.dial_pressed[*index as usize]}),
-            ),
             InputEvent::Touch { x, y, long } => (
-                "Encoder",
-                (*x / 200) as u8,
+                u8::try_from(x / 200)?,
                 "touchTap",
                 json!({"hold":long,"tapPos":[x%200,y]}),
             ),
-            InputEvent::Swipe { .. } => {
-                self.log(format!("{event:?}: page navigation not yet implemented"));
+            InputEvent::Swipe { start, end } => {
+                if start.0.abs_diff(end.0) > start.1.abs_diff(end.1) {
+                    self.step_page(if end.0 < start.0 { 1 } else { -1 })?;
+                }
                 return Ok(());
             }
         };
-        self.log(format!("{event:?}"));
         if let Some(slot) = self
             .slots
             .iter()
-            .find(|s| s.controller == controller && s.index == index)
+            .find(|s| s.controller == "Encoder" && s.index == index)
         {
             self.emit(slot, name, extra);
         }
@@ -516,6 +576,9 @@ impl Host {
         let event = message["event"].as_str().context("Missing event")?;
         let context = message["context"].as_str().unwrap_or("");
         let payload = message.get("payload").cloned().unwrap_or(json!({}));
+        if event == "switchToProfile" {
+            return self.plugin_switch_profile(plugin_index, &message);
+        }
         let plugin = &self.plugins[plugin_index];
         if event == "logMessage" {
             self.log(format!(
@@ -544,20 +607,30 @@ impl Host {
             self.notify_global_settings(plugin_index, None, false);
             return Ok(());
         }
-        let index = self
-            .slots
-            .iter()
-            .position(|s| s.context == context)
-            .context("Unknown action context")?;
+        let active_index = self.slots.iter().position(|s| s.context == context);
+        let Some(original) = active_index
+            .map(|i| &self.slots[i])
+            .or_else(|| self.library.slot(context))
+            .cloned()
+        else {
+            if self
+                .retired
+                .iter()
+                .any(|(id, owner)| id == context && owner == &plugin.id)
+            {
+                return Ok(());
+            }
+            bail!("Unknown action context");
+        };
         if !self
             .actions
             .iter()
-            .any(|a| a.uuid == self.slots[index].uuid && a.plugin == plugin.id)
+            .any(|a| a.uuid == original.uuid && a.plugin == plugin.id)
         {
             bail!("Plugin does not own this context");
         }
         if event == "getSettings" {
-            let reply = self.settings_event(&self.slots[index], message.get("id"));
+            let reply = self.settings_event(&original, message.get("id"));
             if let Some(sender) = &plugin.sender {
                 let _ = sender.send(reply);
             }
@@ -567,19 +640,23 @@ impl Host {
             if !payload.is_object() {
                 bail!("Settings must be an object");
             }
-            self.slots[index].settings = payload;
+            let mut slot = original;
+            slot.settings = payload;
+            if let Some(index) = active_index {
+                self.slots[index] = slot.clone();
+            }
+            self.library.update(&slot);
             self.persist()?;
-            self.notify_inspectors(context, self.settings_event(&self.slots[index], None), None);
+            self.notify_inspectors(context, self.settings_event(&slot, None), None);
             return Ok(());
         }
         if event == "sendToPropertyInspector" {
-            let slot = &self.slots[index];
-            self.notify_inspectors(context,json!({"event":"sendToPropertyInspector","action":slot.uuid,"context":slot.context,"device":self.device,"payload":payload}),None);
+            self.notify_inspectors(context,json!({"event":"sendToPropertyInspector","action":original.uuid,"context":original.context,"device":self.device,"payload":payload}),None);
             return Ok(());
         }
         let root = plugin.root.clone();
         // Validate a replacement before exposing it to any display or saved state.
-        let mut replacement = self.slots[index].clone();
+        let mut replacement = original;
         let slot = &mut replacement;
         if matches!(event, "setImage" | "setTitle") {
             if payload
@@ -595,22 +672,30 @@ impl Host {
         match event {
             "setTitle" => {
                 slot.title = payload["title"].as_str().unwrap_or(&slot.name).to_owned();
+                slot.title_changed = true;
             }
             "setImage" => {
                 let source = payload["image"].as_str().unwrap_or("");
+                slot.image_changed = !source.is_empty();
                 slot.background = if source.is_empty() {
-                    state_image(&root, &slot.states, slot.state)
+                    self.resolve_state_image(slot, slot.state)
                 } else {
                     Some(load_image(&root, source)?)
                 };
             }
             "setState" => {
                 let state = payload["state"].as_u64().context("Invalid state")?;
-                if state >= slot.states.as_array().map_or(1, Vec::len) as u64 {
+                let defined = self
+                    .actions
+                    .iter()
+                    .find(|a| a.uuid == slot.uuid)
+                    .and_then(|a| a.raw["States"].as_array())
+                    .map_or(1, Vec::len);
+                if state >= slot.states.as_array().map_or(1, Vec::len).max(defined) as u64 {
                     bail!("State out of range");
                 }
                 slot.state = state;
-                slot.background = state_image(&root, &slot.states, state);
+                slot.background = self.resolve_state_image(slot, state);
                 if let Some(title) = slot.states[state as usize]["Title"].as_str() {
                     slot.title = title.into();
                 }
@@ -619,6 +704,7 @@ impl Host {
                 let object = payload.as_object().context("Feedback must be an object")?;
                 for (key, value) in object {
                     display::merge_feedback(&mut slot.feedback[key], value);
+                    slot.image_cache.remove(key);
                 }
             }
             "setFeedbackLayout" => {
@@ -642,8 +728,11 @@ impl Host {
         if replacement.controller == "Encoder" {
             display::dial_image(&self.renderer, &mut replacement, Some(&root))?;
         }
-        self.slots[index] = replacement;
-        self.render()?;
+        self.library.update(&replacement);
+        if let Some(index) = active_index {
+            self.slots[index] = replacement;
+            self.render()?;
+        }
         self.persist()?;
         Ok(())
     }
@@ -714,8 +803,8 @@ async fn root(
     Html(include_str!("ui.html").replace("__TOKEN__", &token)).into_response()
 }
 fn snapshot(host: &Host) -> Value {
-    json!({"running":host.running,"device":host.device,"firmware":host.firmware,"simulate":host.simulate,"connected":host.hardware.is_some(),
-        "slots":host.slots.iter().map(|s|json!({"context":s.context,"controller":s.controller,"index":s.index,"uuid":s.uuid,"name":s.name,"settings":s.settings,"title":s.title,"state":s.state,"feedback":s.feedback,"layout":s.layout,"preview":s.preview,"has_inspector":host.actions.iter().find(|a|a.uuid==s.uuid).is_some_and(|a|a.raw["PropertyInspectorPath"].is_string()||host.plugins.iter().find(|p|p.id==a.plugin).is_some_and(|p|p.manifest["PropertyInspectorPath"].is_string()))})).collect::<Vec<_>>(),
+    json!({"library":host.library.snapshot(),"running":host.running,"device":host.device,"firmware":host.firmware,"simulate":host.simulate,"connected":host.hardware.is_some(),
+        "slots":host.slots.iter().map(|s|json!({"available":host.actions.iter().any(|a|a.uuid==s.uuid),"pinned":s.pinned,"context":s.context,"controller":s.controller,"index":s.index,"uuid":s.uuid,"name":s.name,"settings":s.settings,"title":s.title,"state":s.state,"feedback":s.feedback,"layout":s.layout,"preview":s.preview,"has_inspector":host.actions.iter().find(|a|a.uuid==s.uuid).is_some_and(|a|a.raw["PropertyInspectorPath"].is_string()||host.plugins.iter().find(|p|p.id==a.plugin).is_some_and(|p|p.manifest["PropertyInspectorPath"].is_string()))})).collect::<Vec<_>>(),
         "inspectors":host.inspectors.values().map(|i|json!({"context":i.context,"plugin":host.plugins[i.plugin].id,"connected":i.sender.is_some()})).collect::<Vec<_>>(),"actions":host.actions,"logs":host.logs,"plugins":host.plugins.iter().map(|p|json!({"id":p.id,"name":p.name,"connected":p.sender.is_some()})).collect::<Vec<_>>()})
 }
 async fn dashboard(State(state): State<Shared>) -> Json<Value> {
@@ -746,7 +835,31 @@ async fn control(
     }
 }
 fn apply_control(host: &mut Host, r: Value) -> Result<()> {
-    match r["command"].as_str().context("Missing command")? {
+    let command = r["command"].as_str().context("Missing command")?;
+    if matches!(
+        command,
+        "profile_create"
+            | "profile_select"
+            | "profile_rename"
+            | "profile_duplicate"
+            | "profile_delete"
+            | "page_create"
+            | "page_select"
+            | "page_rename"
+            | "page_duplicate"
+            | "page_delete"
+            | "page_move"
+            | "page_step"
+            | "folder_back"
+            | "slot_pin"
+            | "folder_create"
+    ) {
+        return host.library_command(&r);
+    }
+    match command {
+        "export_profile" => host.export_profile(Path::new(
+            r["path"].as_str().context("Export path missing")?,
+        )),
         "open_inspector" => {
             host.open_inspector(r["context"].as_str().context("Missing action context")?)
         }
@@ -767,19 +880,20 @@ fn apply_control(host: &mut Host, r: Value) -> Result<()> {
                 .iter()
                 .position(|s| s.context == r["context"])
                 .context("Unknown context")?;
+            host.editable()?;
+            host.sync_visible();
             let context = host.slots[index].context.clone();
-            host.close_inspectors(Some(&context));
-            host.emit(&host.slots[index], "willDisappear", json!({}));
-            host.slots.remove(index);
-            host.render()?;
-            host.persist()
+            host.library.remove(&context);
+            host.refresh_page()
         }
         "appearance" => {
+            host.editable()?;
             let slot = host
                 .slots
                 .iter_mut()
                 .find(|s| s.context == r["context"])
                 .context("Unknown context")?;
+            slot.title_changed = true;
             slot.title = r["title"]
                 .as_str()
                 .context("Title must be text")?
@@ -824,6 +938,7 @@ fn apply_control(host: &mut Host, r: Value) -> Result<()> {
             )?;
             host.plugins.extend(plugins);
             host.actions.extend(actions);
+            host.install_bundled_profiles(true)?;
             host.persist()
         }
         "input" => {
@@ -846,6 +961,7 @@ fn apply_control(host: &mut Host, r: Value) -> Result<()> {
             host.input(event)
         }
         "settings" => {
+            host.editable()?;
             let index = host
                 .slots
                 .iter()
@@ -1212,7 +1328,8 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
     } else {
         plugins
     };
-    let (plugins, actions) = load_plugins(plugin_paths)?;
+    let (plugins, mut actions) = load_plugins(plugin_paths)?;
+    actions.extend(library::navigation_actions());
     let (events_tx, mut events_rx) = mpsc::unbounded_channel::<Result<InputEvent>>();
     let (draw_tx, draw_rx) = std::sync::mpsc::channel();
     let mut deck = if simulate {
@@ -1229,14 +1346,29 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
         .map(Deck::firmware_version)
         .transpose()?
         .unwrap_or_else(|| "simulation".into());
+    let library = if let Some(library) = saved.library {
+        library
+    } else {
+        if state_path.exists() {
+            let backup = state_path.with_extension("before-library.json");
+            if !backup.exists() {
+                fs::copy(&state_path, &backup)?;
+            }
+        }
+        Library::legacy(saved.slots, &device)
+    };
+    library.validate()?;
+    let slots = library.visible()?;
     let mut host = Host {
+        library,
+        profile_assets: HashMap::new(),
         diagnostics,
         running: true,
         inspectors: HashMap::new(),
         port,
         plugins,
         actions,
-        slots: saved.slots,
+        slots,
         globals: saved.globals,
         renderer: Renderer::new()?,
         hardware: if simulate {
@@ -1251,14 +1383,20 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
         logs: Vec::new(),
         simulate,
         dial_pressed: [false; 4],
+        held: HashMap::new(),
+        released: HashSet::new(),
+        retired: VecDeque::new(),
     };
+    host.install_bundled_profiles(profile_path.is_none())?;
     if let Some(path) = profile_path {
         host.import_profile(&path)?;
     } else if host.slots.is_empty() {
         let key = host
             .actions
             .iter()
-            .find(|a| a.controllers.iter().any(|c| c == "Keypad"))
+            .find(|a| {
+                a.plugin != "deckforge.navigation" && a.controllers.iter().any(|c| c == "Keypad")
+            })
             .map(|a| a.uuid.clone());
         let dial = host
             .actions
@@ -1287,11 +1425,11 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
         if !occupied.insert((slot.controller.clone(), slot.index)) {
             bail!("Saved session has duplicate slot coordinates");
         }
-        if slot.background.is_none()
-            && let Some(action) = host.actions.iter().find(|a| a.uuid == slot.uuid)
-            && let Some(plugin) = host.plugins.iter().find(|p| p.id == action.plugin)
-        {
-            slot.background = state_image(&plugin.root, &slot.states, slot.state);
+    }
+    for index in 0..host.slots.len() {
+        if host.slots[index].background.is_none() {
+            let slot = host.slots[index].clone();
+            host.slots[index].background = host.resolve_state_image(&slot, slot.state);
         }
     }
     // Validate and start plugins before writing any hardware image.
@@ -1539,7 +1677,9 @@ mod tests {
         drop(restarted);
     }
     fn fixture(root: &Path) -> Host {
-        Host {
+        let mut host = Host {
+            library: Library::default(),
+            profile_assets: HashMap::new(),
             diagnostics: false,
             running: true,
             inspectors: HashMap::new(),
@@ -1571,6 +1711,10 @@ mod tests {
                 state: 0,
                 feedback: json!({}),
                 layout: "$B1".into(),
+                raw: json!({}),
+                image_changed: false,
+                title_changed: false,
+                pinned: false,
                 states: json!([{}, {}]),
                 background: None,
                 layout_cache: None,
@@ -1588,7 +1732,12 @@ mod tests {
             logs: Vec::new(),
             simulate: true,
             dial_pressed: [false; 4],
-        }
+            held: HashMap::new(),
+            released: HashSet::new(),
+            retired: VecDeque::new(),
+        };
+        host.library = Library::legacy(host.slots.clone(), "test-device");
+        host
     }
     #[test]
     fn inactive_state_and_software_target_cannot_change_hardware_title() {
@@ -1713,6 +1862,27 @@ mod tests {
         }
     }
     #[test]
+    fn inspector_cannot_edit_readonly_profile_settings() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut host = fixture(temp.path());
+        host.library.current_mut().unwrap().readonly = true;
+        let (tx, _rx) = mpsc::unbounded_channel();
+        host.inspectors.insert(
+            "pi".into(),
+            Inspector {
+                context: "test.context".into(),
+                plugin: 0,
+                child: None,
+                sender: Some(tx),
+            },
+        );
+        assert!(
+            host.inspector_message("pi", json!({"event":"setSettings","payload":{"bad":true}}))
+                .is_err()
+        );
+        assert_eq!(host.slots[0].settings, json!({}));
+    }
+    #[test]
     fn plugin_settings_and_messages_reach_only_the_bound_inspector() {
         let temp = tempfile::tempdir().unwrap();
         let mut host = fixture(temp.path());
@@ -1783,5 +1953,146 @@ mod tests {
                 .iter()
                 .any(|line| line.contains("callback missing"))
         );
+    }
+    #[test]
+    fn page_picker_follows_reordered_navigation() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut host = fixture(temp.path());
+        host.library_command(&json!({"command":"page_create","name":"Second"}))
+            .unwrap();
+        let id = host.library.active_page.clone();
+        host.library_command(&json!({"command":"page_move","id":id,"direction":-1}))
+            .unwrap();
+        let snapshot = host.library.snapshot();
+        assert_eq!(snapshot["profiles"][0]["pages"][0]["id"], id);
+        assert_eq!(snapshot["profiles"][0]["page_order"][0], id);
+    }
+    #[test]
+    fn export_cannot_replace_retained_source() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut host = fixture(temp.path());
+        let source = temp.path().join("retained.streamDeckProfile");
+        fs::write(&source, b"original").unwrap();
+        host.library.current_mut().unwrap().source = Some(source.clone());
+        assert!(host.export_profile(&source).is_err());
+        assert_eq!(fs::read(source).unwrap(), b"original");
+    }
+    #[test]
+    fn changing_pages_releases_the_old_button_before_disappearance() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut host = fixture(temp.path());
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        host.plugins[0].sender = Some(tx);
+        host.input(InputEvent::Key {
+            index: 0,
+            pressed: true,
+        })
+        .unwrap();
+        assert_eq!(rx.try_recv().unwrap()["event"], "keyDown");
+        host.library_command(&json!({"command":"page_create","name":"Other"}))
+            .unwrap();
+        let release = rx.try_recv().unwrap();
+        assert_eq!(release["event"], "keyUp");
+        assert_eq!(release["context"], "test.context");
+        assert_eq!(rx.try_recv().unwrap()["event"], "willDisappear");
+        host.assign("Keypad", 0, "test.action").unwrap();
+        assert_eq!(rx.try_recv().unwrap()["event"], "willAppear");
+        host.input(InputEvent::Key {
+            index: 0,
+            pressed: false,
+        })
+        .unwrap();
+        assert!(rx.try_recv().is_err());
+    }
+    #[test]
+    fn pinned_button_keeps_its_press_ownership_when_page_changes() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut host = fixture(temp.path());
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        host.plugins[0].sender = Some(tx);
+        host.library_command(&json!({"command":"slot_pin","context":"test.context","pinned":true}))
+            .unwrap();
+        host.input(InputEvent::Key {
+            index: 0,
+            pressed: true,
+        })
+        .unwrap();
+        assert_eq!(rx.try_recv().unwrap()["event"], "keyDown");
+        host.library_command(&json!({"command":"page_create","name":"Other"}))
+            .unwrap();
+        assert!(rx.try_recv().is_err());
+        host.input(InputEvent::Key {
+            index: 0,
+            pressed: false,
+        })
+        .unwrap();
+        let release = rx.try_recv().unwrap();
+        assert_eq!(release["event"], "keyUp");
+        assert_eq!(release["context"], "test.context");
+    }
+    #[test]
+    fn dedicated_pin_editor_can_remove_a_hidden_pin_without_deleting_overrides() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut host = fixture(temp.path());
+        host.library_command(&json!({"command":"slot_pin","context":"test.context","pinned":true}))
+            .unwrap();
+        host.library_command(&json!({"command":"page_create","name":"Other"}))
+            .unwrap();
+        let other = host.library.active_page.clone();
+        host.assign("Keypad", 0, "test.action").unwrap();
+        let override_id = host.slots[0].context.clone();
+        let pins = host.library.current().unwrap().pin_page.clone();
+        host.library_command(&json!({"command":"page_select","id":pins}))
+            .unwrap();
+        assert_eq!(host.slots[0].context, "test.context");
+        assert!(host.slots[0].pinned);
+        apply_control(
+            &mut host,
+            json!({"command":"remove","context":"test.context"}),
+        )
+        .unwrap();
+        assert!(host.slots.is_empty());
+        host.select_page(&other, false).unwrap();
+        assert_eq!(host.slots[0].context, override_id);
+    }
+    #[test]
+    fn duplicate_profiles_remap_folder_links_and_action_instance_ids() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut host = fixture(temp.path());
+        host.slots[0].raw = json!({"UUID":"test.action","ActionID":"original-id"});
+        host.sync_visible();
+        host.library_command(&json!({"command":"folder_create","name":"Nested","index":3}))
+            .unwrap();
+        let original = host.library.current().unwrap().clone();
+        host.library_command(
+            &json!({"command":"profile_duplicate","id":original.id,"name":"Copy"}),
+        )
+        .unwrap();
+        let copy = host.library.current().unwrap();
+        assert!(
+            copy.pages
+                .iter()
+                .all(|page| !original.pages.iter().any(|old| old.id == page.id))
+        );
+        for slot in copy.pages.iter().flat_map(|page| &page.slots) {
+            assert!(
+                !original
+                    .pages
+                    .iter()
+                    .flat_map(|p| &p.slots)
+                    .any(|old| old.context == slot.context)
+            );
+            if slot.uuid == library::OPEN_FOLDER {
+                assert!(
+                    copy.pages
+                        .iter()
+                        .any(|p| p.id == slot.settings["ProfileUUID"])
+                );
+            }
+            if slot.uuid == "test.action" {
+                assert_ne!(slot.raw["ActionID"], "original-id");
+            }
+        }
+        host.library.validate().unwrap();
     }
 }

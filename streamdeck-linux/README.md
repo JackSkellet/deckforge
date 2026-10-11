@@ -80,9 +80,17 @@ the host checks `node`, `/usr/bin/node`, installed nvm runtimes, and a matching
 `DECKFORGE_NODE20` or `DECKFORGE_NODE24` override. A plugin folder added through the
 native editor is loaded in place and its path is retained across launches. `DECKFORGE_FONT` can select a TTF font.
 
-Import is read-only: original archives stay intact. All profile pages and raw
-action data remain available to the parser, but the host currently activates
-only the selected current page. Unknown actions are reported and remain inactive.
+Import keeps the original archive intact and adds the full profile to the library.
+Use the profile/page selectors and Manage controls to create, rename, duplicate,
+reorder or delete entries. Folder actions and Back navigate imported folders;
+left/right touch-strip swipes change top-level pages. Pin an action to share it
+across pages and folders; local assignments override the same pinned position.
+The Pinned actions view lets you edit pins hidden by local overrides.
+
+Export writes a `.streamDeckProfile` ZIP, preserving original assets and unknown
+fields. Existing export files receive a backup before replacement. Round trips
+through Deckforge are tested; acceptance by the Windows app is still unverified.
+Unknown actions are retained and reported, but remain inactive.
 Importing a built-in Windows action does not implement that action on Linux.
 
 ## Implemented and checked
@@ -95,7 +103,7 @@ Importing a built-in Windows action does not implement that action on Linux.
 | Plugin runtime | Node samples work; native HTML helper passes generated protocol fixtures and registers the unchanged Windows-bundled tutorial |
 | Plugin protocol | `willAppear`, `willDisappear`, key/dial events, settings/global settings, current-state title/image/state and basic feedback |
 | Feedback | All six published built-ins and four official custom layouts exercised through the unchanged Layouts plugin; text, bars, gradients, images, SVG, clipping and incremental properties |
-| Profiles | Six official sample archives and two Windows-bundled Plus profiles; current/default pages, encoded UUID folders, settings, states and images |
+| Profiles | Full library, pages/folders/pins, original-format export/reimport; two shipped Plus trees retain all source fields/assets. Unchanged Lights Out bundled profile runs and changes SVG-backed images. |
 | Persistence | Real sample settings survive host restart; imported background images tested for round-trip persistence |
 | Native desktop editor | Installed optimized Rust window; action assignment, input testing, live previews, typed settings, JSON, title/removal, native file pickers and status. User confirmed native setting edits affect physical presses. |
 
@@ -113,8 +121,8 @@ completion criterion replaces the desktop parity goal.
    controls and real-world plugin compatibility beyond the tested samples.
 2. Separate hardware/editor targets, inactive-state image/title updates, alerts,
    animation, and native-reference visual validation of layout font/bar details.
-3. Profile page/folder switching, exporting profiles, multi-actions, built-in
-   hotkeys/audio/application actions, and automatic profile selection.
+3. Windows acceptance of exported profiles, folder auto-exit, multi-actions,
+   built-in hotkeys/audio/application actions, and automatic profile selection.
 4. Native Windows/macOS plugin binaries and platform-specific dependencies.
    These do not become Linux programs simply by reproducing the WebSocket API.
 5. USB reconnect recovery, more device models, plugin supervision, tray/autostart,
@@ -137,6 +145,8 @@ python tests/sample_interop.py
 python tests/layout_interop.py
 python tests/webview_interop.py
 python tests/native_lifecycle.py
+python tests/profile_interop.py
+python tests/bundled_profiles_interop.py
 ```
 
 The optional installer test needs the local Windows artifacts. The sample
