@@ -30,9 +30,9 @@ Desktop interaction requirements come from the official [plugin setup guide][plu
 | UI-02 | Device canvas, key/dial selection, live previews and action assignment | **Verified subset, C/T/H/U.** Native canvas displays eight keys/four dials and real previews. User confirmed native settings/save affects physical input. Replacement, deletion, all-slot geometry and broader keyboard workflows still need end-to-end acceptance. | Native canvas maps every Plus slot accurately; assignment, replacement, deletion, keyboard navigation and persisted state all work on hardware. |
 | UI-03 | Action library with categories, search, controller filtering and useful plugin metadata | **Partial, C.** Native action selector filters by controller and exposes installed actions; categories/search/icons remain incomplete. | Search/filter official manifests; key actions cannot be accidentally placed on dial-only slots; categories, icons and disabled/incompatible states are clear. |
 | UI-04 | Drag/drop, move/copy/paste, reorder, remove, context menus and reusable action editing | **Missing, C.** No native editing workflow. [Action sharing][sharing] confirms import/export workflows. | Exercise internal and file-manager drag/drop; copy across pages/profiles; verify nested data and settings survive. Test undo/recovery as a Linux usability requirement. |
-| UI-05 | Action-specific configuration with plugin property inspectors | **Missing, C.** JSON settings textarea is the available editor. | Open unchanged official property inspector; edit controls, file selectors and dynamic lists; verify visible plugin/hardware response and restart persistence. [PI guide][pi] |
+| UI-05 | Action-specific configuration with plugin property inspectors | **Verified subset, C/T.** Native Plugin settings opens a WebKit inspector. Unchanged Counter PI registers; instrumented original control saves into the real plugin. Broader forms/file controls remain unverified. | Open unchanged official property inspector; edit controls, file selectors and dynamic lists; verify visible plugin/hardware response and restart persistence. [PI guide][pi] |
 | UI-06 | Titles, typography, image selection, icon/background libraries, preview fidelity | **Partial, C.** Fontdue title rendering and raster backgrounds exist; full style controls and asset libraries do not. | Compare imported title size/style/alignment/color, custom icons and state changes with reference screenshots; verify scaled native UI and hardware rendering. [Key guide][keys], [layouts][layouts] |
-| UI-07 | Window/tray lifecycle, startup preference, diagnostics and update/about UI | **Missing, C.** Foreground CLI and logs exist; closing a native window is undefined. | Close/reopen window without interrupting configured background actions; explicitly quit stops only this app's children; test login startup, version display and bounded logs. [Preferences][preferences], [7.6 fixes][release76] |
+| UI-07 | Window/tray lifecycle, startup preference, diagnostics and update/about UI | **Partial, C/T.** Native window close, SIGINT/SIGTERM, owned-child cleanup and failure logging work. Tray, login startup, update UI and instance activation remain missing. | Close/reopen window without interrupting configured background actions; explicitly quit stops only this app's children; test login startup, version display and bounded logs. [Preferences][preferences], [7.6 fixes][release76] |
 
 ## Profiles, pages, folders and portable data
 
@@ -71,14 +71,14 @@ The shipped profiles contain real action identifiers and settings; their presenc
 | ID | Required behavior | Baseline status and evidence | Evidence needed to pass |
 | --- | --- | --- | --- |
 | PL-01 | Node plugins, manifest/runtime version selection and lifecycle | **Verified subset, T.** Unchanged Counter and Layouts register using installed Node 20. Generic CodePath only; installed runtime search is limited. | Test Node 20/24, version mismatch, startup failure, shutdown/restart and plugin supervision; respect manifest versions and platform-specific paths. [Manifest][manifest], [environment][environment] |
-| PL-02 | Legacy HTML plugin runtime | **Missing, A/C.** Node-only launcher rejects HTML. Shipped tutorial declares `CodePath: app.html`. | Run untouched tutorial HTML with the expected injected connection callback; verify browser networking, local resources, lifecycle and actual responses. [Artifact findings](../../evidence/elgato-7.6/findings.md) |
+| PL-02 | Legacy HTML plugin runtime | **Verified subset, A/C/T.** Native hidden HTML runtime registers unchanged shipped tutorial; generated HTML backend/PI fixture exchanges real SDK messages. Full tutorial navigation and background-media behavior remain open. | Run untouched tutorial HTML with the expected injected connection callback; verify browser networking, local resources, lifecycle and actual responses. [Artifact findings](../../evidence/elgato-7.6/findings.md) |
 | PL-03 | Native plugins and OS-dependent modules | **Missing/Unresolved, C.** Native executables and platform bindings do not run. | Inventory Windows/macOS-dependent plugins, provide a supported runtime/porting path, and test real native binaries or Linux ports against the same contract. Explicit per-plugin limitations remain until resolved. [WebSocket API][ws], [manifest][manifest] |
-| PL-04 | Property-inspector browser, registration and bidirectional messaging | **Missing, C.** No `registerPropertyInspector` session or HTML UI embedding. | Unchanged official inspector registers, receives action/settings metadata, exchanges `sendToPlugin`/`sendToPropertyInspector`, and gets appearance/disappearance events. [PI guide][pi] |
+| PL-04 | Property-inspector browser, registration and bidirectional messaging | **Verified subset, C/T.** Native inspector windows register, route messages/settings, enforce per-action context binding and send appearance/disappearance. Original Counter PI registers; its unchanged control code saves via explicit instrumentation. | Unchanged official inspector registers, receives action/settings metadata, exchanges `sendToPlugin`/`sendToPropertyInspector`, and gets appearance/disappearance events. [PI guide][pi] |
 | PL-05 | Device/action lifecycle and physical input events | **Verified subset, C/T/H.** Registration, device-connect and key/dial events work for samples; broader lifecycle incomplete. | Contract fixtures cover disconnect/reconnect, page/folder transitions, simultaneous instances, title changes and touch coordinates; then repeat physical paths. [WebSocket API][ws] |
 | PL-06 | Action/global settings, correlation IDs and persistent isolation | **Verified subset, T.** Sample settings survive restart; global storage and correlated replies exist in code. | Test SDK v1/v2/v3 clients, PI-origin updates, concurrent gets, multi-plugin isolation, malformed settings and crash-safe persistence. [Settings][settings], [SDK 3 changes][sdk3] |
 | PL-07 | Title/image/state commands and separate hardware/software targets | **Partial, C.** Current state and combined target work; inactive-state/separate-target requests are rejected. | Verify all states and targets, user-title precedence, resets and plugin overrides before/after state changes against reference output. [Keys][keys], [WebSocket API][ws] |
-| PL-08 | Image formats, animation and resource path behavior | **Partial, C.** PNG/JPEG/GIF decoding exists; no animation scheduler or SVG/WebP rendering. | Test file/data-URI icons, SVG and animated assets, scaling/transparency, frame timing and bounded memory with real devices. [Keys][keys], [6.0.1 release][release601] |
-| PL-09 | All built-in feedback layouts and custom JSON layouts | **Partial, T.** `$B1` title/value/indicator subset works; other layouts rejected. | Run every unchanged Layouts sample action; compare text, pixmap, bars, ranges, z-order, clipping, opacity and incremental updates. [Layouts][layouts] |
+| PL-08 | Image formats, animation and resource path behavior | **Partial, C/T.** PNG/JPEG/GIF and SVG file/data-URI rendering work; SVG transparency is checked. Animation and WebP remain missing. | Test file/data-URI icons, SVG and animated assets, scaling/transparency, frame timing and bounded memory with real devices. [Keys][keys], [6.0.1 release][release601] |
+| PL-09 | All built-in feedback layouts and custom JSON layouts | **Verified subset, C/T.** All six built-ins and four official custom layouts run unchanged with real preview-pixel checks. Incremental properties, SVG, clipping/layers/gradients work. Exact Windows text/bar raster parity remains unverified. | Run every unchanged Layouts sample action; compare text, pixmap, bars, ranges, z-order, clipping, opacity and incremental updates. [Layouts][layouts] |
 | PL-10 | Visual alerts, success feedback and trigger descriptions | **Partial, C.** `showAlert`/`showOk` only log; trigger descriptions are accepted without UI effect. | Observe correct temporary overlays and restoration on keys/dials; inspector descriptions update when requested. [WebSocket API][ws], [dials][dials] |
 | PL-11 | Embedded plugin resources | **Missing, C.** Events use empty resources; no get/set resource command implementation. | Save/update resources through unchanged plugin/PI, export profile, import elsewhere and reopen the file successfully. [Resources][resources] |
 | PL-12 | App monitoring, wake notifications, deep links, openURL and localization | **Missing/Partial, C.** `logMessage` exists; external/system callbacks and plugin localization are absent. | Trigger app launch/exit, suspend/resume and routed URI callbacks; test translated metadata/UI and external browser operations. [Monitoring][monitoring], [deep links][deeplinks], [environment][environment] |
@@ -210,3 +210,35 @@ a browser. The legacy web interface remains a headless diagnostic mode.
 These results update UI-01/UI-02 subsets. Property inspectors, HTML/native plugin
 runtimes, layout coverage, page/folder management and the rest of this ledger
 remain open. Full-goal completion has not been established.
+
+## HTML and feedback evidence update
+
+The current runtime implements native HTML backends and separate property-inspector
+windows. `tests/webview_interop.py` distinguishes a generated conformance fixture,
+an instrumented real Counter control, unchanged direct Counter inspector
+registration, and unchanged tutorial registration. These are different evidence
+levels; none establishes all third-party plugins or every tutorial screen.
+
+`tests/layout_interop.py` executes six built-in and four custom layouts through
+the hash-pinned official plugin and inspects actual PNGs. The missing official
+C1 icon is explicitly diagnosed rather than replaced. `src/layout.rs`,
+`src/render.rs` and `src/host/display.rs` implement the independent renderer.
+Original-format profile/navigation, native platform binaries, built-in actions
+and all other open rows remain part of the goal.
+
+### Verification update, 2026-10-12
+
+50 tests and strict Clippy pass. Optimized-process suites cover unchanged Node
+samples, all official layout sample modes, native HTML/PI contracts, and native
+window signal shutdown. A generated HTML backend opens a native popup whose
+child JavaScript executes and communicates with its opener. The unchanged
+Counter inspector also registers through its original manifest.
+
+Native mode now exposes its plugin WebSocket only; the browser editor/control
+HTTP routes are confined to the explicit diagnostic `serve` mode. This is a
+verified transport distinction, not a claim of complete desktop parity.
+
+Remaining lifecycle boundary: rapid reassignment can reject late messages for a
+retired action context. The layout interop test waits for startup responses before
+reassigning; page/folder lifecycle and late-message semantics still need broader
+acceptance alongside PR-02/PR-03/PL-05.

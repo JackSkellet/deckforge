@@ -31,6 +31,7 @@ pub fn run(controller: Controller) -> Result<()> {
         "Deckforge",
         options,
         Box::new(move |cc| {
+            eprintln!("Native editor ready");
             cc.egui_ctx.set_visuals(egui::Visuals::dark());
             cc.egui_ctx.style_mut_of(egui::Theme::Dark, |s| {
                 s.spacing.item_spacing = Vec2::new(10.0, 10.0);
@@ -468,6 +469,18 @@ impl Desktop {
             });
         }
         ui.separator();
+        if slot
+            .as_ref()
+            .is_some_and(|slot| slot["has_inspector"] == true)
+            && ui
+                .button("Plugin settings…")
+                .on_hover_text("Open this plugin's own configuration window")
+                .clicked()
+        {
+            self.command(
+                json!({"command":"open_inspector","context":slot.as_ref().unwrap()["context"]}),
+            );
+        }
         ui.label("Plugin action");
         let actions = self.snapshot["actions"]
             .as_array()
@@ -751,6 +764,10 @@ impl eframe::App for Desktop {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.capture_if_requested(ui.ctx());
         self.refresh(ui.ctx());
+        if self.snapshot["running"] == false {
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+            return;
+        }
         ui.ctx().request_repaint_after(POLL);
         egui::Frame::central_panel(ui.style())
             .inner_margin(20)

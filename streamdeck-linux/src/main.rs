@@ -1,9 +1,11 @@
 mod desktop;
 mod hardware;
 mod host;
+mod layout;
 mod package;
 mod profile;
 mod render;
+mod webview;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -21,6 +23,24 @@ struct Args {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Internal native HTML runtime. Launched and supervised by the host.
+    #[command(hide = true)]
+    Webview {
+        #[arg(long)]
+        path: PathBuf,
+        #[arg(long)]
+        port: u16,
+        #[arg(long)]
+        uuid: String,
+        #[arg(long)]
+        register_event: String,
+        #[arg(long)]
+        info: String,
+        #[arg(long)]
+        action_info: Option<String>,
+        #[arg(long)]
+        visible: bool,
+    },
     /// Open the native Rust desktop application. This is also the default.
     Desktop(DesktopArgs),
     /// Enumerate Stream Deck+ devices without changing them.
@@ -89,6 +109,25 @@ fn main() -> Result<()> {
         .command
         .unwrap_or(Command::Desktop(DesktopArgs::default()))
     {
+        Command::Webview {
+            path,
+            port,
+            uuid,
+            register_event,
+            info,
+            action_info,
+            visible,
+        } => {
+            webview::run(webview::WebviewOptions {
+                path,
+                port,
+                uuid,
+                register_event,
+                info,
+                action_info,
+                visible,
+            })?;
+        }
         Command::Desktop(options) => {
             let running = host::start(host::HostOptions {
                 serial: options.serial,

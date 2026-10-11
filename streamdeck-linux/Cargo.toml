@@ -10,16 +10,23 @@ anyhow = "1"
 axum = { version = "0.8", features = ["ws"] }
 base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
+csscolorparser = "0.7"
 eframe = { version = "0.36.2", default-features = false, features = ["default_fonts", "glow", "wayland", "x11", "accesskit"] }
 fontdue = "0.9"
 futures-util = "0.3"
 hidapi = "2.6"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif"] }
 libc = "0.2"
+percent-encoding = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rfd = "0.15"
+resvg = "0.48"
+tao = "0.37"
 tokio = { version = "1", features = ["full"] }
 tempfile = "3"
 uuid = { version = "1", features = ["v4"] }
+url = "2"
+wry = "0.57"
+webkit2gtk = "2.0"
 zip = { version = "2.4", default-features = false, features = ["deflate"] }

@@ -31,6 +31,10 @@ use std::{
 };
 use tokio::sync::mpsc;
 
+mod display;
+mod inspectors;
+use inspectors::Inspector;
+
 type Shared = Arc<Mutex<Host>>;
 
 /// The native editor uses this in-process controller, without HTTP or a browser.
@@ -43,7 +47,11 @@ impl Controller {
         snapshot(&self.shared.lock().unwrap())
     }
     pub fn command(&self, request: Value) -> Result<()> {
-        apply_control(&mut self.shared.lock().unwrap(), request)
+        let mut host = self.shared.lock().unwrap();
+        if !host.running {
+            bail!("Host has stopped");
+        }
+        apply_control(&mut host, request)
     }
 }
 #[derive(Clone)]
@@ -123,6 +131,12 @@ struct Slot {
     #[serde(default, with = "image_serde")]
     background: Option<DynamicImage>,
     #[serde(skip)]
+    layout_cache: Option<Value>,
+    #[serde(skip)]
+    image_cache: HashMap<String, (String, DynamicImage)>,
+    #[serde(skip)]
+    display_warnings: Vec<String>,
+    #[serde(skip)]
     preview: String,
 }
 #[derive(Clone, Serialize)]
@@ -143,14 +157,17 @@ struct Plugin {
     child: Option<Child>,
     sender: Option<mpsc::UnboundedSender<Value>>,
 }
+fn stop_child(child: &mut Option<Child>) {
+    if let Some(mut child) = child.take() {
+        if child.try_wait().ok().flatten().is_none() {
+            let _ = child.kill();
+        }
+        let _ = child.wait();
+    }
+}
 impl Drop for Plugin {
     fn drop(&mut self) {
-        if let Some(mut child) = self.child.take() {
-            if child.try_wait().ok().flatten().is_none() {
-                let _ = child.kill();
-            }
-            let _ = child.wait();
-        }
+        stop_child(&mut self.child);
     }
 }
 mod image_serde {
@@ -199,6 +216,9 @@ enum Draw {
     Stop,
 }
 struct Host {
+    diagnostics: bool,
+    running: bool,
+    inspectors: HashMap<String, Inspector>,
     port: u16,
     plugins: Vec<Plugin>,
     actions: Vec<Action>,
@@ -215,6 +235,9 @@ struct Host {
     dial_pressed: [bool; 4],
 }
 
+fn action_payload(slot: &Slot) -> Value {
+    json!({"controller":slot.controller,"coordinates":{"column":slot.index%4,"row":if slot.controller=="Encoder"{0}else{slot.index/4}},"settings":slot.settings,"state":slot.state,"isInMultiAction":false,"resources":{}})
+}
 impl Host {
     fn import_profile(&mut self, path: &Path) -> Result<()> {
         let mut imported = profile::load(path)?;
@@ -225,6 +248,7 @@ impl Host {
                 self.state_path.with_extension("before-import.json"),
             )?;
         }
+        self.close_inspectors(None);
         for slot in &self.slots {
             self.emit(slot, "willDisappear", json!({}));
         }
@@ -271,6 +295,9 @@ impl Host {
                 layout: "$B1".into(),
                 states: s.states.clone(),
                 background,
+                layout_cache: None,
+                image_cache: HashMap::new(),
+                display_warnings: Vec::new(),
                 preview: String::new(),
             });
             if !self.actions.iter().any(|a| a.uuid == s.uuid) {
@@ -300,10 +327,16 @@ impl Host {
     }
     fn persist(&self) -> Result<()> {
         let pending = self.state_path.with_extension("tmp");
-        let data = serde_json::to_vec_pretty(&Saved {
-            plugins: self.plugins.iter().map(|p| p.root.clone()).collect(),
-            slots: self.slots.clone(),
-            globals: self.globals.clone(),
+        #[derive(Serialize)]
+        struct View<'a> {
+            plugins: Vec<&'a Path>,
+            slots: &'a [Slot],
+            globals: &'a HashMap<String, Value>,
+        }
+        let data = serde_json::to_vec_pretty(&View {
+            plugins: self.plugins.iter().map(|p| p.root.as_path()).collect(),
+            slots: &self.slots,
+            globals: &self.globals,
         })?;
         fs::write(&pending, data)?;
         fs::rename(pending, &self.state_path)?;
@@ -313,7 +346,7 @@ impl Host {
         let action = self.actions.iter().find(|a| a.uuid == slot.uuid);
         let plugin = action.and_then(|a| self.plugins.iter().find(|p| p.id == a.plugin));
         if let Some(sender) = plugin.and_then(|p| p.sender.as_ref()) {
-            let mut payload = json!({"controller":slot.controller,"coordinates":{"column":slot.index%4,"row":if slot.controller=="Encoder" {0}else{slot.index/4}},"settings":slot.settings,"state":slot.state,"isInMultiAction":false,"resources":{}});
+            let mut payload = action_payload(slot);
             if let Some(map) = extra.as_object() {
                 for (k, v) in map {
                     payload[k] = v.clone();
@@ -324,20 +357,31 @@ impl Host {
     }
     fn render(&mut self) -> Result<()> {
         let mut strip = DynamicImage::ImageRgb8(RgbImage::from_pixel(800, 100, Rgb([14, 21, 29])));
+        let mut warnings = Vec::new();
         for slot in &mut self.slots {
             let picture = if slot.controller == "Encoder" {
-                self.renderer.dial(&slot.title, &slot.feedback)
+                let root = self
+                    .actions
+                    .iter()
+                    .find(|a| a.uuid == slot.uuid)
+                    .and_then(|a| self.plugins.iter().find(|p| p.id == a.plugin))
+                    .map(|p| p.root.as_path());
+                display::dial_image(&self.renderer, slot, root)?
             } else {
                 self.renderer.key(&slot.title, slot.background.as_ref())
             };
             let mut png = Cursor::new(Vec::new());
             picture.write_to(&mut png, image::ImageFormat::Png)?;
             slot.preview = STANDARD.encode(png.into_inner());
+            warnings.append(&mut slot.display_warnings);
             if slot.controller == "Encoder" {
                 strip.copy_from(&picture, slot.index as u32 * 200, 0)?;
             } else if let Some(hardware) = &self.hardware {
                 let _ = hardware.send(Draw::Key(slot.index, picture));
             }
+        }
+        for warning in warnings {
+            self.log(warning);
         }
         if let Some(hardware) = &self.hardware {
             for index in 0..8 {
@@ -363,14 +407,24 @@ impl Host {
             .find(|a| a.uuid == uuid && a.controllers.iter().any(|c| c == controller))
             .cloned()
             .context("Action is not installed or does not support this controller")?;
-        if controller == "Encoder"
-            && action.raw["Encoder"]["layout"]
-                .as_str()
-                .is_some_and(|layout| layout != "$B1")
-        {
-            bail!(
-                "This action requires a layout that is not implemented yet; choose Feedback for the supported $B1 sample"
-            );
+        if controller == "Encoder" {
+            let root = self
+                .plugins
+                .iter()
+                .find(|p| p.id == action.plugin)
+                .map(|p| p.root.as_path());
+            display::load_layout(
+                root,
+                action.raw["Encoder"]["layout"].as_str().unwrap_or("$B1"),
+            )?;
+        }
+        let old_context = self
+            .slots
+            .iter()
+            .find(|s| s.controller == controller && s.index == index)
+            .map(|s| s.context.clone());
+        if let Some(context) = old_context {
+            self.close_inspectors(Some(&context));
         }
         if let Some(old) = self
             .slots
@@ -401,6 +455,9 @@ impl Host {
                 .into(),
             states: action.raw["States"].clone(),
             background: None,
+            layout_cache: None,
+            image_cache: HashMap::new(),
+            display_warnings: Vec::new(),
             preview: String::new(),
         };
         if let Some(plugin) = self.plugins.iter().find(|p| p.id == action.plugin) {
@@ -479,8 +536,13 @@ impl Host {
             return Ok(());
         }
         if event == "setGlobalSettings" {
+            if !payload.is_object() {
+                bail!("Global settings must be an object");
+            }
             self.globals.insert(plugin.id.clone(), payload);
-            return self.persist();
+            self.persist()?;
+            self.notify_global_settings(plugin_index, None, false);
+            return Ok(());
         }
         let index = self
             .slots
@@ -495,18 +557,30 @@ impl Host {
             bail!("Plugin does not own this context");
         }
         if event == "getSettings" {
-            let slot = &self.slots[index];
-            let mut reply = json!({"event":"didReceiveSettings","context":slot.context,"action":slot.uuid,"device":self.device,"payload":{"settings":slot.settings,"state":slot.state,"resources":{},"controller":slot.controller,"coordinates":{"column":slot.index%4,"row":if slot.controller=="Encoder"{0}else{slot.index/4}},"isInMultiAction":false}});
-            if let Some(id) = message.get("id") {
-                reply["id"] = id.clone();
-            }
+            let reply = self.settings_event(&self.slots[index], message.get("id"));
             if let Some(sender) = &plugin.sender {
                 let _ = sender.send(reply);
             }
             return Ok(());
         }
+        if event == "setSettings" {
+            if !payload.is_object() {
+                bail!("Settings must be an object");
+            }
+            self.slots[index].settings = payload;
+            self.persist()?;
+            self.notify_inspectors(context, self.settings_event(&self.slots[index], None), None);
+            return Ok(());
+        }
+        if event == "sendToPropertyInspector" {
+            let slot = &self.slots[index];
+            self.notify_inspectors(context,json!({"event":"sendToPropertyInspector","action":slot.uuid,"context":slot.context,"device":self.device,"payload":payload}),None);
+            return Ok(());
+        }
         let root = plugin.root.clone();
-        let slot = &mut self.slots[index];
+        // Validate a replacement before exposing it to any display or saved state.
+        let mut replacement = self.slots[index].clone();
+        let slot = &mut replacement;
         if matches!(event, "setImage" | "setTitle") {
             if payload
                 .get("state")
@@ -519,11 +593,6 @@ impl Host {
             }
         }
         match event {
-            "setSettings" => {
-                slot.settings = payload;
-                self.persist()?;
-                return Ok(());
-            }
             "setTitle" => {
                 slot.title = payload["title"].as_str().unwrap_or(&slot.name).to_owned();
             }
@@ -549,15 +618,15 @@ impl Host {
             "setFeedback" => {
                 let object = payload.as_object().context("Feedback must be an object")?;
                 for (key, value) in object {
-                    slot.feedback[key] = value.clone();
+                    display::merge_feedback(&mut slot.feedback[key], value);
                 }
             }
             "setFeedbackLayout" => {
                 let layout = payload["layout"].as_str().context("Missing layout")?;
-                if layout != "$B1" {
-                    bail!("Only the $B1 title/value/indicator feedback subset is implemented");
-                }
+                let definition = display::load_layout(Some(&root), layout)?;
                 slot.layout = layout.into();
+                slot.layout_cache = Some(definition);
+                slot.image_cache.clear();
             }
             "setTriggerDescription" => {
                 return Ok(());
@@ -570,6 +639,10 @@ impl Host {
                 bail!("Unsupported plugin command: {event}");
             }
         }
+        if replacement.controller == "Encoder" {
+            display::dial_image(&self.renderer, &mut replacement, Some(&root))?;
+        }
+        self.slots[index] = replacement;
         self.render()?;
         self.persist()?;
         Ok(())
@@ -587,23 +660,37 @@ fn safe_file(root: &Path, path: &str) -> Result<PathBuf> {
 fn load_image(root: &Path, source: &str) -> Result<DynamicImage> {
     let data = if source.starts_with("data:image/") {
         let (header, content) = source.split_once(',').context("Invalid image URL")?;
-        if !header.ends_with(";base64") {
-            bail!("Only base64 image URLs supported");
+        if content.len() > 12 * 1024 * 1024 {
+            bail!("Encoded image exceeds 12 MiB");
         }
-        STANDARD.decode(content)?
+        if header.ends_with(";base64") {
+            STANDARD.decode(content)?
+        } else {
+            percent_encoding::percent_decode_str(content).collect::<Vec<_>>()
+        }
     } else {
-        fs::read(safe_file(root, source)?)?
+        let path = safe_file(root, source)?;
+        if fs::metadata(&path)?.len() > 8 * 1024 * 1024 {
+            bail!("Image exceeds 8 MiB");
+        }
+        fs::read(path)?
     };
     if data.len() > 8 * 1024 * 1024 {
         bail!("Image exceeds 8 MiB");
     }
-    Ok(image::load_from_memory(&data)?)
+    let svg = source.starts_with("data:image/svg+xml")
+        || source.ends_with(".svg")
+        || std::str::from_utf8(&data[..data.len().min(512)])
+            .is_ok_and(|text| text.contains("<svg"));
+    display::decode_image(&data, svg)
 }
+
 fn state_image(root: &Path, states: &Value, state: u64) -> Option<DynamicImage> {
     let image = states.get(state as usize)?.get("Image")?.as_str()?;
     load_image(root, image)
         .or_else(|_| load_image(root, &format!("{image}.png")))
         .or_else(|_| load_image(root, &format!("{image}.jpg")))
+        .or_else(|_| load_image(root, &format!("{image}.svg")))
         .ok()
 }
 
@@ -619,13 +706,17 @@ async fn root(
             .max_message_size(12 * 1024 * 1024)
             .on_upgrade(move |socket| socket_session(socket, state));
     }
-    let token = state.lock().unwrap().token.clone();
+    let host = state.lock().unwrap();
+    if !host.diagnostics {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let token = host.token.clone();
     Html(include_str!("ui.html").replace("__TOKEN__", &token)).into_response()
 }
 fn snapshot(host: &Host) -> Value {
-    json!({"device":host.device,"firmware":host.firmware,"simulate":host.simulate,"connected":host.hardware.is_some(),
-        "slots":host.slots.iter().map(|s|json!({"context":s.context,"controller":s.controller,"index":s.index,"uuid":s.uuid,"name":s.name,"settings":s.settings,"title":s.title,"state":s.state,"feedback":s.feedback,"layout":s.layout,"preview":s.preview})).collect::<Vec<_>>(),
-        "actions":host.actions,"logs":host.logs,"plugins":host.plugins.iter().map(|p|json!({"id":p.id,"name":p.name,"connected":p.sender.is_some()})).collect::<Vec<_>>()})
+    json!({"running":host.running,"device":host.device,"firmware":host.firmware,"simulate":host.simulate,"connected":host.hardware.is_some(),
+        "slots":host.slots.iter().map(|s|json!({"context":s.context,"controller":s.controller,"index":s.index,"uuid":s.uuid,"name":s.name,"settings":s.settings,"title":s.title,"state":s.state,"feedback":s.feedback,"layout":s.layout,"preview":s.preview,"has_inspector":host.actions.iter().find(|a|a.uuid==s.uuid).is_some_and(|a|a.raw["PropertyInspectorPath"].is_string()||host.plugins.iter().find(|p|p.id==a.plugin).is_some_and(|p|p.manifest["PropertyInspectorPath"].is_string()))})).collect::<Vec<_>>(),
+        "inspectors":host.inspectors.values().map(|i|json!({"context":i.context,"plugin":host.plugins[i.plugin].id,"connected":i.sender.is_some()})).collect::<Vec<_>>(),"actions":host.actions,"logs":host.logs,"plugins":host.plugins.iter().map(|p|json!({"id":p.id,"name":p.name,"connected":p.sender.is_some()})).collect::<Vec<_>>()})
 }
 async fn dashboard(State(state): State<Shared>) -> Json<Value> {
     Json(snapshot(&state.lock().unwrap()))
@@ -656,6 +747,15 @@ async fn control(
 }
 fn apply_control(host: &mut Host, r: Value) -> Result<()> {
     match r["command"].as_str().context("Missing command")? {
+        "open_inspector" => {
+            host.open_inspector(r["context"].as_str().context("Missing action context")?)
+        }
+        "close_inspector" => {
+            host.close_inspectors(Some(
+                r["context"].as_str().context("Missing action context")?,
+            ));
+            Ok(())
+        }
         "assign" => host.assign(
             r["controller"].as_str().unwrap_or(""),
             u8::try_from(r["index"].as_u64().context("Invalid index")?)?,
@@ -667,6 +767,8 @@ fn apply_control(host: &mut Host, r: Value) -> Result<()> {
                 .iter()
                 .position(|s| s.context == r["context"])
                 .context("Unknown context")?;
+            let context = host.slots[index].context.clone();
+            host.close_inspectors(Some(&context));
             host.emit(&host.slots[index], "willDisappear", json!({}));
             host.slots.remove(index);
             host.render()?;
@@ -753,13 +855,23 @@ fn apply_control(host: &mut Host, r: Value) -> Result<()> {
                 bail!("Settings must be an object");
             }
             host.slots[index].settings = r["settings"].clone();
+            host.persist()?;
             host.emit(&host.slots[index], "didReceiveSettings", json!({}));
-            host.persist()
+            host.notify_inspectors(
+                &host.slots[index].context,
+                host.settings_event(&host.slots[index], None),
+                None,
+            );
+            Ok(())
         }
         _ => bail!("Unknown command"),
     }
 }
 
+enum Client {
+    Plugin(usize),
+    Inspector(String),
+}
 async fn socket_session(socket: WebSocket, state: Shared) {
     let (mut sink, mut stream) = socket.split();
     let registration = tokio::time::timeout(Duration::from_secs(5), stream.next()).await;
@@ -770,38 +882,60 @@ async fn socket_session(socket: WebSocket, state: Shared) {
         return;
     };
     let (sender, mut receiver) = mpsc::unbounded_channel();
-    let plugin_index = {
+    let client = {
         let mut host = state.lock().unwrap();
-        let index = host.plugins.iter().position(|p| {
-            frame["event"] == "registerPlugin"
-                && frame["uuid"] == p.registration
-                && p.sender.is_none()
-        });
-        let Some(index) = index else {
-            return;
-        };
-        let _ = sender.send(json!({"event":"deviceDidConnect","device":host.device,"deviceInfo":{"name":"Stream Deck +","type":7,"size":{"columns":4,"rows":2}}}));
-        host.plugins[index].sender = Some(sender);
-        let id = host.plugins[index].id.clone();
-        host.log(format!("Plugin connected: {id}"));
-        for slot in &host.slots {
-            if host
-                .actions
+        if frame["event"] == "registerPlugin" {
+            let Some(index) = host
+                .plugins
                 .iter()
-                .any(|a| a.uuid == slot.uuid && a.plugin == id)
-            {
-                host.emit(slot, "willAppear", json!({}));
+                .position(|p| frame["uuid"] == p.registration && p.sender.is_none())
+            else {
+                return;
+            };
+            let _=sender.send(json!({"event":"deviceDidConnect","device":host.device,"deviceInfo":{"name":"Stream Deck +","type":7,"size":{"columns":4,"rows":2}}}));
+            host.plugins[index].sender = Some(sender);
+            let id = host.plugins[index].id.clone();
+            host.log(format!("Plugin connected: {id}"));
+            for slot in &host.slots {
+                if host
+                    .actions
+                    .iter()
+                    .any(|a| a.uuid == slot.uuid && a.plugin == id)
+                {
+                    host.emit(slot, "willAppear", json!({}));
+                }
             }
+            Client::Plugin(index)
+        } else if frame["event"] == "registerPropertyInspector" {
+            let Some(registration) = frame["uuid"].as_str() else {
+                return;
+            };
+            let Some(inspector) = host.inspectors.get_mut(registration) else {
+                return;
+            };
+            if inspector.sender.is_some() {
+                return;
+            }
+            inspector.sender = Some(sender);
+            let context = inspector.context.clone();
+            if let Some(slot) = host.slots.iter().find(|s| s.context == context) {
+                host.emit(slot, "propertyInspectorDidAppear", json!({}));
+            }
+            host.log(format!("Property inspector connected: {context}"));
+            Client::Inspector(registration.to_owned())
+        } else {
+            return;
         }
-        index
     };
     loop {
         tokio::select! {
             outgoing=receiver.recv()=>{let Some(outgoing)=outgoing else{break;};if sink.send(Message::Text(outgoing.to_string().into())).await.is_err(){break;}}
             incoming=stream.next()=>{match incoming {
                 Some(Ok(Message::Text(text)))=>{
-                    let result=serde_json::from_str::<Value>(&text).map_err(anyhow::Error::from).and_then(|message|state.lock().unwrap().plugin_message(plugin_index,message));
-                    if let Err(error)=result {state.lock().unwrap().log(format!("Plugin command rejected: {error}"));}
+                    let result=serde_json::from_str::<Value>(&text).map_err(anyhow::Error::from).and_then(|message|{
+                        let mut host=state.lock().unwrap();match &client {Client::Plugin(index)=>host.plugin_message(*index,message),Client::Inspector(id)=>host.inspector_message(id,message)}
+                    });
+                    if let Err(error)=result {state.lock().unwrap().log(format!("SDK command rejected: {error}"));}
                 }
                 Some(Ok(Message::Ping(data)))=>{if sink.send(Message::Pong(data)).await.is_err(){break;}}
                 Some(Ok(Message::Close(_)))|None|Some(Err(_))=>break,
@@ -810,9 +944,14 @@ async fn socket_session(socket: WebSocket, state: Shared) {
         }
     }
     let mut host = state.lock().unwrap();
-    host.plugins[plugin_index].sender = None;
-    let id = host.plugins[plugin_index].id.clone();
-    host.log(format!("Plugin disconnected: {id}"));
+    match client {
+        Client::Plugin(index) => {
+            host.plugins[index].sender = None;
+            let id = host.plugins[index].id.clone();
+            host.log(format!("Plugin disconnected: {id}"));
+        }
+        Client::Inspector(id) => host.close_inspector(&id),
+    }
 }
 
 fn load_plugins(paths: Vec<PathBuf>) -> Result<(Vec<Plugin>, Vec<Action>)> {
@@ -920,44 +1059,99 @@ fn launch_plugins(host: &mut Host, port: u16, state_dir: &Path) -> Result<()> {
     }
     Ok(())
 }
-fn launch_plugin(plugin: &mut Plugin, device: &str, port: u16, state_dir: &Path) -> Result<()> {
-    let code = plugin.manifest["CodePath"]
-        .as_str()
-        .context("Plugin has no generic CodePath; native Windows-only plugins are not supported")?;
-    let file = safe_file(&plugin.root, code)?;
-    if file.extension().and_then(|s| s.to_str()) != Some("js")
-        && file.extension().and_then(|s| s.to_str()) != Some("mjs")
-    {
-        bail!(
-            "{} is not a Node.js plugin; native/HTML runtimes are not yet implemented",
-            plugin.id
-        );
+fn registration_info(plugin: &Plugin, device: &str) -> Value {
+    json!({"application":{"font":"DejaVu Sans","language":"en","platform":"linux","platformVersion":std::env::consts::OS,"version":"7.6.0"},"plugin":{"uuid":plugin.id,"version":plugin.manifest["Version"]},"devicePixelRatio":1,"colors":{"buttonMouseOverBackgroundColor":"#303030","buttonPressedBackgroundColor":"#303030","buttonPressedBorderColor":"#505050","buttonPressedTextColor":"#ffffff","highlightColor":"#4bd3b0"},"devices":[{"id":device,"type":7,"name":"Stream Deck +","size":{"columns":4,"rows":2}}]})
+}
+#[allow(clippy::too_many_arguments)]
+fn spawn_webview(
+    path: &Path,
+    port: u16,
+    uuid: &str,
+    event: &str,
+    info: &Value,
+    action_info: Option<&Value>,
+    visible: bool,
+    state_dir: &Path,
+) -> Result<Child> {
+    let log = File::create(state_dir.join(format!("webview-{uuid}.log")))?;
+    // Re-execute this exact Linux binary, even if installation replaced its path
+    // while the desktop was running. Helpers must match the host's protocol.
+    let mut command = Command::new("/proc/self/exe");
+    command
+        .arg("webview")
+        .arg("--path")
+        .arg(path)
+        .arg("--port")
+        .arg(port.to_string())
+        .arg("--uuid")
+        .arg(uuid)
+        .arg("--register-event")
+        .arg(event)
+        .arg("--info")
+        .arg(info.to_string());
+    if let Some(action) = action_info {
+        command.arg("--action-info").arg(action.to_string());
     }
-    let required = plugin.manifest["Nodejs"]["Version"]
-        .as_str()
-        .context("Plugin does not declare a Nodejs.Version")?;
-    let node = node_runtime(required)?;
-    let info = json!({"application":{"font":"DejaVu Sans","language":"en","platform":"linux","platformVersion":std::env::consts::OS,"version":"7.6.0"},"plugin":{"uuid":plugin.id,"version":plugin.manifest["Version"]},"devicePixelRatio":1,"colors":{"buttonMouseOverBackgroundColor":"#303030","buttonPressedBackgroundColor":"#303030","buttonPressedBorderColor":"#505050","buttonPressedTextColor":"#ffffff","highlightColor":"#4bd3b0"},"devices":[{"id":device,"type":7,"name":"Stream Deck +","size":{"columns":4,"rows":2}}]});
-    let log = File::create(state_dir.join(format!("plugin-{}.log", plugin.registration)))?;
-    plugin.child = Some(
-        Command::new(node)
-            .arg(file)
-            .args([
-                "-port",
-                &port.to_string(),
-                "-pluginUUID",
+    if visible {
+        command.arg("--visible");
+    }
+    command
+        .current_dir(path.parent().context("HTML document has no directory")?)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(log.try_clone()?))
+        .stderr(Stdio::from(log));
+    Ok(command.spawn()?)
+}
+fn launch_plugin(plugin: &mut Plugin, device: &str, port: u16, state_dir: &Path) -> Result<()> {
+    let code = plugin.manifest["CodePath"].as_str().context(
+        "Plugin has no generic CodePath; platform-specific binary support is unfinished",
+    )?;
+    let file = safe_file(&plugin.root, code)?;
+    let info = registration_info(plugin, device);
+    match file.extension().and_then(|s| s.to_str()) {
+        Some("html" | "htm") => {
+            plugin.child = Some(spawn_webview(
+                &file,
+                port,
                 &plugin.registration,
-                "-registerEvent",
                 "registerPlugin",
-                "-info",
-                &info.to_string(),
-            ])
-            .current_dir(&plugin.root)
-            .stdin(Stdio::null())
-            .stdout(Stdio::from(log.try_clone()?))
-            .stderr(Stdio::from(log))
-            .spawn()?,
-    );
+                &info,
+                None,
+                false,
+                state_dir,
+            )?);
+        }
+        Some("js" | "mjs") => {
+            let required = plugin.manifest["Nodejs"]["Version"]
+                .as_str()
+                .context("Nodejs.Version missing")?;
+            let node = node_runtime(required)?;
+            let log = File::create(state_dir.join(format!("plugin-{}.log", plugin.registration)))?;
+            plugin.child = Some(
+                Command::new(node)
+                    .arg(file)
+                    .args([
+                        "-port",
+                        &port.to_string(),
+                        "-pluginUUID",
+                        &plugin.registration,
+                        "-registerEvent",
+                        "registerPlugin",
+                        "-info",
+                        &info.to_string(),
+                    ])
+                    .current_dir(&plugin.root)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::from(log.try_clone()?))
+                    .stderr(Stdio::from(log))
+                    .spawn()?,
+            );
+        }
+        _ => bail!(
+            "Native Windows/macOS plugin binaries are not supported yet: {}",
+            plugin.id
+        ),
+    }
     Ok(())
 }
 
@@ -986,6 +1180,7 @@ pub async fn serve(
     .await
 }
 async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result<()> {
+    let diagnostics = embedded.is_none();
     let HostOptions {
         serial,
         plugins,
@@ -995,6 +1190,7 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
         simulate,
         seconds,
     } = options;
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     fs::create_dir_all(&state_dir)?;
     let session_lock = File::create(state_dir.join("session.lock"))?;
     session_lock
@@ -1034,6 +1230,9 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
         .transpose()?
         .unwrap_or_else(|| "simulation".into());
     let mut host = Host {
+        diagnostics,
+        running: true,
+        inspectors: HashMap::new(),
         port,
         plugins,
         actions,
@@ -1150,8 +1349,14 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
     host.render()?;
     host.persist()?;
     host.log(format!(
-        "Editor http://127.0.0.1:{port} | {} | firmware {}",
-        host.device, host.firmware
+        "{} http://127.0.0.1:{port} | {} | firmware {}",
+        if diagnostics {
+            "Editor"
+        } else {
+            "Plugin endpoint"
+        },
+        host.device,
+        host.firmware
     ));
     let shared = Arc::new(Mutex::new(host));
     let mut embedded_stop = if let Some(channels) = embedded {
@@ -1192,17 +1397,54 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
             }
         }
     });
-    let app = Router::new()
-        .route("/", get(root))
-        .route("/api/state", get(dashboard))
-        .route("/api/control", post(control))
-        .with_state(shared.clone());
+    let mut app = Router::new().route("/", get(root));
+    if diagnostics {
+        app = app
+            .route("/api/state", get(dashboard))
+            .route("/api/control", post(control));
+    }
+    let app = app
+        .with_state(shared.clone())
+        .layer(axum::middleware::from_fn(
+            move |request: axum::extract::Request, next: axum::middleware::Next| async move {
+                let allowed = request
+                    .headers()
+                    .get("host")
+                    .and_then(|h| h.to_str().ok())
+                    .is_some_and(|host| {
+                        [
+                            format!("127.0.0.1:{port}"),
+                            format!("localhost:{port}"),
+                            format!("[::1]:{port}"),
+                        ]
+                        .iter()
+                        .any(|expected| host.eq_ignore_ascii_case(expected))
+                    });
+                if !allowed {
+                    return StatusCode::FORBIDDEN.into_response();
+                }
+                next.run(request).await
+            },
+        ));
+    let monitor_state = shared.clone();
+    let monitor_task = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_millis(250));
+        loop {
+            interval.tick().await;
+            let mut host = monitor_state.lock().unwrap();
+            if !host.running {
+                break;
+            }
+            host.monitor_children();
+        }
+    });
     let stop = async move {
         let duration = seconds.map(Duration::from_secs).unwrap_or(Duration::MAX);
         tokio::select! {
             _=async {if let Some(stop)=embedded_stop.as_mut(){let _=stop.await;}else{std::future::pending::<()>().await;}}=>{},
             _=async{if seconds.is_some(){tokio::time::sleep(duration).await;}else{std::future::pending::<()>().await;}}=>{},
             _=tokio::signal::ctrl_c()=>{},
+            _=terminate.recv()=>{},
         }
     };
     // Stop our children before graceful HTTP shutdown waits for their sockets.
@@ -1221,6 +1463,7 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
     }
     let _ = draw_tx.send(Draw::Stop);
     event_task.abort();
+    monitor_task.abort();
     if let Some(worker) = worker {
         let _ = worker.join();
     }
@@ -1229,13 +1472,10 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
 }
 
 fn stop_plugins(host: &mut Host) {
+    host.running = false;
+    host.close_inspectors(None);
     for plugin in &mut host.plugins {
-        if let Some(mut child) = plugin.child.take() {
-            if child.try_wait().ok().flatten().is_none() {
-                let _ = child.kill();
-            }
-            let _ = child.wait();
-        }
+        stop_child(&mut plugin.child);
     }
 }
 
@@ -1256,6 +1496,24 @@ mod tests {
         };
         let running = start(options.clone()).unwrap();
         assert_eq!(running.controller.snapshot()["simulate"], true);
+        {
+            use std::io::{Read, Write};
+            let port = running.controller.shared.lock().unwrap().port;
+            for path in ["/", "/api/state"] {
+                let mut socket = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                write!(
+                    socket,
+                    "GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
+                )
+                .unwrap();
+                let mut response = String::new();
+                socket.read_to_string(&mut response).unwrap();
+                assert!(response.starts_with("HTTP/1.1 404"));
+            }
+        }
         assert!(
             running
                 .controller
@@ -1264,7 +1522,14 @@ mod tests {
         );
         // A second owner must not overwrite this session, even on another port.
         assert!(start(options.clone()).is_err());
+        let controller = running.controller.clone();
         drop(running);
+        assert_eq!(controller.snapshot()["running"], false);
+        assert!(
+            controller
+                .command(json!({"command":"input","event":"keyDown","index":0}))
+                .is_err()
+        );
         // Joining the embedded host releases its file lock before the next launch.
         let restarted = start(options).unwrap();
         assert_eq!(
@@ -1275,6 +1540,9 @@ mod tests {
     }
     fn fixture(root: &Path) -> Host {
         Host {
+            diagnostics: false,
+            running: true,
+            inspectors: HashMap::new(),
             port: 0,
             plugins: vec![Plugin {
                 id: "test.plugin".into(),
@@ -1305,6 +1573,9 @@ mod tests {
                 layout: "$B1".into(),
                 states: json!([{}, {}]),
                 background: None,
+                layout_cache: None,
+                image_cache: HashMap::new(),
+                display_warnings: Vec::new(),
                 preview: String::new(),
             }],
             globals: HashMap::new(),
@@ -1405,5 +1676,112 @@ mod tests {
         assert!(error.to_string().contains("already owned"));
         assert_eq!(host.plugins.len(), 1);
         assert_eq!(host.actions[0].plugin, "test.plugin");
+    }
+    #[test]
+    fn inspector_identity_is_bound_to_one_action_and_replies_use_real_context() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut host = fixture(temp.path());
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        host.inspectors.insert(
+            "inspector-token".into(),
+            Inspector {
+                context: "test.context".into(),
+                plugin: 0,
+                child: None,
+                sender: Some(tx),
+            },
+        );
+        host.inspector_message(
+            "inspector-token",
+            json!({"event":"getSettings","context":"inspector-token","id":"request"}),
+        )
+        .unwrap();
+        let reply = rx.try_recv().unwrap();
+        assert_eq!(reply["context"], "test.context");
+        assert_eq!(reply["action"], "test.action");
+        assert_eq!(reply["id"], "request");
+        for extra in [
+            json!({"context":"other.context"}),
+            json!({"context":"inspector-token","targetContext":"other.context"}),
+            json!({"context":"inspector-token","action":"other.action"}),
+        ] {
+            let mut message = extra;
+            message["event"] = json!("setSettings");
+            message["payload"] = json!({"bad":true});
+            assert!(host.inspector_message("inspector-token", message).is_err());
+            assert_eq!(host.slots[0].settings, json!({}));
+        }
+    }
+    #[test]
+    fn plugin_settings_and_messages_reach_only_the_bound_inspector() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut host = fixture(temp.path());
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (other_tx, mut other_rx) = mpsc::unbounded_channel();
+        host.inspectors.insert(
+            "pi".into(),
+            Inspector {
+                context: "test.context".into(),
+                plugin: 0,
+                child: None,
+                sender: Some(tx),
+            },
+        );
+        host.inspectors.insert(
+            "other".into(),
+            Inspector {
+                context: "other.context".into(),
+                plugin: 0,
+                child: None,
+                sender: Some(other_tx),
+            },
+        );
+        host.plugin_message(
+            0,
+            json!({"event":"setSettings","context":"test.context","payload":{"count":7}}),
+        )
+        .unwrap();
+        assert_eq!(rx.try_recv().unwrap()["payload"]["settings"]["count"], 7);
+        assert!(other_rx.try_recv().is_err());
+        host.plugin_message(0,json!({"event":"sendToPropertyInspector","context":"test.context","payload":{"message":"hello"}})).unwrap();
+        assert_eq!(
+            rx.try_recv().unwrap()["payload"],
+            json!({"message":"hello"})
+        );
+        assert!(other_rx.try_recv().is_err());
+    }
+    #[test]
+    fn invalid_dial_feedback_does_not_poison_the_previous_display_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut host = fixture(temp.path());
+        host.slots[0].controller = "Encoder".into();
+        host.slots[0].feedback = json!({"indicator":30});
+        let result=host.plugin_message(0,json!({"event":"setFeedback","context":"test.context","payload":{"indicator":{"bar_fill_c":"not a CSS color"}}}));
+        assert!(result.is_err());
+        assert_eq!(host.slots[0].feedback, json!({"indicator":30}));
+    }
+    #[test]
+    fn failed_unregistered_inspector_is_reaped_and_its_error_is_visible() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut host = fixture(temp.path());
+        fs::write(temp.path().join("webview-failed.log"), "callback missing").unwrap();
+        let mut child = Command::new("/bin/false").spawn().unwrap();
+        child.wait().unwrap();
+        host.inspectors.insert(
+            "failed".into(),
+            Inspector {
+                context: "test.context".into(),
+                plugin: 0,
+                child: Some(child),
+                sender: None,
+            },
+        );
+        host.monitor_children();
+        assert!(!host.inspectors.contains_key("failed"));
+        assert!(
+            host.logs
+                .iter()
+                .any(|line| line.contains("callback missing"))
+        );
     }
 }

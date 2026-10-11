@@ -2,10 +2,11 @@
 
 An independent Linux Stream Deck+ desktop application written from scratch in
 Rust. The native editor uses egui/eframe and calls the Rust host directly in the
-same process. No browser is required. A separate headless diagnostic mode retains
+same process. Plugin HTML runs in isolated native WebKit windows. A separate headless diagnostic mode retains
 the earlier local web editor. No existing Stream Deck host, driver implementation,
 or application template is used.
-Generic USB, image, font, HTTP, WebSocket and archive libraries are dependencies.
+Generic USB, image, font, HTTP, WebSocket, archive and native browser libraries
+are dependencies. Linux HTML support uses system GTK3 and WebKitGTK4.1 libraries.
 
 This is a working early compatibility build, **not a complete port of Elgato's
 application**. Its first targets are the unchanged official Counter and Layouts
@@ -28,7 +29,8 @@ workspace session was copied into this directory with its sample plugins;
 
 Select a key or dial in the native window, choose an action, and assign it. Edit
 simple settings with text, numeric and checkbox controls, then Save changes.
-Advanced JSON editing remains available. Draft changes survive periodic refresh
+Use **Plugin settings…** to open an action's original HTML property inspector
+when its manifest provides one. Advanced JSON editing remains available. Draft changes survive periodic refresh
 and switching between controls. The native window also has plugin/profile file
 pickers, title editing, removal and input testing. Closing the window currently
 stops this host and its plugin processes; tray/background mode remains unfinished.
@@ -56,6 +58,8 @@ cargo build --locked
 Do not run two hosts on the same physical deck. `--simulate` opens no USB device.
 The existing headless `serve` command still exposes the diagnostic browser editor
 at its printed loopback address; it is not the native application's interface.
+Native mode exposes only the plugin WebSocket endpoint, not the
+browser editor or its HTTP control routes.
 
 ## Commands
 
@@ -88,9 +92,9 @@ Importing a built-in Windows action does not implement that action on Linux.
 | USB | Real `0fd9:0084` Stream Deck+ opened; firmware `2.0.3.4` read |
 | Hardware input | Live key transitions, dial press/release, signed rotation observed |
 | Displays | Key JPEGs and touchscreen JPEGs written; user confirmed displays and controls work |
-| Plugin runtime | Unchanged official Node Counter and Layouts feedback plugins register and respond |
+| Plugin runtime | Node samples work; native HTML helper passes generated protocol fixtures and registers the unchanged Windows-bundled tutorial |
 | Plugin protocol | `willAppear`, `willDisappear`, key/dial events, settings/global settings, current-state title/image/state and basic feedback |
-| Feedback | `$B1` title/value/indicator subset; not a general layout engine |
+| Feedback | All six published built-ins and four official custom layouts exercised through the unchanged Layouts plugin; text, bars, gradients, images, SVG, clipping and incremental properties |
 | Profiles | Six official sample archives and two Windows-bundled Plus profiles; current/default pages, encoded UUID folders, settings, states and images |
 | Persistence | Real sample settings survive host restart; imported background images tested for round-trip persistence |
 | Native desktop editor | Installed optimized Rust window; action assignment, input testing, live previews, typed settings, JSON, title/removal, native file pickers and status. User confirmed native setting edits affect physical presses. |
@@ -105,10 +109,10 @@ The full objective stays open. [FEATURE_PARITY.md](docs/FEATURE_PARITY.md) track
 60 feature requirements against the shipped Windows 7.6 release. No sample-only
 completion criterion replaces the desktop parity goal.
 
-1. HTML plugin runtimes and plugin property inspectors. The Windows installer
-   contains an actual Elgato tutorial HTML plugin that provides a concrete target.
-2. General custom/built-in feedback layouts, separate hardware/editor targets,
-   inactive-state image/title updates, alerts and richer image formats such as SVG.
+1. Broader HTML/property-inspector workflows, embedded resources, local file
+   controls and real-world plugin compatibility beyond the tested samples.
+2. Separate hardware/editor targets, inactive-state image/title updates, alerts,
+   animation, and native-reference visual validation of layout font/bar details.
 3. Profile page/folder switching, exporting profiles, multi-actions, built-in
    hotkeys/audio/application actions, and automatic profile selection.
 4. Native Windows/macOS plugin binaries and platform-specific dependencies.
@@ -130,6 +134,9 @@ cargo test --locked -- --include-ignored
 cargo clippy --locked --all-targets -- -D warnings
 cargo fmt --check
 python tests/sample_interop.py
+python tests/layout_interop.py
+python tests/webview_interop.py
+python tests/native_lifecycle.py
 ```
 
 The optional installer test needs the local Windows artifacts. The sample
@@ -175,3 +182,37 @@ incrementBy in the native window changed the physical key's behavior.
 27 tests, strict Clippy, formatting, and unchanged-sample interoperability passed.
 Artifacts are in `../evidence/native/`. This proves the named native workflow,
 not full desktop parity or every control/OS integration.
+
+## HTML and layout verification
+
+The native WebKit helper runs HTML backends hidden and opens property inspectors
+as native windows. Inspector identities are bound to one action. Settings/global
+settings and plugin/inspector messages route in both directions; malformed
+contexts cannot write another action's settings. Closing/replacing an action
+cleans up its inspector. Failed unregistered helpers are reaped and surfaced in
+the activity log. SIGINT/SIGTERM now close the native editor as well as its host.
+
+The unchanged Counter inspector registers directly. A separate, explicitly
+instrumented fixture loads its original HTML unchanged in a same-origin srcdoc
+frame, edits the real sdpi control and proves the Counter consumes the setting.
+This is not a manual-click claim. The shipped tutorial's registration is tested;
+its complete onboarding workflow is still open.
+
+All six built-ins (`$X1`, `$A0`, `$A1`, `$B1`, `$B2`, `$C1`) and four custom layouts
+run through the unchanged official Layouts plugin. PNG content, SVG icons,
+gradients, independent bars and persisted feedback are checked. The official
+`$C1` sample references an absent `imgs/actions/layout/layout.svg`; that item is
+blank with a diagnostic, while its indicators continue working. Original sample
+files were not repaired or replaced to make the test pass.
+
+The renderer follows documented geometry and inspected official example output.
+Exact native antialiasing, all font weights and every bar edge are not proven
+pixel-identical to the Windows renderer. Full desktop parity remains active in
+the feature checklist.
+
+Verification update, 2026-10-12: 50 unit/integration-boundary tests and strict
+Clippy pass. The optimized binary also passes all four process-level suites.
+The HTML suite now proves generated popup child-document execution and preserved
+window.opener communication; exact tutorial page visuals are still not established.
+Native SIGTERM/SIGINT shutdown and session reuse are tested in actual windows.
+Evidence for this update is retained in `../evidence/html-layout/`.
