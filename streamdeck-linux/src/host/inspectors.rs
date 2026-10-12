@@ -33,34 +33,9 @@ impl Host {
             }
             self.close_inspector(&registration);
         }
-        let mut failures = Vec::new();
-        for plugin in &mut self.plugins {
-            if let Some(child) = &mut plugin.child
-                && let Ok(Some(status)) = child.try_wait()
-            {
-                plugin.child = None;
-                let html = plugin.manifest["CodePath"]
-                    .as_str()
-                    .is_some_and(|p| p.ends_with(".html") || p.ends_with(".htm"));
-                failures.push((
-                    plugin.id.clone(),
-                    status,
-                    format!(
-                        "{}-{}.log",
-                        if html { "webview" } else { "plugin" },
-                        plugin.registration
-                    ),
-                ));
-            }
-        }
-        for (id, status, path) in failures {
-            self.log(format!(
-                "Plugin {id} exited ({status}): {}",
-                self.child_log(&path)
-            ));
-        }
+        self.monitor_plugins();
     }
-    fn child_log(&self, name: &str) -> String {
+    pub(super) fn child_log(&self, name: &str) -> String {
         use std::io::{Read, Seek, SeekFrom};
         let Some(directory) = self.state_path.parent() else {
             return String::new();

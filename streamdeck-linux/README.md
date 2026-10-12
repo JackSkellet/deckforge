@@ -29,15 +29,28 @@ in `$XDG_DATA_HOME/deckforge`, or `~/.local/share/deckforge` when unset.
 Local development sessions and external reference fixtures are not included in
 the repository.
 
-Select a key or dial in the native window, choose an action, and assign it. Edit
-simple settings with text, numeric and checkbox controls, then Save changes.
+Select a key or dial, search the **Actions** sidebar by action or plugin name,
+and choose **Assign to key/dial**. You can also drag an action onto a compatible
+control. Categories come from plugin manifests; the list filters for the selected
+key or dial. **Show key and dial actions** exposes incompatible choices with
+disabled controls. Edit simple settings with text, numeric and checkbox controls,
+then Save changes.
 Use **Plugin settings…** to open an action's original HTML property inspector
 when its manifest provides one. Advanced JSON editing remains available. Draft changes survive periodic refresh
-and switching between controls. The native window also has plugin/profile file
-pickers, title editing, removal and input testing. Closing or hiding the editor
+and switching between controls. **Plugins & profiles** contains installation,
+profile import and profile/page management. Title editing, removal and input
+testing stay with the selected control. Closing or hiding the editor
 keeps the device and plugins running. Open Deckforge again from the launcher or
 tray to restore the editor, including unsaved drafts. **Quit** in the editor or
 tray stops the host and its plugin processes.
+
+The plugin manager shows each plugin's connection status, version, folder and log
+path. A plugin that cannot start stays listed with its error; the rest of the app
+keeps running. **Restart** reloads that plugin from its folder and restores its
+visible action contexts with their saved settings. It does not automatically retry
+crashing plugins. Missing or malformed plugin folders stay in the session so they
+can be repaired and retried. Windows-only executables still require a compatible
+runtime or Linux port; restarting does not make them supported.
 
 The tray uses Linux StatusNotifierItem. If your desktop has no tray, reopening
 the launcher still restores the editor through a private local socket. This

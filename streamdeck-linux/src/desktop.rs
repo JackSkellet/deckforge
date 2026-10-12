@@ -120,6 +120,11 @@ pub fn run(controller: Controller, state: &std::path::Path, background: bool) ->
                         preferences.show();
                     }
                 }
+                if capture_path.is_some()
+                    && std::env::var("DECKFORGE_CAPTURE_PAGE").as_deref() == Ok("plugins")
+                {
+                    app.library_open = true;
+                }
                 app.capture = capture_path.map(|path| Capture {
                     path,
                     started: Instant::now(),
@@ -438,6 +443,8 @@ struct Desktop {
     error: String,
     notice: String,
     plugin_path: String,
+    action_library: crate::action_library::Library,
+    library_open: bool,
     profile_path: String,
     new_setting: String,
     new_kind: u8,
@@ -478,6 +485,8 @@ impl Desktop {
             error: String::new(),
             notice: String::new(),
             plugin_path: String::new(),
+            action_library: crate::action_library::Library::default(),
+            library_open: false,
             profile_path: String::new(),
             new_setting: String::new(),
             new_kind: 0,
@@ -642,6 +651,9 @@ impl Desktop {
                 .clicked()
             {
                 self.window.request(crate::instance::Command::Quit);
+            }
+            if ui.button("Plugins & profiles").clicked() {
+                self.library_open = true;
             }
             if ui.button("Preferences").clicked()
                 && let Some(preferences) = &mut self.preferences
@@ -909,38 +921,43 @@ impl Desktop {
         ui.heading("Your controls");
         ui.label("Select a key or dial to edit its action.");
         let width = (ui.available_width() - 30.0).max(280.0);
-        let key_size = ((width - 3.0 * 12.0) / 4.0).clamp(62.0, 115.0);
-        egui::Frame::new().fill(Color32::from_rgb(8, 11, 15)).corner_radius(16).inner_margin(14).show(ui, |ui| {
-            egui::Grid::new("device_keys").spacing([12.0, 12.0]).show(ui, |ui| {
-                for index in 0..8 {
-                    self.control_button(ui, Selection { dial: false, index }, Vec2::splat(key_size));
-                    if index % 4 == 3 { ui.end_row(); }
-                }
-            });
-            ui.add_space(12.0);
-            egui::Grid::new("device_dials").spacing([12.0, 10.0]).show(ui, |ui| {
-                for index in 0..4 {
-                    self.control_button(ui, Selection { dial: true, index }, Vec2::new(key_size, key_size / 2.0));
-                }
-                ui.end_row();
-                for index in 0..4 {
-                    ui.vertical_centered(|ui| {
-                        ui.set_width(key_size);
-                        ui.label(RichText::new(format!("Dial {}", index + 1)).small());
-                        ui.horizontal(|ui| {
-                            for (label, ticks) in [("−", -1), ("+", 1)] {
-                                let description = format!("Rotate dial {} {}", index + 1,
-                                    if ticks < 0 { "counterclockwise" } else { "clockwise" });
-                                let response = ui.button(label);
-                                response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &description));
-                                if response.on_hover_text(description).clicked() {
-                                    self.command(json!({"command":"input","event":"dialRotate","index":index,"ticks":ticks}));
+        let key_size = ((width - 3.0 * 12.0) / 4.0).clamp(58.0, 86.0);
+        ui.horizontal(|ui| {
+            ui.add_space(((ui.available_width() - (key_size * 4.0 + 64.0)) / 2.0).max(0.0));
+            egui::Frame::new()
+                .fill(Color32::from_rgb(8, 11, 15))
+                .corner_radius(16)
+                .inner_margin(14)
+                .show(ui, |ui| {
+                    ui.vertical(|ui| {
+                        egui::Grid::new("device_keys")
+                            .spacing([12.0, 12.0])
+                            .show(ui, |ui| {
+                                for index in 0..8 {
+                                    self.control_button(
+                                        ui,
+                                        Selection { dial: false, index },
+                                        Vec2::splat(key_size),
+                                    );
+                                    if index % 4 == 3 {
+                                        ui.end_row();
+                                    }
                                 }
-                            }
-                        });
+                            });
+                        ui.add_space(12.0);
+                        egui::Grid::new("device_dials")
+                            .spacing([12.0, 10.0])
+                            .show(ui, |ui| {
+                                for index in 0..4 {
+                                    self.control_button(
+                                        ui,
+                                        Selection { dial: true, index },
+                                        Vec2::new(key_size, key_size / 2.0),
+                                    );
+                                }
+                            });
                     });
-                }
-            });
+                });
         });
         ui.add_space(8.0);
         ui.small("Preview your keys and touch strip.");
@@ -970,6 +987,35 @@ impl Desktop {
                 &description,
             )
         });
+        if let Some(payload) = response.dnd_hover_payload::<crate::action_library::DragAction>() {
+            let allowed = self.snapshot["actions"].as_array().is_some_and(|actions| {
+                actions.iter().any(|action| {
+                    action["uuid"] == payload.uuid
+                        && crate::action_library::compatible(action, selection.controller())
+                })
+            });
+            ui.painter().rect_stroke(
+                response.rect,
+                8,
+                egui::Stroke::new(2.0, if allowed { ACCENT } else { Color32::LIGHT_RED }),
+                egui::StrokeKind::Inside,
+            );
+        }
+        if let Some(payload) = response.dnd_release_payload::<crate::action_library::DragAction>() {
+            let allowed = self.snapshot["actions"].as_array().is_some_and(|actions| {
+                actions.iter().any(|action| {
+                    action["uuid"] == payload.uuid
+                        && crate::action_library::compatible(action, selection.controller())
+                })
+            });
+            if allowed && self.command(json!({"command":"assign","controller":selection.controller(),"index":selection.index,"uuid":payload.uuid})) {
+                self.selected = selection;
+                self.drafts.remove(&selection);
+                self.notice = format!("Action assigned to {}", selection.label().to_lowercase());
+            } else if !allowed {
+                self.error = format!("This action cannot be assigned to {}", selection.label().to_lowercase());
+            }
+        }
         if response.on_hover_text(description).clicked() {
             self.selected = selection;
         }
@@ -1051,6 +1097,31 @@ impl Desktop {
                 );
             }
         }
+        if let Some(plugin) = slot.as_ref().and_then(|slot| {
+            let action = self.snapshot["actions"]
+                .as_array()?
+                .iter()
+                .find(|action| action["uuid"] == slot["uuid"])?;
+            self.snapshot["plugins"]
+                .as_array()?
+                .iter()
+                .find(|plugin| plugin["id"] == action["plugin"])
+                .cloned()
+        }) && plugin["connected"] != true
+        {
+            ui.colored_label(
+                Color32::YELLOW,
+                format!("{}: {}", string(&plugin, "name"), string(&plugin, "status")),
+            );
+            let error = string(&plugin, "error");
+            if !error.is_empty() {
+                ui.label(error.chars().take(300).collect::<String>())
+                    .on_hover_text(error);
+            }
+            if ui.button("Manage this plugin").clicked() {
+                self.library_open = true;
+            }
+        }
         let stale = draft.dirty
             && draft.context != slot.as_ref().map(|s| string(s, "context")).unwrap_or("");
         if stale {
@@ -1080,45 +1151,31 @@ impl Desktop {
                 json!({"command":"open_inspector","context":slot.as_ref().unwrap()["context"]}),
             );
         }
-        ui.label("Action");
         let actions = self.snapshot["actions"]
             .as_array()
             .cloned()
             .unwrap_or_default();
-        let selected_name = actions
-            .iter()
-            .find(|a| string(a, "uuid") == draft.action)
-            .map(|a| string(a, "name"))
-            .unwrap_or("Choose an action");
-        egui::ComboBox::from_id_salt("action_picker")
-            .selected_text(selected_name)
-            .width((ui.available_width() - 16.0).max(180.0))
-            .show_ui(ui, |ui| {
-                for action in actions.iter().filter(|a| {
-                    a["multi_only"] != true
-                        && a["controllers"]
-                            .as_array()
-                            .is_some_and(|cs| cs.iter().any(|c| c == selection.controller()))
-                }) {
-                    if ui
-                        .selectable_value(
-                            &mut draft.action,
-                            string(action, "uuid").to_owned(),
-                            string(action, "name"),
-                        )
-                        .changed()
-                    {
-                        draft.dirty = true;
-                    }
-                }
-            });
+        let chosen = actions.iter().find(|a| string(a, "uuid") == draft.action);
+        ui.label(format!(
+            "Selected action: {}",
+            chosen.map(|a| string(a, "name")).unwrap_or("None")
+        ));
+        ui.weak("Choose from Actions, or drag an action onto a key or dial.");
         ui.horizontal(|ui| {
-            if ui.add_enabled(!draft.action.is_empty(), egui::Button::new("Assign action")).clicked()
+            let compatible = chosen.is_some_and(|a| crate::action_library::compatible(a, selection.controller()));
+            if ui.add_enabled(compatible, egui::Button::new("Assign action")).clicked()
                 && self.command(json!({"command":"assign","controller":selection.controller(),"index":selection.index,"uuid":draft.action})) {
-                draft.dirty = false;
+                draft = Draft::from_slot(self.slot(selection));
                 self.notice = format!("Action assigned to {}", selection.label().to_lowercase());
             }
             if ui.add_enabled(slot.is_some(), egui::Button::new("Test press")).clicked() { self.test_press(selection); }
+            if selection.dial {
+                for (label, ticks) in [("Turn left", -1), ("Turn right", 1)] {
+                    if ui.add_enabled(slot.is_some(), egui::Button::new(label)).clicked() {
+                        self.command(json!({"command":"input","event":"dialRotate","index":selection.index,"ticks":ticks}));
+                    }
+                }
+            }
         });
         if !selection.dial {
             let active_profile = string(&self.snapshot["library"], "active_profile");
@@ -1404,30 +1461,85 @@ impl Desktop {
             }
         });
     }
+    fn actions(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Actions");
+        let actions = self.snapshot["actions"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let selected = self
+            .drafts
+            .get(&self.selected)
+            .map(|d| d.action.clone())
+            .unwrap_or_default();
+        let chosen = actions.iter().find(|a| a["uuid"] == selected);
+        let compatible = chosen
+            .is_some_and(|a| crate::action_library::compatible(a, self.selected.controller()));
+        if ui.add_enabled(compatible, egui::Button::new(format!("Assign to {}", self.selected.label().to_lowercase()))).clicked()
+            && self.command(json!({"command":"assign","controller":self.selected.controller(),"index":self.selected.index,"uuid":selected})) {
+            self.drafts.remove(&self.selected);
+            self.notice = format!("Action assigned to {}", self.selected.label().to_lowercase());
+        }
+        if let Some(action) =
+            self.action_library
+                .show(ui, &actions, self.selected.controller(), &selected)
+        {
+            let slot = self.slot(self.selected).cloned();
+            let draft = self
+                .drafts
+                .entry(self.selected)
+                .or_insert_with(|| Draft::from_slot(slot.as_ref()));
+            draft.action = action;
+            draft.dirty = true;
+        }
+    }
     fn library(&mut self, ui: &mut egui::Ui) {
         ui.add_space(16.0);
         self.profile_management(ui);
         ui.add_space(8.0);
-        ui.heading("Plugins & profiles");
-        if let Some(plugins) = self.snapshot["plugins"].as_array() {
+        ui.heading("Installed plugins");
+        if let Some(plugins) = self.snapshot["plugins"].as_array().cloned() {
             if plugins.is_empty() {
                 ui.label("No plugins installed. Choose a plugin package below.");
             }
             for plugin in plugins {
-                ui.horizontal_wrapped(|ui| {
-                    ui.label(string(plugin, "name"));
-                    ui.colored_label(
-                        if plugin["connected"] == true {
-                            ACCENT
-                        } else {
-                            Color32::GRAY
-                        },
-                        if plugin["connected"] == true {
-                            "Connected"
-                        } else {
-                            "Disconnected"
-                        },
-                    );
+                ui.push_id(string(&plugin, "id"), |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(RichText::new(string(&plugin, "name")).strong());
+                        ui.small(string(&plugin, "version"));
+                        let status = string(&plugin, "status");
+                        ui.colored_label(
+                            if plugin["connected"] == true {
+                                ACCENT
+                            } else {
+                                Color32::LIGHT_GRAY
+                            },
+                            if status.is_empty() {
+                                "Disconnected"
+                            } else {
+                                status
+                            },
+                        );
+                        if ui.button("Restart").clicked() {
+                            self.command(json!({"command":"restart_plugin","id":plugin["id"]}));
+                        }
+                    });
+                    let error = string(&plugin, "error");
+                    if !error.is_empty() {
+                        ui.colored_label(
+                            Color32::LIGHT_RED,
+                            error.chars().take(300).collect::<String>(),
+                        )
+                        .on_hover_text(error);
+                    }
+                    egui::CollapsingHeader::new("Details").show(ui, |ui| {
+                        ui.label(string(&plugin, "id"));
+                        ui.label(format!("Folder: {}", string(&plugin, "path")));
+                        if let Some(path) = plugin["log_path"].as_str() {
+                            ui.label(format!("Log: {path}"));
+                        }
+                    });
+                    ui.add_space(6.0);
                 });
             }
         }
@@ -1442,6 +1554,7 @@ impl Desktop {
             if ui.button("Browse…").clicked()
                 && let Some(path) = rfd::FileDialog::new()
                     .set_title("Choose a Stream Deck plugin package")
+                    .add_filter("Stream Deck plugin", &["streamDeckPlugin"])
                     .pick_file()
             {
                 self.plugin_path = path.display().to_string();
@@ -1478,6 +1591,7 @@ impl Desktop {
             if ui.button("Browse…").clicked()
                 && let Some(path) = rfd::FileDialog::new()
                     .set_title("Choose an Elgato profile")
+                    .add_filter("Stream Deck profile", &["streamDeckProfile"])
                     .pick_file()
             {
                 self.profile_path = path.display().to_string();
@@ -1559,20 +1673,21 @@ impl eframe::App for Desktop {
                 self.profile_navigation(ui);
                 let available = ui.available_width();
                 if available > 920.0 {
-                    let left_width = (available * 0.52).clamp(440.0, 580.0);
-                    let right_width = available - left_width - 32.0;
+                    let right_width = 300.0;
+                    let left_width = available - right_width - 32.0;
                     ui.horizontal_top(|ui| {
                         ui.allocate_ui_with_layout(
                             Vec2::new(left_width, ui.available_height()),
                             egui::Layout::top_down(egui::Align::Min),
                             |ui| {
-                                egui::ScrollArea::vertical().id_salt("device_scroll").show(
-                                    ui,
-                                    |ui| {
+                                ui.set_width(left_width);
+                                egui::ScrollArea::vertical()
+                                    .id_salt("controls_scroll")
+                                    .show(ui, |ui| {
                                         self.device(ui);
-                                        self.library(ui);
-                                    },
-                                );
+                                        ui.separator();
+                                        self.editor(ui);
+                                    });
                             },
                         );
                         ui.separator();
@@ -1581,9 +1696,7 @@ impl eframe::App for Desktop {
                             egui::Layout::top_down(egui::Align::Min),
                             |ui| {
                                 ui.set_width(right_width);
-                                egui::ScrollArea::vertical()
-                                    .id_salt("editor_scroll")
-                                    .show(ui, |ui| self.editor(ui));
+                                self.actions(ui);
                             },
                         );
                     });
@@ -1592,10 +1705,22 @@ impl eframe::App for Desktop {
                         self.device(ui);
                         ui.separator();
                         self.editor(ui);
-                        self.library(ui);
+                        ui.separator();
+                        self.actions(ui);
                     });
                 }
             });
+        if self.library_open {
+            let mut open = true;
+            egui::Window::new("Plugins & profiles")
+                .open(&mut open)
+                .default_width(620.0)
+                .default_height(620.0)
+                .default_pos(ui.ctx().viewport_rect().center() - egui::vec2(310.0, 310.0))
+                .vscroll(true)
+                .show(ui.ctx(), |ui| self.library(ui));
+            self.library_open = open;
+        }
         self.deletion_dialog(ui.ctx());
         if let Some(preferences) = &mut self.preferences {
             preferences.ui(ui.ctx(), &self.snapshot, &self.controller);
@@ -1636,6 +1761,9 @@ mod tests {
         draft.dirty = true;
         app.drafts.insert(app.selected, draft);
         app.plugin_path = "/pending/plugin".into();
+        app.action_library.query = "counter".into();
+        app.action_library.show_all = true;
+        app.library_open = true;
         let saved = Arc::new(Mutex::new(None));
         drop(EditorWindow {
             app: Some(app),
@@ -1653,6 +1781,8 @@ mod tests {
         assert_eq!(draft.raw, "{unfinished");
         assert!(draft.dirty && draft.raw_dirty);
         assert_eq!(app.plugin_path, "/pending/plugin");
+        assert_eq!(app.action_library.query, "counter");
+        assert!(app.action_library.show_all && app.library_open);
         assert_eq!(
             window.request(crate::instance::Command::Status)["editor_generation"],
             2

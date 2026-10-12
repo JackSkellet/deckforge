@@ -1,3 +1,4 @@
+mod action_library;
 mod action_trigger;
 mod audio_output;
 mod brightness;

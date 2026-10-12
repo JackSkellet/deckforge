@@ -12,7 +12,7 @@ Work in progress. **This is not feature complete yet.** Existing Elgato profiles
 
 Current working areas include:
 
-- An always-dark native Rust editor, tray/background operation, offline editing, USB recovery, and Stream Deck+ controls.
+- An always-dark native Rust editor with searchable actions, drag assignment, tray/background operation, offline editing, and Stream Deck+ controls.
 - Profiles, pages, folders, pinned actions, and original-format profile import/export.
 - Node and HTML plugins, native property inspectors, portable plugin resources, and feedback layouts.
 - Multi Actions, Dial Stacks, Action Triggers, Linux desktop actions, and a native soundboard.
@@ -20,9 +20,9 @@ Current working areas include:
 
 See the [feature-parity ledger](streamdeck-linux/docs/FEATURE_PARITY.md) for the remaining work and the boundaries of the tests. Passing simulation tests is not a claim of complete hardware or Windows compatibility.
 
-![Native Deckforge editor with temporary plugin feedback and dial hints](streamdeck-linux/assets/screenshots/native-feedback.png)
+![Native Deckforge editor with searchable actions](streamdeck-linux/assets/screenshots/native-actions.png)
 
-The native editor above is running in simulation with a generated test plugin.
+The native editor above is running in simulation with Elgato's official Counter sample.
 
 ## Build and run
 

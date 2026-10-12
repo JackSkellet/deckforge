@@ -42,6 +42,7 @@ mod feedback;
 mod inspectors;
 mod library;
 mod multiaction;
+mod plugins;
 mod resources;
 mod screensaver;
 mod stack;
@@ -217,6 +218,7 @@ struct Plugin {
     root: PathBuf,
     manifest: Value,
     registration: String,
+    runtime: plugins::Runtime,
     child: Option<Child>,
     sender: Option<mpsc::UnboundedSender<Value>>,
 }
@@ -1231,8 +1233,8 @@ fn snapshot(host: &Host) -> Value {
     json!({"screensaver":{"active":host.saver.active,"reason":host.saver.reason,"generation":host.saver.generation,"preferences":host.saver_preferences(),"preview":host.saver.preview,"error":host.saver.error,"frames":host.saver.animation.as_ref().map(|animation|animation.len())},"session":host.session_state,"device_settings":{"desired":host.configured_controls(),"applied":host.controls_observed,"error":host.controls_error},"library":host.library.snapshot(),"running":host.running,"device":host.device,"firmware":host.firmware,"simulate":host.simulate,"connected":host.connected && !host.simulate,"device_online":host.connected,"connection_error":host.connection_error,
         "volume":host.volume_state,"volume_error":host.volume_error,"multi_runs":host.multi.snapshot(),"multi_pending":host.multi_pending.len(),"audio_outputs":host.audio_outputs,"audio_active":host.audio_active,"system_status":host.system_status,"slots":host.slots.iter().map(|s|slot_snapshot(host,s)).collect::<Vec<_>>(),
         "inspectors":host.inspectors.values().map(|i|json!({"context":i.context,"plugin":host.plugins[i.plugin].id,"connected":i.sender.is_some()})).collect::<Vec<_>>(),
-        "actions":host.actions.iter().map(|a|json!({"uuid":a.uuid,"name":a.name,"plugin":a.plugin,"controllers":a.controllers,"states":a.raw["States"],"supported_in_multi":a.raw["SupportedInMultiActions"]!=false && !multiaction::container(&a.uuid),"multi_only":a.uuid==multiaction::DELAY,"defaults":if a.uuid=="com.elgato.streamdeck.page.goto"{json!({"PageIndex":1})}else if a.uuid==multiaction::DELAY{json!({"delay":1000})}else{crate::audio_output::defaults(&a.uuid).unwrap_or_else(||crate::system_actions::defaults(&a.uuid))}})).collect::<Vec<_>>(),
-        "logs":host.logs,"plugins":host.plugins.iter().map(|p|json!({"id":p.id,"name":p.name,"connected":p.sender.is_some()})).collect::<Vec<_>>()})
+        "actions":host.actions.iter().map(|a|json!({"uuid":a.uuid,"name":a.name,"plugin":a.plugin,"plugin_name":host.plugins.iter().find(|p|p.id==a.plugin).map(|p|p.name.as_str()).unwrap_or("Deckforge"),"category":host.plugins.iter().find(|p|p.id==a.plugin).map(|p|p.manifest["Category"].as_str().unwrap_or(&p.name)).unwrap_or(if crate::system_actions::supported(&a.uuid){"System"}else if a.uuid.starts_with("com.elgato.streamdeck.soundboard"){"Soundboard"}else{"Navigation & sequences"}),"tooltip":a.raw["Tooltip"],"visible":a.raw["VisibleInActionsList"]!=false,"controllers":a.controllers,"states":a.raw["States"],"supported_in_multi":a.raw["SupportedInMultiActions"]!=false && !multiaction::container(&a.uuid),"multi_only":a.uuid==multiaction::DELAY,"defaults":if a.uuid=="com.elgato.streamdeck.page.goto"{json!({"PageIndex":1})}else if a.uuid==multiaction::DELAY{json!({"delay":1000})}else{crate::audio_output::defaults(&a.uuid).unwrap_or_else(||crate::system_actions::defaults(&a.uuid))}})).collect::<Vec<_>>(),
+        "logs":host.logs,"plugins":host.plugins.iter().map(Plugin::snapshot).collect::<Vec<_>>()})
 }
 async fn dashboard(State(state): State<Shared>) -> Json<Value> {
     Json(snapshot(&state.lock().unwrap()))
@@ -1355,6 +1357,7 @@ fn apply_control(host: &mut Host, r: Value) -> Result<()> {
         "import_profile" => host.import_profile(Path::new(
             r["path"].as_str().context("Profile path missing")?,
         )),
+        "restart_plugin" => host.restart_plugin(r["id"].as_str().context("Plugin id missing")?),
         "install_plugin" => {
             let state_dir = host
                 .state_path
@@ -1384,9 +1387,15 @@ fn apply_control(host: &mut Host, r: Value) -> Result<()> {
             {
                 bail!("Plugin declares an action UUID already owned by another installed plugin");
             }
-            launch_plugin(&mut plugins[0], &host.device, host.port, &state_dir).with_context(
-                || format!("Installed {}, but could not launch it", installed.display()),
-            )?;
+            if !plugins[0].runtime.load_failed
+                && let Err(error) =
+                    launch_plugin(&mut plugins[0], &host.device, host.port, &state_dir)
+            {
+                host.log(format!(
+                    "Installed {}, but could not launch it: {error:#}",
+                    installed.display()
+                ));
+            }
             host.plugins.extend(plugins);
             host.actions.extend(actions);
             host.install_bundled_profiles(true)?;
@@ -1504,7 +1513,11 @@ fn apply_control(host: &mut Host, r: Value) -> Result<()> {
 }
 
 enum Client {
-    Plugin(usize),
+    Plugin {
+        index: usize,
+        launch: String,
+        session: String,
+    },
     Inspector(String),
 }
 async fn socket_session(socket: WebSocket, state: Shared) {
@@ -1520,17 +1533,22 @@ async fn socket_session(socket: WebSocket, state: Shared) {
     let client = {
         let mut host = state.lock().unwrap();
         if frame["event"] == "registerPlugin" {
-            let Some(index) = host
-                .plugins
-                .iter()
-                .position(|p| frame["uuid"] == p.registration && p.sender.is_none())
-            else {
+            let Some(index) = host.plugins.iter().position(|p| {
+                frame["uuid"] == p.registration
+                    && p.sender.is_none()
+                    && matches!(p.runtime.status, "starting" | "disconnected")
+            }) else {
                 return;
             };
             if host.connected {
                 let _=sender.send(json!({"event":"deviceDidConnect","device":host.device,"deviceInfo":device::info()}));
             }
+            let launch = host.plugins[index].registration.clone();
+            let session = uuid::Uuid::new_v4().to_string();
             host.plugins[index].sender = Some(sender);
+            host.plugins[index].runtime.session = Some(session.clone());
+            host.plugins[index].runtime.status = "connected";
+            host.plugins[index].runtime.error = None;
             host.hydrate_resources();
             let id = host.plugins[index].id.clone();
             host.log(format!("Plugin connected: {id}"));
@@ -1543,7 +1561,11 @@ async fn socket_session(socket: WebSocket, state: Shared) {
                     host.emit(slot, "willAppear", json!({}));
                 }
             }
-            Client::Plugin(index)
+            Client::Plugin {
+                index,
+                launch,
+                session,
+            }
         } else if frame["event"] == "registerPropertyInspector" {
             let Some(registration) = frame["uuid"].as_str() else {
                 return;
@@ -1566,12 +1588,24 @@ async fn socket_session(socket: WebSocket, state: Shared) {
         }
     };
     loop {
+        if let Client::Plugin {
+            index,
+            launch,
+            session,
+        } = &client
+            && !state
+                .lock()
+                .unwrap()
+                .plugin_session_current(*index, launch, session)
+        {
+            break;
+        }
         tokio::select! {
             outgoing=receiver.recv()=>{let Some(outgoing)=outgoing else{break;};if sink.send(Message::Text(outgoing.to_string().into())).await.is_err(){break;}}
             incoming=stream.next()=>{match incoming {
                 Some(Ok(Message::Text(text)))=>{
                     let result=serde_json::from_str::<Value>(&text).map_err(anyhow::Error::from).and_then(|message|{
-                        let mut host=state.lock().unwrap();match &client {Client::Plugin(index)=>host.plugin_message(*index,message),Client::Inspector(id)=>host.inspector_message(id,message)}
+                        let mut host=state.lock().unwrap();match &client {Client::Plugin { index, launch, session }=>{if host.plugin_session_current(*index,launch,session){host.plugin_message(*index,message)}else{Ok(())}},Client::Inspector(id)=>host.inspector_message(id,message)}
                     });
                     if let Err(error)=result {state.lock().unwrap().log(format!("SDK command rejected: {error}"));}
                 }
@@ -1583,68 +1617,25 @@ async fn socket_session(socket: WebSocket, state: Shared) {
     }
     let mut host = state.lock().unwrap();
     match client {
-        Client::Plugin(index) => {
-            host.plugins[index].sender = None;
-            let id = host.plugins[index].id.clone();
-            host.log(format!("Plugin disconnected: {id}"));
-        }
+        Client::Plugin {
+            index,
+            launch,
+            session,
+        } => host.plugin_disconnected(index, &launch, &session),
         Client::Inspector(id) => host.close_inspector(&id),
     }
 }
 
 fn load_plugins(paths: Vec<PathBuf>) -> Result<(Vec<Plugin>, Vec<Action>)> {
-    let mut plugins = Vec::new();
-    let mut actions = Vec::new();
-    for path in paths {
-        let root = path.canonicalize()?;
-        let manifest: Value = serde_json::from_slice(&fs::read(root.join("manifest.json"))?)?;
-        let id = manifest["UUID"]
-            .as_str()
-            .context("Plugin UUID missing")?
-            .to_owned();
-        if plugins.iter().any(|p: &Plugin| p.id == id) {
-            bail!("Duplicate plugin {id}");
-        }
-        for a in manifest["Actions"]
-            .as_array()
-            .context("Plugin Actions missing")?
-        {
-            let uuid = a["UUID"]
-                .as_str()
-                .context("Action UUID missing")?
-                .to_owned();
-            if actions.iter().any(|a: &Action| a.uuid == uuid) {
-                bail!("Duplicate action {uuid}");
-            }
-            actions.push(Action {
-                uuid,
-                name: a["Name"].as_str().unwrap_or("Action").into(),
-                controllers: a["Controllers"]
-                    .as_array()
-                    .map(|v| {
-                        v.iter()
-                            .filter_map(Value::as_str)
-                            .map(str::to_owned)
-                            .collect()
-                    })
-                    .unwrap_or_else(|| vec!["Keypad".into()]),
-                plugin: id.clone(),
-                raw: a.clone(),
-            });
-        }
-        plugins.push(Plugin {
-            id,
-            name: manifest["Name"].as_str().unwrap_or("Plugin").into(),
-            root,
-            manifest,
-            registration: uuid::Uuid::new_v4().to_string(),
-            child: None,
-            sender: None,
-        });
-    }
-    Ok((plugins, actions))
+    plugins::load(paths)
 }
 fn node_runtime(required: &str) -> Result<PathBuf> {
+    anyhow::ensure!(
+        !required.is_empty()
+            && required.len() <= 3
+            && required.bytes().all(|byte| byte.is_ascii_digit()),
+        "Invalid Node.js major version"
+    );
     let mut candidates = Vec::new();
     if let Some(path) = std::env::var_os(format!("DECKFORGE_NODE{required}")) {
         candidates.push(PathBuf::from(path));
@@ -1675,27 +1666,47 @@ fn node_runtime(required: &str) -> Result<PathBuf> {
     }
     candidates
         .into_iter()
-        .find(|node| {
-            Command::new(node)
-                .arg("--version")
-                .output()
-                .ok()
-                .filter(|o| o.status.success())
-                .is_some_and(|o| {
-                    String::from_utf8_lossy(&o.stdout).starts_with(&format!("v{required}."))
-                })
-        })
+        .take(8)
+        .find(|node| plugins::node_version_matches(node, required))
         .with_context(|| {
             format!(
                 "Node.js {required} is required; set DECKFORGE_NODE{required} to its executable"
             )
         })
 }
-fn launch_plugins(host: &mut Host, port: u16, state_dir: &Path) -> Result<()> {
+fn launch_plugins(host: &mut Host, port: u16, state_dir: &Path) {
+    let mut failures = Vec::new();
     for plugin in &mut host.plugins {
-        launch_plugin(plugin, &host.device, port, state_dir)?;
+        if plugin.runtime.load_failed {
+            continue;
+        }
+        if let Err(error) = launch_plugin(plugin, &host.device, port, state_dir) {
+            failures.push(format!("Plugin {} could not start: {error:#}", plugin.id));
+        }
     }
-    Ok(())
+    for error in failures {
+        host.log(error);
+    }
+}
+fn launch_plugin(plugin: &mut Plugin, device: &str, port: u16, state_dir: &Path) -> Result<()> {
+    plugin.registration = uuid::Uuid::new_v4().to_string();
+    plugin.sender = None;
+    plugin.runtime = plugins::Runtime::starting();
+    let html = plugin.manifest["CodePath"]
+        .as_str()
+        .is_some_and(|path| path.ends_with(".html") || path.ends_with(".htm"));
+    plugin.runtime.log_path = Some(std::path::absolute(state_dir)?.join(format!(
+        "{}-{}.log",
+        if html { "webview" } else { "plugin" },
+        plugin.registration
+    )));
+    match launch_plugin_process(plugin, device, port, state_dir) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            plugin.runtime.fail(format!("{error:#}"));
+            Err(error)
+        }
+    }
 }
 fn registration_info(plugin: &Plugin, device: &str) -> Value {
     json!({"application":{"font":"DejaVu Sans","language":"en","platform":"linux","platformVersion":std::env::consts::OS,"version":"7.6.0"},"plugin":{"uuid":plugin.id,"version":plugin.manifest["Version"]},"devicePixelRatio":1,"colors":{"buttonMouseOverBackgroundColor":"#303030","buttonPressedBackgroundColor":"#303030","buttonPressedBorderColor":"#505050","buttonPressedTextColor":"#ffffff","highlightColor":"#4bd3b0"},"devices":[{"id":device,"type":7,"name":"Stream Deck +","size":{"columns":4,"rows":2}}]})
@@ -1740,7 +1751,12 @@ fn spawn_webview(
         .stderr(Stdio::from(log));
     Ok(command.spawn()?)
 }
-fn launch_plugin(plugin: &mut Plugin, device: &str, port: u16, state_dir: &Path) -> Result<()> {
+fn launch_plugin_process(
+    plugin: &mut Plugin,
+    device: &str,
+    port: u16,
+    state_dir: &Path,
+) -> Result<()> {
     let code = plugin.manifest["CodePath"].as_str().context(
         "Plugin has no generic CodePath; platform-specific binary support is unfinished",
     )?;
@@ -2069,10 +2085,7 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
         host.saver_animation()?;
     }
     // Validate and start plugins before writing any hardware image.
-    if let Err(error) = launch_plugins(&mut host, port, &state_dir) {
-        stop_plugins(&mut host);
-        return Err(error);
-    }
+    launch_plugins(&mut host, port, &state_dir);
     let worker = if simulate {
         None
     } else {
@@ -2271,6 +2284,9 @@ fn stop_plugins(host: &mut Host) {
     }
     host.close_inspectors(None);
     for plugin in &mut host.plugins {
+        plugin.sender = None;
+        plugin.runtime.session = None;
+        plugin.runtime.status = "stopped";
         stop_child(&mut plugin.child);
     }
 }
@@ -2381,6 +2397,7 @@ mod tests {
                 root: root.to_owned(),
                 manifest: json!({}),
                 registration: "secret".into(),
+                runtime: plugins::Runtime::default(),
                 child: None,
                 sender: None,
             }],

@@ -10,6 +10,16 @@ use std::{
     path::{Path, PathBuf},
 };
 
+/// Marketplace-protected manifests are binary envelopes, not malformed JSON.
+/// Keep original bytes intact until protected-package verification is supported.
+pub(crate) fn read_manifest(bytes: &[u8]) -> Result<Value> {
+    ensure!(
+        !bytes.starts_with(b"ELGATO"),
+        "This plugin has an Elgato-protected manifest. Marketplace-protected plugin import is not supported yet."
+    );
+    serde_json::from_slice(bytes).context("Invalid plugin manifest JSON")
+}
+
 const MAX_ENTRIES: usize = 10_000;
 const MAX_FILE: u64 = 32 * 1024 * 1024;
 const MAX_TOTAL: usize = 128 * 1024 * 1024;
@@ -157,8 +167,7 @@ fn validated_archive(path: &Path) -> Result<(String, BTreeMap<String, Entry>)> {
         .get(&format!("{folder}/manifest.json"))
         .and_then(|e| e.bytes.as_ref())
         .context("Plugin manifest.json missing")?;
-    let manifest: Value =
-        serde_json::from_slice(manifest).context("Invalid plugin manifest JSON")?;
+    let manifest = read_manifest(manifest)?;
     let uuid = manifest["UUID"]
         .as_str()
         .context("Plugin manifest UUID missing")?;
@@ -240,6 +249,23 @@ fn rename_without_replacing(source: &Path, target: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn protected_manifest_is_distinguished_from_broken_json() {
+        let error = super::read_manifest(b"ELGATO\x01\x00test envelope").unwrap_err();
+        assert!(error.to_string().contains("Elgato-protected manifest"));
+        assert!(!error.to_string().contains("Invalid plugin manifest JSON"));
+        assert!(
+            super::read_manifest(b"{broken")
+                .unwrap_err()
+                .to_string()
+                .contains("Invalid plugin manifest JSON")
+        );
+        assert_eq!(
+            super::read_manifest(br#"{"UUID":"test"}"#).unwrap()["UUID"],
+            "test"
+        );
+    }
+
     use super::*;
     use std::io::Write;
 
@@ -272,6 +298,24 @@ mod tests {
         );
         assert_eq!(fs::read(plugin.join("bin/plugin.js")).unwrap(), original);
         assert_eq!(fs::read_dir(destination).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn protected_manifest_import_leaves_no_partial_installation() {
+        let temporary = tempfile::tempdir().unwrap();
+        let archive = temporary.path().join("protected.streamDeckPlugin");
+        let destination = temporary.path().join("plugins");
+        make_archive(
+            &archive,
+            &[("com.test.sdPlugin/manifest.json", b"ELGATO\x01\x00envelope")],
+        );
+        assert!(
+            install(&archive, &destination)
+                .unwrap_err()
+                .to_string()
+                .contains("Elgato-protected")
+        );
+        assert!(!destination.exists());
     }
 
     #[test]
