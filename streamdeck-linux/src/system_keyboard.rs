@@ -815,7 +815,10 @@ mod tests {
                         bytes % size_of::<libc::input_event>() == 0,
                         "Truncated evdev input_event"
                     );
-                    for frame in buffer[..bytes].chunks_exact(size_of::<libc::input_event>()) {
+                    for frame in buffer[..bytes]
+                        .as_chunks::<{ size_of::<libc::input_event>() }>()
+                        .0
+                    {
                         let field16 =
                             |offset| u16::from_ne_bytes([frame[offset], frame[offset + 1]]);
                         let kind = field16(offset_of!(libc::input_event, type_));

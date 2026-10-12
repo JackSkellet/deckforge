@@ -617,7 +617,9 @@ mod tests {
         assert!(output[0] <= 0.126);
         assert!(
             output
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|f| f[0])
                 .collect::<Vec<_>>()
                 .windows(2)
