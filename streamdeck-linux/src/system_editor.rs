@@ -408,7 +408,24 @@ fn multimedia(ui: &mut egui::Ui, controller: &str, settings: &mut Value) -> bool
     if changed && let Some(id) = selected {
         settings["actionIdx"] = json!(id);
     }
-    if controller == "Encoder" {
+    if controller == "Encoder" && selected == Some(18) {
+        let mut step = settings["linuxVolumeStep"].as_f64().unwrap_or(5.);
+        let label = ui.label("Volume step per tick");
+        if ui
+            .add(
+                egui::DragValue::new(&mut step)
+                    .range(0.1..=100.0)
+                    .clamp_existing_to_range(false)
+                    .speed(0.1)
+                    .min_decimals(1)
+                    .suffix(" % per dial tick"),
+            )
+            .labelled_by(label.id)
+            .changed()
+        {
+            settings["linuxVolumeStep"] = json!(step);
+            changed = true;
+        }
         ui.weak("Turn to adjust system volume; press or tap to mute.");
     }
     changed
@@ -566,6 +583,30 @@ mod tests {
             });
             output.drop_without_applying_deltas();
             assert_eq!(settings, before, "{uuid} {controller}");
+        }
+    }
+
+    #[test]
+    fn volume_step_editor_preserves_absent_fractional_and_broader_imported_values() {
+        for step in [
+            None,
+            Some(json!(0.125)),
+            Some(json!(5)),
+            Some(json!(30.5)),
+            Some(json!(100)),
+            Some(json!(150)),
+        ] {
+            let mut settings = json!({"actionIdx":18,"Future":{"preserve":true}});
+            if let Some(step) = step {
+                settings["linuxVolumeStep"] = step;
+            }
+            let before = settings.clone();
+            let context = egui::Context::default();
+            let output = context.run_ui(egui::RawInput::default(), |ui| {
+                assert_eq!(edit(ui, MEDIA, "Encoder", &mut settings), Some(false));
+            });
+            output.drop_without_applying_deltas();
+            assert_eq!(settings, before);
         }
     }
 

@@ -15,6 +15,7 @@ mod stack_editor;
 mod system_actions;
 mod system_editor;
 mod system_keyboard;
+mod volume;
 mod webview;
 
 use anyhow::Result;

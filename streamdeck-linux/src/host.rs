@@ -39,6 +39,7 @@ mod inspectors;
 mod library;
 mod multiaction;
 mod stack;
+mod volume;
 use inspectors::Inspector;
 use library::Library;
 
@@ -244,6 +245,9 @@ enum HeldControl {
     Dial(u8),
 }
 struct Host {
+    volume: Option<crate::volume::Worker>,
+    volume_state: Option<crate::volume::State>,
+    volume_error: Option<String>,
     stack_gestures: HashMap<String, crate::dial_stack::Gesture>,
     stack_cooldown: HashMap<String, std::time::Instant>,
     multi_owned: HashSet<String>,
@@ -353,6 +357,7 @@ impl Host {
         }
     }
     fn render(&mut self) -> Result<()> {
+        self.update_volume_feedback();
         // Selected container children need the same imported/plugin icon lookup
         // as direct assignments. Keep inactive child caches without drawing them.
         let missing: Vec<_> = self
@@ -690,6 +695,9 @@ impl Host {
         slot: &Slot,
         trigger: crate::system_actions::Trigger,
     ) -> Result<()> {
+        if volume::is_volume(slot) {
+            return self.volume_input(slot, trigger);
+        }
         let Some(plan) = crate::system_actions::input_plan(
             &slot.uuid,
             &slot.controller,
@@ -1015,7 +1023,7 @@ fn slot_snapshot(host: &Host, s: &Slot) -> Value {
 }
 fn snapshot(host: &Host) -> Value {
     json!({"library":host.library.snapshot(),"running":host.running,"device":host.device,"firmware":host.firmware,"simulate":host.simulate,"connected":host.hardware.is_some(),
-        "multi_runs":host.multi.snapshot(),"multi_pending":host.multi_pending.len(),"audio_outputs":host.audio_outputs,"audio_active":host.audio_active,"system_status":host.system_status,"slots":host.slots.iter().map(|s|slot_snapshot(host,s)).collect::<Vec<_>>(),
+        "volume":host.volume_state,"volume_error":host.volume_error,"multi_runs":host.multi.snapshot(),"multi_pending":host.multi_pending.len(),"audio_outputs":host.audio_outputs,"audio_active":host.audio_active,"system_status":host.system_status,"slots":host.slots.iter().map(|s|slot_snapshot(host,s)).collect::<Vec<_>>(),
         "inspectors":host.inspectors.values().map(|i|json!({"context":i.context,"plugin":host.plugins[i.plugin].id,"connected":i.sender.is_some()})).collect::<Vec<_>>(),
         "actions":host.actions.iter().map(|a|json!({"uuid":a.uuid,"name":a.name,"plugin":a.plugin,"controllers":a.controllers,"states":a.raw["States"],"supported_in_multi":a.raw["SupportedInMultiActions"]!=false && !multiaction::container(&a.uuid),"multi_only":a.uuid==multiaction::DELAY,"defaults":if a.uuid==multiaction::DELAY{json!({"delay":1000})}else{crate::audio_output::defaults(&a.uuid).unwrap_or_else(||crate::system_actions::defaults(&a.uuid))}})).collect::<Vec<_>>(),
         "logs":host.logs,"plugins":host.plugins.iter().map(|p|json!({"id":p.id,"name":p.name,"connected":p.sender.is_some()})).collect::<Vec<_>>()})
@@ -1631,6 +1639,9 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
     library.validate()?;
     let slots = library.visible()?;
     let mut host = Host {
+        volume: None,
+        volume_state: None,
+        volume_error: None,
         stack_gestures: HashMap::new(),
         stack_cooldown: HashMap::new(),
         multi_owned: HashSet::new(),
@@ -1887,6 +1898,7 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
             host.monitor_children();
             host.poll_system_actions();
             host.poll_audio();
+            host.poll_volume();
         }
     });
     let stop = async move {
@@ -1924,6 +1936,9 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
 }
 
 fn stop_plugins(host: &mut Host) {
+    if let Some(worker) = &host.volume {
+        worker.cancel();
+    }
     host.cancel_all_multi();
     if let Some(worker) = &host.audio {
         worker.cancel();
@@ -2000,6 +2015,9 @@ mod tests {
     }
     fn fixture(root: &Path) -> Host {
         let mut host = Host {
+            volume: None,
+            volume_state: None,
+            volume_error: None,
             stack_gestures: HashMap::new(),
             stack_cooldown: HashMap::new(),
             multi_owned: HashSet::new(),

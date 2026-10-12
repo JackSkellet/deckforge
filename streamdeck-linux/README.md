@@ -74,14 +74,21 @@ Hotkeys use a persistent Linux uinput keyboard. Key down/up owns and releases th
 shortcut; page changes and shutdown release departing holds. Dial shortcuts map
 to counterclockwise, clockwise, and press/tap independently. Media keys include
 transport and volume/mute; the System volume dial maps rotation to volume steps
-and press/tap to mute. Volume state feedback is not implemented yet.
+and press/tap to mute. System Volume uses native PulseAudio/PipeWire control:
+the dial and editor show the current percentage and mute state, including changes
+made elsewhere. **Volume step per tick** sets 0.1–100 percentage points per tick,
+defaulting to 5. Channel balance is preserved, and device changes are detected.
+Changing volume does not clear mute; press or tap to toggle it.
 
-The host needs write access to `/dev/uinput` for keyboard/media actions. It does
+The host needs write access to `/dev/uinput` for hotkeys and transport media keys.
+The System Volume dial uses the audio server directly. It does
 not change permissions automatically. Qt shortcut identities are translated to
 Linux physical key codes; arbitrary keyboard-layout equivalence and Coalesce
 behavior remain unverified. The kernel device was created/removed in testing,
-but event readback could not run with current event-node permissions. No desktop
-shortcut or real audio change is claimed as verified by the automated tests.
+but event readback could not run with current event-node permissions. The user confirmed physical volume and mute controls work. Other desktop
+shortcuts/transport effects remain unverified. Live percentage/step behavior is
+tested against an owned virtual output, with a read-only comparison to the real
+default output.
 
 The latest action result appears in the native window. Network work runs outside
 the editor and input worker. `--simulate` prevents USB access only: configured
@@ -259,6 +266,7 @@ python tests/system_interop.py
 python tests/soundboard_interop.py --binary target/release/deckforge
 python tests/multi_interop.py --binary target/release/deckforge
 python tests/stack_interop.py --binary target/release/deckforge
+python tests/volume_interop.py --binary target/release/deckforge
 ```
 
 The optional installer test needs the local Windows artifacts. The sample

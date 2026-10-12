@@ -57,7 +57,7 @@ The shipped profiles contain real action identifiers and settings; their presenc
 | --- | --- | --- | --- |
 | AC-01 | Open application/file/folder, close application, open URL and background request | **Verified subset, A/C/T.** Native Website/Open editors and Linux argv-based execution; actual local background HTTP success/error and executable launch verified. Browser association, Close and Open Application activation/long-press remain open. | Configure through GUI and import fixtures; verify Linux path/app translation, URL handling and explicit background-request behavior. Unmappable Windows paths remain visible and editable. [System actions][system] |
 | AC-02 | Hotkey, hotkey switch, modifiers, text entry and optional Enter | **Partial, A/C/T.** Native shortcut editor, Qt-to-evdev translation, held ownership and exact Plus trigger indices implemented. uinput device creation/removal verified, but event readback skipped for missing event-node read access. Compositor shortcuts, arbitrary layouts, Coalesce, hotkey switch and text remain open. | Exercise a named Linux application under supported X11/Wayland sessions; verify Unicode, modifier release, repeated presses, focus and held keys without stuck input. [System actions][system] |
-| AC-03 | Multimedia transport, mute and volume | **Partial, A/C/T.** Original transport enum and composite volume-dial mapping recovered and implemented through Linux media key events. Real audio/player acceptance and external state feedback remain open. | Play/pause/seek where supported, mute and change volume against real media players; verify externally changed state feeds back. [System actions][system] |
+| AC-03 | Multimedia transport, mute and volume | **Verified subset, A/C/T/H/U.** User confirmed physical System Volume/mute. Native Pulse control now adds live percentage/mute feedback, external-change monitoring and configurable tick steps. Owned-sink tests cover writes and display; updated real-device step acceptance and broader transport/player behavior remain open. | Play/pause/seek where supported, mute and change volume against real media players; verify externally changed state feeds back. [System actions][system] |
 | AC-04 | Soundboard playback, looping, overlap/restart, fades, volume and output device | **Verified subset, A/C/T.** Native controls, independent streaming mixer and Pulse/PipeWire transport implement four playback modes, volume, fades, routing and soundboard-wide stop. Captured virtual-sink PCM verifies WAV/embedded MP3, volume and fade envelopes. Audible/physical acceptance, Windows timing/visual equivalence and multichannel downmix remain open. | Play supported audio fixtures in each documented mode, route to selected output, stop/retrigger and restart host safely. Verify captured audio and audible output. [Soundboard][soundboard] |
 | AC-05 | Multi Actions, delays, switch/random variants and plugin multi-action context | **Verified subset, A/C/T.** Native ordered-step editor, delays, Switch and Random run through an incremental scheduler. Child SDK payloads, desired states, settings/PI ownership, cancellation and restart identities pass real-process tests; unchanged Hello World runs nested. Physical shortcuts and full Windows workflow equivalence remain open. | Import/reorder sequences, check measured timing and stateful branches, then verify plugin events with a fixture that consumes multi-action state. Inventory switch/random behavior before marking those variants passed. [Multi Actions][multi], [delay controls][delays] |
 | AC-06 | Dial Stacks | **Verified subset, A/C/T.** Native editing, selected-child lifecycle, click/held-turn/touch routing, fast navigation and persistence work. Unchanged Layouts instances produce verified PNG changes. Physical acceptance and exact artwork/restore behavior remain open. | Load multiple real dial actions; dial push cycles active action and corresponding touch display; settings persist independently. [Dial Stacks][stacks] |
@@ -372,3 +372,29 @@ samples and Multi Actions were rerun after the selected-child icon fix. Native
 capture and hashes are in `../../evidence/dial-stacks/`. The prior user session
 is backed up; its existing settings match the running session, which also has
 a new Media control. Physical stack acceptance remains pending.
+
+
+### System Volume feedback update, 2026-10-12
+
+The user confirmed turning System Volume on dial 2 changes volume and pressing
+it toggles mute, then requested a visible percentage and configurable amount.
+`src/volume.rs` now reads the default output through native PulseAudio/PipeWire,
+monitors changes and applies configured percentage-point steps while retaining
+channel balance. The native editor and touch-strip preview show the actual
+percentage and mute state. `linuxVolumeStep` is a Linux extension, default 5.
+
+`tests/volume_interop.py` writes only an owned virtual sink. It verifies fractional
+steps, balance, mute, external changes, rendered pixels, missing-output errors,
+recovery and restart persistence. A separate read-only query of the actual default
+output matches the daemon's value. The prior physical confirmation applies to the
+previous media-key control path; this new direct-audio implementation's physical
+step behavior remains a separate acceptance check. Action Trigger investigation
+was retained in `../../evidence/action-trigger-contracts.json` while the requested
+volume improvements took priority.
+
+This volume checkpoint passes 150 non-injection tests plus the gated-keyboard
+no-op path, strict Clippy and eleven integration suites. Native capture shows
+both percentage and step control. The live read-only percentage exactly matches
+the audio server, and the installed build connects to the actual Plus and default
+AirPods output. Logs, virtual-sink metrics and source/binary hashes are retained
+in `../../evidence/system-volume/`; the prior user session is backed up.

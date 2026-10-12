@@ -851,6 +851,13 @@ impl Desktop {
             if ui.text_edit_singleline(&mut draft.title).labelled_by(title_label.id).changed() { draft.dirty = true; }
             ui.add_space(8.0);
             ui.label(RichText::new("Settings").strong());
+            if slot.as_ref().is_some_and(|s| s["uuid"]=="com.elgato.streamdeck.system.multimedia"&&s["controller"]=="Encoder"&&s["settings"]["actionIdx"]==18) {
+                if let Some(volume)=self.snapshot.get("volume").filter(|v|v.is_object()) {
+                    ui.label(format!("Current volume: {}{}",slot.as_ref().and_then(|s|s["feedback"]["value"].as_str()).unwrap_or("--"),if volume["muted"]==true {" (muted)"}else{""}));
+                    ui.small(string(volume,"name"));
+                }else{ui.weak("Reading current system volume…");}
+            }
+
             self.settings_editor(ui, &mut draft, slot.as_ref().map(|s|string(s,"uuid")).unwrap_or(""));
             ui.horizontal(|ui| {
                 if ui.add(egui::Button::new("Save changes").fill(Color32::from_rgb(35, 79, 68))).clicked() {
