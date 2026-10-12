@@ -2506,3 +2506,72 @@ dialog.mixer-dialog {
   font-weight: 600;
   color: #cdeade;
 }
+
+.mixer-meter {
+  display: grid;
+  grid-template-columns: minmax(44px, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 0 12px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: #b8cac7;
+}
+.mixer-meter-track {
+  display: block;
+  height: 8px;
+  background: #0c191c;
+  border: 1px solid #40565b;
+  border-radius: 2px;
+  overflow: hidden;
+}
+.mixer-meter-track i {
+  display: block;
+  height: 100%;
+  background: #91d9bf;
+}
+.mixer-meter.clipping {
+  color: #ffbc94;
+}
+.mixer-meter.clipping .mixer-meter-track i {
+  background: #ed9c7d;
+}
+.mixer-meter.clipping strong {
+  font-size: 10px;
+}
+.mixer-meter.unavailable {
+  color: #83969e;
+}
+.mixer-meter.unavailable .mixer-meter-track {
+  border-style: dashed;
+  background: transparent;
+}
+
+.mixer-control-status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border-block: 1px solid #344b55;
+  font-size: 11px;
+  color: #9fb5bd;
+}
+.mixer-control-status > .field {
+  margin-left: auto;
+  min-width: 150px;
+  max-width: 180px;
+}
+.mixer-control-status > .field input {
+  min-height: 30px;
+}
+.mixer-matrix tbody th > .hint {
+  display: block;
+  margin-top: 6px;
+  font-size: 10px;
+  line-height: 1.5;
+}
+.mixer-output-details .mixer-gain {
+  padding-top: 10px;
+  border-top: 1px solid #405763;
+}

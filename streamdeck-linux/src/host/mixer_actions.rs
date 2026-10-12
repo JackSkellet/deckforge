@@ -172,20 +172,20 @@ fn change(
     }
     let mut next = config.clone();
     let mix_id = settings["mix"].as_str().unwrap();
-    if uuid == MIX {
-        let mix = next.mixes.iter_mut().find(|mix| mix.id == mix_id).unwrap();
-        mix.volume = volume;
-        mix.muted = muted;
+    let target = if uuid == MIX {
+        crate::mixer::control::Target::Mix { mix: mix_id.into() }
     } else {
-        let channel_id = settings["channel"].as_str().unwrap();
-        let route = next
-            .routes
-            .iter_mut()
-            .find(|route| route.channel == channel_id && route.mix == mix_id)
-            .unwrap();
-        route.volume = volume;
-        route.muted = muted;
-    }
+        crate::mixer::control::Target::Route {
+            channel: settings["channel"].as_str().unwrap().into(),
+            mix: mix_id.into(),
+        }
+    };
+    crate::mixer::control::patch(
+        &mut next,
+        &target,
+        (volume != current.volume).then_some(volume),
+        (muted != current.muted).then_some(muted),
+    )?;
     next.validate()?;
     Ok(Some(next))
 }
@@ -289,14 +289,27 @@ impl Host {
             self.mixer.is_some(),
             "Audio mixer is not running; open Audio mixer and enable routing"
         );
-        ensure!(self.mixer_state.connected, "Audio server is disconnected");
-        if let Some(error) = &self.mixer_state.error {
+        let state = self.mixer.as_ref().unwrap().snapshot();
+        ensure!(state.connected, "Audio server is disconnected");
+        if let Some(error) = &state.error {
             bail!("Audio mixer unavailable: {error}");
         }
-        ensure!(self.mixer_state.active, "Mixer routing is not active yet");
+        ensure!(state.active, "Mixer routing is not active yet");
         // Accumulate against current desired intent while a previous tick applies.
         // The existing worker/config method remains the only graph/persistence owner.
-        self.set_mixer_config(next, Some(&previous))?;
+        let changes = crate::mixer::control::all_targets(&next)
+            .into_iter()
+            .filter(|target| {
+                crate::mixer::control::read(&previous, target)
+                    .ok()
+                    .map(|value| value.volume)
+                    != crate::mixer::control::read(&next, target)
+                        .ok()
+                        .map(|value| value.volume)
+            })
+            .map(|target| (target, Duration::from_millis(u64::from(next.fade_ms))))
+            .collect();
+        self.apply_mixer_controls(next, changes)?;
         self.system_status = "Mixer change queued".into();
         Ok(())
     }
@@ -331,6 +344,7 @@ mod tests {
     use crate::mixer::{Channel, Mix, Route};
     fn config() -> Config {
         Config {
+            fade_ms: 0,
             enabled: true,
             channels: vec![Channel {
                 id: "music".into(),

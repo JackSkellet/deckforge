@@ -1,5 +1,9 @@
+#[path = "gain.rs"]
+mod gain;
 #[path = "journal.rs"]
 mod journal;
+#[path = "meter.rs"]
+mod meter;
 use super::*;
 use anyhow::{Context as _, bail};
 use libpulse_binding as pulse;
@@ -60,10 +64,11 @@ struct Input {
 }
 #[derive(Clone)]
 struct Capture {
+    client: Option<u32>,
     source: u32,
     module: Option<u32>,
 }
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct Inventory {
     sinks: Vec<Sink>,
     sources: Vec<Source>,
@@ -98,6 +103,10 @@ pub(super) struct Engine {
     last_members: Vec<(String, Vec<AppSelector>)>,
     last_enabled: bool,
     paused: BTreeSet<String>,
+    meters: BTreeMap<String, meter::Meter>,
+    meter_keys: BTreeSet<String>,
+    meter_client: Option<u32>,
+    cache: Option<gain::Cache>,
 }
 impl Engine {
     pub fn new(namespace: String) -> Self {
@@ -113,6 +122,10 @@ impl Engine {
             last_members: vec![],
             last_enabled: false,
             paused: BTreeSet::new(),
+            meters: BTreeMap::new(),
+            meter_keys: BTreeSet::new(),
+            meter_client: None,
+            cache: None,
         }
     }
     pub fn update(&mut self, config: &Config, stop: &AtomicBool) -> Snapshot {
@@ -120,12 +133,23 @@ impl Engine {
             config: config.clone(),
             ..Snapshot::default()
         };
+        self.cache = None;
+        self.meter_keys = meter_keys(config);
+        if !config.enabled {
+            self.clear_meters();
+        }
         let result = (|| -> Result<()> {
             if self.connection.is_none() {
+                self.meters.clear();
+                self.meter_client = None;
                 self.connection = Some(Connection::new(stop)?);
             }
             let mut connection = self.connection.take().unwrap();
+            self.meter_client = connection.context.get_index();
             let result = (|| -> Result<()> {
+                if !config.enabled {
+                    connection.close_meter_captures(stop)?;
+                }
                 let mut inv = connection.inventory(stop)?;
                 if config.enabled {
                     self.recover(&inv)?;
@@ -153,6 +177,8 @@ impl Engine {
                 }
                 self.last_enabled = config.enabled;
                 if config.enabled {
+                    let targets = self.meter_targets(config, &inv);
+                    self.trim_meters(&targets);
                     self.apply(
                         &mut connection,
                         config,
@@ -192,20 +218,192 @@ impl Engine {
                     .map(|i| i.app.clone())
                     .collect();
                 snapshot.active = config.enabled && !ids.is_empty();
+                if config.enabled {
+                    self.reconcile_meters(&mut connection, config, &inv, &mut snapshot.warnings);
+                }
+                snapshot.levels = self.levels(Instant::now());
+                self.cache = Some(gain::Cache {
+                    config: config.clone(),
+                    snapshot: snapshot.clone(),
+                    inventory: inv.clone(),
+                });
                 Ok(())
             })();
             let result = result.and(self.persist());
             if connection.context.get_state() == ContextState::Ready {
                 self.connection = Some(connection);
             } else {
+                self.clear_meters();
+                self.meter_client = None;
                 snapshot.connected = false;
             }
             result
         })();
         if let Err(error) = result {
+            self.cache = None;
             snapshot.error = Some(format!("{error:#}"));
         }
         snapshot
+    }
+    /// Apply only changed levels after fresh targeted identity checks. Routing
+    /// changes/uncertain ownership return None so the caller does full inventory.
+    pub fn update_controls(&mut self, config: &Config, stop: &AtomicBool) -> Option<Snapshot> {
+        let cached = self.cache.as_ref()?;
+        if !control::same_routing(&cached.config, config) || stop.load(Ordering::Acquire) {
+            return None;
+        }
+        let mut snapshot = cached.snapshot.clone();
+        if let Err(error) = config.validate() {
+            snapshot.error = Some(error.to_string());
+            return Some(snapshot);
+        }
+        let changes = gain::changes(self, config, cached)?;
+        let connection = self.connection.as_mut()?;
+        if connection.ready(stop).is_err() {
+            self.cache = None;
+            return None;
+        }
+        if config.enabled {
+            // Check every affected identity before starting any writes. Never
+            // trust an old sink/input index across deletion or daemon restart.
+            for change in &changes {
+                if connection
+                    .verify_gain(change, &self.namespace, &self.session, stop)
+                    .ok()
+                    != Some(true)
+                {
+                    self.cache = None;
+                    return None;
+                }
+            }
+            for change in &changes {
+                if let Err(error) = connection.apply_gain(change, stop) {
+                    snapshot.error = Some(format!("Mixer control update: {error:#}"));
+                    snapshot.connected = connection.context.get_state() == ContextState::Ready;
+                    self.cache = None;
+                    return Some(snapshot);
+                }
+            }
+        }
+        snapshot.config = config.clone();
+        snapshot.levels = self.levels(Instant::now());
+        if let Some(cache) = &mut self.cache {
+            cache.config = config.clone();
+            cache.snapshot = snapshot.clone();
+        }
+        Some(snapshot)
+    }
+    /// Pump already-created meter streams only; no inventory or device lookup.
+    pub fn poll_levels(&mut self, stop: &AtomicBool) -> Levels {
+        if stop.load(Ordering::Acquire) || !self.last_enabled {
+            self.clear_meters();
+            return Levels::default();
+        }
+        if self
+            .connection
+            .as_mut()
+            .is_none_or(|c| c.ready(stop).is_err())
+        {
+            self.cache = None;
+            self.clear_meters();
+            self.connection = None;
+            self.meter_client = None;
+        }
+        self.levels(Instant::now())
+    }
+    fn levels(&mut self, now: Instant) -> Levels {
+        let mut levels = Levels::default();
+        for key in &self.meter_keys {
+            let level = self
+                .meters
+                .get_mut(key)
+                .map(|m| m.level(now))
+                .unwrap_or_default();
+            if let Some(id) = key.strip_prefix("channel:") {
+                levels.channels.insert(id.into(), level);
+            } else if let Some(id) = key.strip_prefix("mix:") {
+                levels.mixes.insert(id.into(), level);
+            }
+        }
+        levels
+    }
+    fn clear_meters(&mut self) {
+        self.meters.clear(); // Disconnect before cleanup inventories endpoint readers.
+    }
+    fn trim_meters(&mut self, targets: &BTreeMap<String, meter::Target>) {
+        let removed: Vec<_> = self
+            .meters
+            .iter()
+            .filter(|(key, m)| targets.get(*key) != Some(&m.target) || m.failed())
+            .map(|(key, _)| key.clone())
+            .collect();
+        for key in removed {
+            self.meters.remove(&key);
+        }
+    }
+    fn meter_targets(&self, config: &Config, inv: &Inventory) -> BTreeMap<String, meter::Target> {
+        let mut targets = BTreeMap::new();
+        for key in meter_keys(config) {
+            let Some((_, module)) = self.owned.iter().find(|(owned, m)| {
+                owned == &key
+                    && m.name == "module-null-sink"
+                    && inv.modules.iter().any(|actual| actual == m)
+            }) else {
+                continue;
+            };
+            let (kind, id) = key.split_once(':').unwrap();
+            let name = if kind == "channel" {
+                channel_sink(&self.namespace, id)
+            } else {
+                mix_sink(&self.namespace, id)
+            };
+            let Some(sink) = inv
+                .sinks
+                .iter()
+                .find(|s| s.device.name == name && s.module == Some(module.id))
+            else {
+                continue;
+            };
+            let monitor = format!("{}.monitor", sink.device.name);
+            let Some(source) = inv.sources.iter().find(|s| {
+                s.device.name == monitor
+                    && s.module == Some(module.id)
+                    && s.device.monitor
+                    && s.monitor_sink.as_deref() == Some(name.as_str())
+            }) else {
+                continue;
+            };
+            targets.insert(
+                key,
+                meter::Target {
+                    source: source.index,
+                    module: module.id,
+                    name: monitor,
+                },
+            );
+        }
+        targets
+    }
+    fn reconcile_meters(
+        &mut self,
+        c: &mut Connection,
+        config: &Config,
+        inv: &Inventory,
+        warnings: &mut Vec<String>,
+    ) {
+        let targets = self.meter_targets(config, inv);
+        self.trim_meters(&targets);
+        for (key, target) in targets {
+            if self.meters.contains_key(&key) {
+                continue;
+            }
+            match meter::Meter::new(&mut c.context, target, &key) {
+                Ok(meter) => {
+                    self.meters.insert(key, meter);
+                }
+                Err(error) => warnings.push(format!("Meter unavailable for {key}: {error}")),
+            }
+        }
     }
     fn recover(&mut self, inv: &Inventory) -> Result<()> {
         if self.journal.is_some() {
@@ -519,7 +717,8 @@ impl Engine {
             }
         }
         // Pulse/PipeWire may restore previous gains on newly created loopbacks.
-        // Capture and physical-output legs must have an explicit unity gain too.
+        // Capture legs have unity gain. Output trims affect only the owned
+        // loopback sink-input, never the destination sink/master volume.
         for (key, module) in &self.owned {
             if key.starts_with("capture:") || key.starts_with("output:") {
                 let input = inv
@@ -527,8 +726,9 @@ impl Engine {
                     .iter()
                     .find(|i| i.module == Some(module.id))
                     .context("Owned capture/output stream missing")?;
-                if !gain_matches(&input.volume, 100.0) || input.muted {
-                    c.input_gain(input.app.index, input.channels, 100.0, false, stop)?;
+                let (volume, muted) = output_gain(config, key);
+                if !gain_matches(&input.volume, volume) || input.muted != muted {
+                    c.input_gain(input.app.index, input.channels, volume, muted, stop)?;
                 }
             }
         }
@@ -710,6 +910,11 @@ impl Engine {
             }
         }
         for capture in &inv.captures {
+            // This private context creates only meter recording streams. Its
+            // server-assigned client identity also covers streams still Creating.
+            if self.meter_client.is_some() && capture.client == self.meter_client {
+                continue;
+            }
             if capture.module.is_some_and(|id| owned.contains(&id)) {
                 continue;
             }
@@ -773,10 +978,14 @@ impl Engine {
         Ok(())
     }
     pub fn shutdown(&mut self) {
+        self.cache = None;
+        self.clear_meters();
         if let Some(mut c) = self.connection.take() {
             c.deadline = Some(Instant::now() + Duration::from_secs(2));
             let stop = AtomicBool::new(false);
-            if let Ok(mut inv) = c.inventory(&stop) {
+            if c.close_meter_captures(&stop).is_ok()
+                && let Ok(mut inv) = c.inventory(&stop)
+            {
                 self.adopt_pending(&inv);
                 let _ = self.cleanup(&mut c, &mut inv, &mut vec![], &stop);
             }
@@ -788,6 +997,31 @@ impl Drop for Engine {
     fn drop(&mut self) {
         self.shutdown();
     }
+}
+fn meter_keys(config: &Config) -> BTreeSet<String> {
+    if !config.enabled {
+        return BTreeSet::new();
+    }
+    config
+        .channels
+        .iter()
+        .map(|c| format!("channel:{}", c.id))
+        .chain(config.mixes.iter().map(|m| format!("mix:{}", m.id)))
+        .collect()
+}
+fn output_gain(config: &Config, key: &str) -> (f64, bool) {
+    for mix in &config.mixes {
+        for output in &mix.outputs {
+            if key == format!("output:{}:{output}", mix.id) {
+                return mix
+                    .output_controls
+                    .get(output)
+                    .map(|c| (c.volume, c.muted))
+                    .unwrap_or((100.0, false));
+            }
+        }
+    }
+    (100.0, false)
 }
 fn gain_matches(volumes: &ChannelVolumes, percent: f64) -> bool {
     let wanted = Volume::from(VolumeLinear(percent / 100.0));
@@ -925,6 +1159,54 @@ impl Connection {
         );
         Ok(())
     }
+    /// Disconnect acknowledgements can lag Stream::drop, particularly while a
+    /// recording stream is Creating. Confirm that this private client's captures
+    /// are gone before unloading their monitor sinks. Never kill another client.
+    fn close_meter_captures(&mut self, stop: &AtomicBool) -> Result<()> {
+        self.ready(stop)?;
+        let client = self
+            .context
+            .get_index()
+            .context("Missing mixer client identity")?;
+        let previous = self.deadline;
+        self.deadline = Some(
+            (Instant::now() + Duration::from_millis(500))
+                .min(previous.unwrap_or(Instant::now() + Duration::from_millis(500))),
+        );
+        let result = (|| {
+            loop {
+                self.ready(stop)?;
+                let indices = Rc::new(RefCell::new(Vec::new()));
+                let to = indices.clone();
+                let failed = Rc::new(RefCell::new(false));
+                let err = failed.clone();
+                let mut op =
+                    self.context
+                        .introspect()
+                        .get_source_output_info_list(move |r| match r {
+                            ListResult::Item(i) if i.client == Some(client) => {
+                                to.borrow_mut().push(i.index)
+                            }
+                            ListResult::Error => *err.borrow_mut() = true,
+                            _ => {}
+                        });
+                self.wait(&mut op, stop)?;
+                ensure!(!*failed.borrow(), "Could not verify closed mixer meters");
+                let indices = indices.take();
+                if indices.is_empty() {
+                    return Ok(());
+                }
+                for index in indices {
+                    // A stream may have finished its own disconnect since the
+                    // query. Re-querying, not the kill acknowledgement, proves closure.
+                    let mut op = self.context.introspect().kill_source_output(index, |_| {});
+                    self.wait(&mut op, stop)?;
+                }
+            }
+        })();
+        self.deadline = previous;
+        result
+    }
     fn inventory(&mut self, stop: &AtomicBool) -> Result<Inventory> {
         self.ready(stop)?;
         let modules = Rc::new(RefCell::new(Vec::new()));
@@ -1047,6 +1329,7 @@ impl Connection {
             .introspect()
             .get_source_output_info_list(move |r| match r {
                 ListResult::Item(i) => to.borrow_mut().push(Capture {
+                    client: i.client,
                     source: i.source,
                     module: i.owner_module,
                 }),
@@ -1278,6 +1561,7 @@ mod tests {
                     })
                     .collect(),
                 routes: vec![],
+                ..Config::default()
             };
             for ch in &config.channels {
                 for mix in &config.mixes {
@@ -1337,6 +1621,7 @@ mod tests {
             name: "Mic".into(),
             sources: vec!["Missing Mic".into()],
             apps: vec![],
+            ..Channel::default()
         });
         c.mixes[0].outputs.push("Missing Output".into());
         let mut warnings = vec![];
@@ -1376,6 +1661,7 @@ mod tests {
                 name: "System".into(),
                 sources: vec!["speakers.monitor".into()],
                 apps: vec![],
+                ..Channel::default()
             }],
             mixes: vec![Mix {
                 id: "monitor".into(),
@@ -1388,6 +1674,7 @@ mod tests {
                 mix: "monitor".into(),
                 ..Route::default()
             }],
+            ..Config::default()
         };
         let inv = Inventory {
             sources: vec![Source {
@@ -1405,5 +1692,137 @@ mod tests {
         let mut safe = c;
         safe.mixes[0].outputs = vec!["headphones".into()];
         reject_monitor_cycles(&safe, &inv).unwrap();
+    }
+    #[test]
+    fn rename_and_output_trim_do_not_replace_endpoint_module_arguments() {
+        let engine = Engine::new("fixture".into());
+        let mut config:Config=serde_json::from_value(serde_json::json!({"enabled":true,"channels":[{"id":"music","name":"Before"}],"mixes":[{"id":"monitor","name":"Before","outputs":["owned-test-output"]}],"routes":[{"channel":"music","mix":"monitor"}]})).unwrap();
+        let inv = Inventory {
+            sinks: vec![Sink {
+                device: Device {
+                    name: "owned-test-output".into(),
+                    ..Device::default()
+                },
+                index: 1,
+                module: None,
+                channels: 2,
+                volume: ChannelVolumes::default(),
+                muted: false,
+            }],
+            ..Inventory::default()
+        };
+        let plan = |config: &Config| {
+            engine
+                .plan(config, &inv, &mut vec![])
+                .into_iter()
+                .map(|s| (s.key, s.name, s.args))
+                .collect::<Vec<_>>()
+        };
+        let before = plan(&config);
+        config.channels[0].name = "After channel rename".into();
+        config.mixes[0].name = "After mix rename".into();
+        config.mixes[0].output_controls.insert(
+            "owned-test-output".into(),
+            OutputControl {
+                volume: 25.0,
+                muted: true,
+            },
+        );
+        assert_eq!(plan(&config), before);
+        assert_eq!(
+            output_gain(&config, "output:monitor:owned-test-output"),
+            (25.0, true)
+        );
+        assert_eq!(output_gain(&config, "capture:music:other"), (100.0, false));
+        assert_eq!(
+            output_gain(&config, "output:other:owned-test-output"),
+            (100.0, false)
+        );
+    }
+    #[test]
+    fn meters_require_verified_owned_sink_and_matching_monitor() {
+        let mut engine = Engine::new("fixture".into());
+        let config:Config=serde_json::from_value(serde_json::json!({"enabled":true,"channels":[{"id":"music","name":"Music"}],"mixes":[],"routes":[]})).unwrap();
+        let spec = engine
+            .plan(&config, &Inventory::default(), &mut vec![])
+            .remove(0);
+        let module = Module {
+            id: 7,
+            name: spec.name,
+            args: spec.args,
+        };
+        engine.owned.push(("channel:music".into(), module.clone()));
+        let sink = channel_sink("fixture", "music");
+        let mut inv = Inventory {
+            modules: vec![module],
+            sinks: vec![Sink {
+                device: Device {
+                    name: sink.clone(),
+                    ..Device::default()
+                },
+                index: 12,
+                module: Some(7),
+                channels: 2,
+                volume: ChannelVolumes::default(),
+                muted: false,
+            }],
+            sources: vec![Source {
+                index: 13,
+                device: Device {
+                    name: format!("{sink}.monitor"),
+                    monitor: true,
+                    ..Device::default()
+                },
+                module: Some(7),
+                monitor_sink: Some(sink),
+            }],
+            ..Inventory::default()
+        };
+        assert_eq!(
+            engine.meter_targets(&config, &inv)["channel:music"].source,
+            13
+        );
+        inv.modules[0].args.push_str(" foreign");
+        assert!(engine.meter_targets(&config, &inv).is_empty());
+        inv.modules[0] = engine.owned[0].1.clone();
+        inv.sources[0].module = Some(99);
+        assert!(engine.meter_targets(&config, &inv).is_empty());
+        inv.sources[0].module = Some(7);
+        inv.sources[0].device.monitor = false;
+        assert!(engine.meter_targets(&config, &inv).is_empty());
+    }
+    #[test]
+    fn only_private_client_meter_captures_are_excluded_from_external_protection() {
+        let mut engine = Engine::new("fixture".into());
+        let module = Module {
+            id: 7,
+            name: "module-null-sink".into(),
+            args: "fixture".into(),
+        };
+        engine.owned.push(("channel:a".into(), module.clone()));
+        engine.meter_client = Some(5);
+        let mut inv = Inventory {
+            modules: vec![module],
+            sources: vec![Source {
+                index: 13,
+                device: Device::default(),
+                module: Some(7),
+                monitor_sink: None,
+            }],
+            captures: vec![Capture {
+                client: Some(5),
+                source: 13,
+                module: None,
+            }],
+            ..Inventory::default()
+        };
+        assert!(engine.protected_modules(&inv).is_empty());
+        inv.captures[0].client = Some(6);
+        assert!(engine.protected_modules(&inv).contains(&7));
+        inv.captures[0].client = Some(5);
+        assert!(engine.protected_modules(&inv).is_empty());
+        engine.meter_client = None;
+        inv.captures[0].client = None;
+        assert!(engine.protected_modules(&inv).contains(&7));
     }
 }

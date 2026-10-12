@@ -3,6 +3,7 @@ import { newId } from "./ids";
 // Explicit development-only bridge. Never imported in a production bundle.
 import type { Snapshot, Action, Slot, RecordValue } from "./model";
 import { sameMixerValue } from "./Mixer";
+import { patchMixerControl, savedControl } from "./MixerLive";
 import { fixtureDevice } from "./fixtureDevices";
 import { validControl } from "./device";
 // Share the production edit merge with the development bridge.
@@ -248,6 +249,8 @@ export function installFixture(modelId?: string) {
       preferences: { after_minutes: 0, disable_on_lock: true, image: null },
     },
     mixer: {
+      revision: 1,
+      levels: { channels: {}, mixes: {} },
       config: {
         enabled: false,
         channels: [],
@@ -459,6 +462,21 @@ export function installFixture(modelId?: string) {
       if (method === "startup_status" || method === "startup_set")
         return { enabled: payload?.enabled ?? false, this_session: true } as T;
       if (method === "pick_file") return null as T;
+      if (method === "mixer_control") {
+        if (payload.revision !== snapshot.mixer.revision)
+          throw new Error("Mixer routing changed; reload and retry");
+        if (!savedControl(snapshot.mixer.config, payload.target))
+          throw new Error("Save the route before changing its live controls");
+        snapshot.mixer.config = patchMixerControl(
+          snapshot.mixer.config,
+          payload.target,
+          payload,
+        );
+        if (["channel", "preferences"].includes(payload.target.kind))
+          snapshot.mixer.revision!++;
+        listener?.(structuredClone(snapshot));
+        return structuredClone(snapshot.mixer) as T;
+      }
       if (method === "command") {
         if (payload.command === "slot_copy" || payload.command === "slot_cut") {
           const source = snapshot.slots.find(
@@ -571,6 +589,7 @@ export function installFixture(modelId?: string) {
               "Mixer settings changed outside this editor. Reload current settings before applying.",
             );
           snapshot.mixer.config = structuredClone(payload.settings);
+          snapshot.mixer.revision = (snapshot.mixer.revision ?? 0) + 1;
           snapshot.mixer.applied_config = structuredClone(payload.settings);
           snapshot.mixer.active = payload.settings.enabled;
           snapshot.mixer.pending = false;

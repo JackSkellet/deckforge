@@ -3,22 +3,25 @@
 //! linear amplitude. System default devices are never modified.
 #[path = "mixer/backend.rs"]
 mod backend;
+#[path = "mixer/control.rs"]
+pub mod control;
 use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
         mpsc,
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct Config {
+    pub fade_ms: u32,
     pub enabled: bool,
     pub channels: Vec<Channel>,
     pub mixes: Vec<Mix>,
@@ -27,6 +30,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            fade_ms: 0,
             enabled: false,
             channels: vec![],
             mixes: vec![
@@ -48,6 +52,7 @@ impl Default for Config {
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct Channel {
+    pub linked: bool,
     pub id: String,
     pub name: String,
     pub apps: Vec<AppSelector>,
@@ -56,6 +61,7 @@ pub struct Channel {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct Mix {
+    pub output_controls: BTreeMap<String, OutputControl>,
     pub id: String,
     pub name: String,
     pub outputs: Vec<String>,
@@ -65,6 +71,7 @@ pub struct Mix {
 impl Default for Mix {
     fn default() -> Self {
         Self {
+            output_controls: BTreeMap::new(),
             id: String::new(),
             name: String::new(),
             outputs: vec![],
@@ -72,6 +79,30 @@ impl Default for Mix {
             muted: false,
         }
     }
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct OutputControl {
+    pub volume: f64,
+    pub muted: bool,
+}
+impl Default for OutputControl {
+    fn default() -> Self {
+        Self {
+            volume: 100.0,
+            muted: false,
+        }
+    }
+}
+#[derive(Clone, Debug, Default, Serialize, PartialEq)]
+pub struct Level {
+    pub peak: f32,
+    pub available: bool,
+}
+#[derive(Clone, Debug, Default, Serialize, PartialEq)]
+pub struct Levels {
+    pub channels: BTreeMap<String, Level>,
+    pub mixes: BTreeMap<String, Level>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(tag = "field", content = "value", rename_all = "snake_case")]
@@ -114,6 +145,8 @@ pub struct App {
 }
 #[derive(Clone, Debug, Default, Serialize, PartialEq)]
 pub struct Snapshot {
+    pub levels: Levels,
+    pub fading: bool,
     pub config: Config,
     pub connected: bool,
     pub active: bool,
@@ -125,6 +158,10 @@ pub struct Snapshot {
 }
 impl Config {
     pub fn validate(&self) -> Result<()> {
+        ensure!(
+            self.fade_ms <= 10_000,
+            "Fade duration must be 0–10000 milliseconds"
+        );
         ensure!(
             self.channels.len() <= 12,
             "At most 12 mixer channels are supported"
@@ -168,6 +205,18 @@ impl Config {
             valid_id(&m.id)?;
             valid_label(&m.name)?;
             valid_volume(m.volume)?;
+            ensure!(
+                m.output_controls.len() <= 128,
+                "Too many saved output controls"
+            );
+            for (output, control) in &m.output_controls {
+                valid_external(output)?;
+                ensure!(
+                    !output.starts_with('@') && !output.starts_with("deckforge."),
+                    "Output controls require an exact external output"
+                );
+                valid_volume(control.volume)?;
+            }
             ensure!(mixes.insert(&m.id), "Duplicate mix ID");
             let mut outputs = BTreeSet::new();
             for output in &m.outputs {
@@ -238,11 +287,17 @@ pub fn mix_source(namespace: &str, id: &str) -> String {
     format!("deckforge.{namespace}.source.{id}")
 }
 
+struct Update {
+    config: Config,
+    changes: BTreeMap<control::Target, Duration>,
+    immediate: bool,
+}
+
 pub struct Worker {
-    pending: Arc<Mutex<Option<Config>>>,
+    pending: Arc<Mutex<Option<Update>>>,
     state: Arc<Mutex<Snapshot>>,
     wake: mpsc::SyncSender<()>,
-    reports: mpsc::Receiver<Snapshot>,
+    reports: mpsc::Receiver<()>,
     stop: Arc<AtomicBool>,
     thread: Option<thread::JoinHandle<()>>,
 }
@@ -250,41 +305,84 @@ impl Worker {
     pub fn new(namespace: String, config: Config) -> Result<Self> {
         valid_id(&namespace)?;
         config.validate()?;
-        let pending = Arc::new(Mutex::new(Some(config.clone())));
-        let state = Arc::new(Mutex::new(Snapshot {
+        let pending = Arc::new(Mutex::new(Some(Update {
             config,
-            ..Snapshot::default()
-        }));
+            changes: BTreeMap::new(),
+            immediate: true,
+        })));
+        let state = Arc::new(Mutex::new(Snapshot::default()));
         let stop = Arc::new(AtomicBool::new(false));
         let (wake, commands) = mpsc::sync_channel(1);
         let (reporter, reports) = mpsc::sync_channel(4);
         let desired = pending.clone();
         let shared = state.clone();
         let stopped = stop.clone();
-        let thread = thread::Builder::new()
-            .name("deckforge-mixer".into())
-            .spawn(move || {
-                let mut config = Config::default();
-                let mut engine = backend::Engine::new(namespace);
-                let mut last = None;
-                while !stopped.load(Ordering::Acquire) {
-                    if let Some(next) = desired.lock().unwrap().take() {
-                        config = next;
-                    }
-                    let snapshot = engine.update(&config, &stopped);
-                    if last.as_ref() != Some(&snapshot) {
+        let thread =
+            thread::Builder::new()
+                .name("deckforge-mixer".into())
+                .spawn(move || {
+                    let clock = Instant::now();
+                    let mut timeline = control::Fades::new(Config::default());
+                    let mut engine = backend::Engine::new(namespace);
+                    let mut accepted = Config::default();
+                    let mut submitted = None;
+                    let mut inventory_at = Instant::now();
+                    let mut snapshot = Snapshot::default();
+                    let mut last_report = None;
+                    while !stopped.load(Ordering::Acquire) {
+                        let update = desired.lock().unwrap().take();
+                        let requested = update.is_some();
+                        if let Some(update) = update
+                            && let Err(error) = timeline.submit(
+                                update.config,
+                                update.changes,
+                                update.immediate,
+                                clock.elapsed(),
+                            )
+                        {
+                            snapshot.error = Some(error.to_string());
+                        }
+                        let current = timeline.sample(clock.elapsed());
+                        let due = Instant::now() >= inventory_at;
+                        if due
+                            || (submitted.as_ref() != Some(&current)
+                                && (snapshot.error.is_none() || requested))
+                        {
+                            snapshot = if !due {
+                                engine.update_controls(&current, &stopped)
+                            } else {
+                                None
+                            }
+                            .unwrap_or_else(|| {
+                                inventory_at = Instant::now() + Duration::from_millis(500);
+                                engine.update(&current, &stopped)
+                            });
+                            if snapshot.error.is_none() {
+                                accepted = current.clone();
+                            } else {
+                                snapshot.config = accepted.clone();
+                            }
+                            submitted = Some(current);
+                        }
+                        snapshot.fading = timeline.active() && snapshot.error.is_none();
+                        snapshot.levels = engine.poll_levels(&stopped);
                         *shared.lock().unwrap() = snapshot.clone();
-                        let _ = reporter.try_send(snapshot.clone());
-                        last = Some(snapshot);
+                        // Meter-only changes update the UI's shared snapshot without
+                        // redrawing every physical key or filling the report queue.
+                        let mut report = snapshot.clone();
+                        report.levels = Levels::default();
+                        if last_report.as_ref() != Some(&report) {
+                            let _ = reporter.try_send(());
+                            last_report = Some(report);
+                        }
+                        if let Err(mpsc::RecvTimeoutError::Disconnected) = commands.recv_timeout(
+                            Duration::from_millis(if timeline.target().enabled { 20 } else { 500 }),
+                        ) {
+                            break;
+                        }
                     }
-                    if let Err(mpsc::RecvTimeoutError::Disconnected) =
-                        commands.recv_timeout(Duration::from_millis(500))
-                    {
-                        break;
-                    }
-                }
-                engine.shutdown();
-            })?;
+                    engine.shutdown();
+                })?;
         Ok(Self {
             pending,
             state,
@@ -295,12 +393,60 @@ impl Worker {
         })
     }
     pub fn submit(&self, config: Config) -> Result<()> {
+        self.enqueue(config, BTreeMap::new(), true)
+    }
+    pub fn submit_controls(
+        &self,
+        config: Config,
+        changes: BTreeMap<control::Target, Duration>,
+    ) -> Result<()> {
+        let immediate = !config.enabled;
+        self.enqueue(config, changes, immediate)
+    }
+    fn enqueue(
+        &self,
+        config: Config,
+        changes: BTreeMap<control::Target, Duration>,
+        immediate: bool,
+    ) -> Result<()> {
         config.validate()?;
+        for target in changes.keys() {
+            control::read(&config, target)?;
+        }
         ensure!(
             !self.stop.load(Ordering::Acquire),
             "Mixer worker has stopped"
         );
-        *self.pending.lock().unwrap() = Some(config);
+        let mut pending = self.pending.lock().unwrap();
+        if immediate {
+            *pending = Some(Update {
+                config,
+                changes,
+                immediate,
+            });
+        } else if let Some(previous) = pending.as_mut() {
+            // A configuration edit with no requested fade applies its changed
+            // levels immediately. Keep queued durations only for untouched levels.
+            previous.changes.retain(|target, _| {
+                changes.contains_key(target)
+                    || control::read(&previous.config, target)
+                        .ok()
+                        .map(|v| v.volume)
+                        == control::read(&config, target).ok().map(|v| v.volume)
+            });
+            previous.config = config;
+            previous.changes.extend(changes);
+            previous
+                .changes
+                .retain(|target, _| control::read(&previous.config, target).is_ok());
+        } else {
+            *pending = Some(Update {
+                config,
+                changes,
+                immediate,
+            });
+        }
+        drop(pending);
         let _ = self.wake.try_send(());
         Ok(())
     }
@@ -345,6 +491,67 @@ mod tests {
             ..Config::default()
         }
     }
+    #[test]
+    fn pending_controls_preserve_metadata_ramps_but_clear_overridden_levels() {
+        let (wake, _commands) = mpsc::sync_channel(1);
+        let (_reporter, reports) = mpsc::channel();
+        let worker = Worker {
+            pending: Arc::new(Mutex::new(None)),
+            state: Arc::new(Mutex::new(Snapshot::default())),
+            wake,
+            reports,
+            stop: Arc::new(AtomicBool::new(false)),
+            thread: None,
+        };
+        let target = control::Target::Route {
+            channel: "music".into(),
+            mix: "monitor".into(),
+        };
+        let mut config = sample();
+        config.routes[0].volume = 20.0;
+        worker
+            .submit_controls(
+                config.clone(),
+                BTreeMap::from([(target.clone(), Duration::from_secs(1))]),
+            )
+            .unwrap();
+        config.channels[0].name = "Renamed".into();
+        config.routes[0].muted = true;
+        worker
+            .submit_controls(config.clone(), BTreeMap::new())
+            .unwrap();
+        assert_eq!(
+            worker
+                .pending
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .changes
+                .len(),
+            1
+        );
+        config.routes[0].volume = 50.0;
+        worker
+            .submit_controls(config.clone(), BTreeMap::new())
+            .unwrap();
+        assert!(
+            worker
+                .pending
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .changes
+                .is_empty()
+        );
+        config.enabled = false;
+        worker
+            .submit_controls(config, BTreeMap::from([(target, Duration::from_secs(1))]))
+            .unwrap();
+        assert!(worker.pending.lock().unwrap().as_ref().unwrap().immediate);
+    }
+
     #[test]
     fn default_is_opt_in_and_has_no_members() {
         let c = Config::default();

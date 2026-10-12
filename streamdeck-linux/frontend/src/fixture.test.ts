@@ -214,3 +214,42 @@ it("the synthetic command handler merges stale drafts while legacy settings stil
     (await bridge.request<Snapshot>("snapshot")).slots[0].settings,
   ).toEqual({ count: 0 });
 });
+
+it("returns authoritative control snapshots without enabling synthetic routing and guards graph revisions", async () => {
+  const bridge = window.deckforge!;
+  const before = (await bridge.request<Snapshot>("snapshot")).mixer;
+  const listener = vi.fn();
+  bridge.onSnapshot(listener);
+  const changed = await bridge.request<typeof before>("mixer_control", {
+    revision: before.revision,
+    target: { kind: "mix", mix: "monitor" },
+    volume: 42,
+  });
+  expect(changed.config.mixes[0].volume).toBe(42);
+  expect(changed.config.enabled).toBe(false);
+  expect(changed.active).toBe(false);
+  expect(changed.revision).toBe(before.revision);
+  expect(listener).toHaveBeenLastCalledWith(
+    expect.objectContaining({ mixer: changed }),
+  );
+  const preferences = await bridge.request<typeof before>("mixer_control", {
+    revision: changed.revision,
+    target: { kind: "preferences" },
+    fade_ms: 350,
+  });
+  expect(preferences.revision).toBe(changed.revision! + 1);
+  await expect(
+    bridge.request("mixer_control", {
+      revision: changed.revision,
+      target: { kind: "mix", mix: "monitor" },
+      volume: 5,
+    }),
+  ).rejects.toThrow("routing changed");
+  await expect(
+    bridge.request("mixer_control", {
+      revision: preferences.revision,
+      target: { kind: "route", channel: "unsaved", mix: "monitor" },
+      volume: 5,
+    }),
+  ).rejects.toThrow("Save the route");
+});

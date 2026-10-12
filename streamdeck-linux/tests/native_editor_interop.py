@@ -63,12 +63,12 @@ const route=(config,channel,mix)=>config.routes.find(r=>r.channel===channel&&r.m
 const gain=(channel,mix)=>document.querySelector(`input[aria-label="${channel} → ${mix} volume"]`);
 const state=await bridge.request('ui_state_get');
 const retained=state?.formDrafts?.['audio-mixer'];
-if(draftCase&&retained?.dirty&&route(retained.config,'voice','monitor')?.volume===78){
- const input=await until(()=>gain('Voice','Monitor'));
- if(input.value!=='78')throw Error('Mixer draft was not restored into native DOM');
+if(draftCase&&retained?.dirty&&retained.config.mixes.find(m=>m.id==='monitor')?.name==='Monitor draft'){
+ const input=await until(()=>gain('Voice','Monitor draft'));
+ if(input.value!=='75')throw Error('Mixer draft was not restored into native DOM');
  const host=await bridge.request('snapshot');
- if(host.mixer.config.enabled||route(host.mixer.config,'voice','monitor').volume!==75)throw Error('Unapplied mixer draft changed saved routing');
- return {phase:'restored',draftVolume:78,savedVolume:75,enabled:false};
+ if(host.mixer.config.enabled||host.mixer.config.mixes.find(m=>m.id==='monitor').name!=='Monitor')throw Error('Unapplied mixer draft changed saved routing');
+ return {phase:'restored',draftName:'Monitor draft',savedName:'Monitor',enabled:false};
 }
 const before=await bridge.request('snapshot');if(before.simulate!==true)throw Error('Mixer fixture must be simulated');
 await bridge.request('command',{command:'mixer_config',settings:config,expected:before.mixer.config});
@@ -80,9 +80,14 @@ if(!enabled||enabled.checked)throw Error('Routing must remain disabled');
 const set=(input,value)=>{Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(input,String(value));input.dispatchEvent(new Event('input',{bubbles:true}));input.dispatchEvent(new Event('change',{bubbles:true}));};
 set(input,62);
 await until(async()=>{const state=await bridge.request('ui_state_get');return route(state?.formDrafts?.['audio-mixer']?.config||{routes:[]},'music','monitor')?.volume===62});
-const unapplied=await bridge.request('snapshot');if(route(unapplied.mixer.config,'music','monitor').volume!==55)throw Error('Mixer changed without explicit Apply');
+const immediate=await until(async()=>{const s=await bridge.request('snapshot');return route(s.mixer.config,'music','monitor')?.volume===62&&s});
+if(immediate.mixer.active||immediate.mixer.config.enabled)throw Error('Immediate saved control enabled routing');
+const nameField=()=>[...document.querySelectorAll('label.field')].find(l=>l.querySelector('span')?.textContent==='Stream mix name')?.querySelector('input');
+set(nameField(),'Streaming');
+await until(async()=>(await bridge.request('ui_state_get'))?.formDrafts?.['audio-mixer']?.dirty);
+if((await bridge.request('snapshot')).mixer.config.mixes.find(m=>m.id==='stream').name!=='Stream')throw Error('Name changed without explicit Apply');
 const apply=document.querySelector('.audio-mixer button[type="submit"]');await until(()=>!apply.disabled);apply.click();
-const applied=await until(async()=>{const s=await bridge.request('snapshot');return route(s.mixer.config,'music','monitor')?.volume===62&&s});
+const applied=await until(async()=>{const s=await bridge.request('snapshot');return s.mixer.config.mixes.find(m=>m.id==='stream').name==='Streaming'&&s});
 if(applied.mixer.config.enabled||applied.mixer.active||applied.mixer.sinks.some(s=>s.owned))throw Error('Disabled fixture created an audio graph');
 if(applied.mixer.config.channels.some(c=>c.apps.length||c.sources.length)||applied.mixer.config.mixes.some(m=>m.outputs.length))throw Error('Fixture selected real audio members');
 await until(()=>document.querySelector('.mixer-footer [role="status"]')?.textContent.includes('Routing settings saved'));
@@ -90,11 +95,12 @@ const applyRect=document.querySelector('.audio-mixer button[type="submit"]').get
 const dialogRect=document.querySelector('dialog[open]').getBoundingClientRect();
 if(applyRect.bottom>dialogRect.bottom+1||applyRect.top<dialogRect.top)throw Error('Mixer Apply button is clipped outside its dialog');
 if(draftCase){
- set(gain('Voice','Monitor'),78);
- await until(async()=>{const d=(await bridge.request('ui_state_get'))?.formDrafts?.['audio-mixer'];return d?.dirty&&route(d.config,'voice','monitor')?.volume===78});
- return {phase:'edited',draftVolume:78,savedVolume:75,enabled:false};
+ const field=[...document.querySelectorAll('label.field')].find(l=>l.querySelector('span')?.textContent==='Monitor mix name')?.querySelector('input');
+ set(field,'Monitor draft');
+ await until(async()=>{const d=(await bridge.request('ui_state_get'))?.formDrafts?.['audio-mixer'];return d?.dirty&&d.config.mixes.find(m=>m.id==='monitor')?.name==='Monitor draft'});
+ return {phase:'edited',draftName:'Monitor draft',savedName:'Monitor',enabled:false};
 }
-return {phase:'applied',channels:[...document.querySelectorAll('.mixer-matrix tbody th strong')].map(n=>n.textContent),savedMusicMonitor:62,otherRoutes:applied.mixer.config.routes,enabled:false,active:false,ownedAudioNodes:0,explicitApplyRequired:true,applyButtonBottom:applyRect.bottom,dialogBottom:dialogRect.bottom};
+return {phase:'applied',channels:[...document.querySelectorAll('.mixer-matrix tbody th strong')].map(n=>n.textContent),savedMusicMonitor:62,otherRoutes:applied.mixer.config.routes,enabled:false,active:false,ownedAudioNodes:0,levelsImmediate:true,structuralApplyRequired:true,applyButtonBottom:applyRect.bottom,dialogBottom:dialogRect.bottom};
 """
 
 
@@ -303,7 +309,7 @@ def main():
     if args.report:
         args.report.parent.mkdir(parents=True, exist_ok=True)
         args.report.write_text(json.dumps(report, indent=2) + '\n')
-    print('PASS: actual native WebKit + unchanged official Counter count7/settings persistence; rendered preview; bridge rejection; unsaved draft survives destruction/recreation; headless background exits cleanly; disabled mixer matrix edits require Apply and drafts survive reopen. No USB, OS input, or audio routing enabled.')
+    print('PASS: actual native WebKit + unchanged official Counter count7/settings persistence; rendered preview; bridge rejection; unsaved draft survives destruction/recreation; headless background exits cleanly; disabled mixer levels save immediately, structural edits require Apply and drafts survive reopen. No USB, OS input, or audio routing enabled.')
 
 
 if __name__ == '__main__':

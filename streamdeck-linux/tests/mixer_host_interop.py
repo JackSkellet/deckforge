@@ -41,6 +41,7 @@ def main():
         state.mkdir()
         namespace = hashlib.sha256(os.fsencode(state.resolve())).hexdigest()[:24]
         prefix = 'deckforge.' + namespace + '.'
+        report['fixture_namespace'] = namespace
         def owned():
             return [d['name'] for d in pulse('list', 'sinks') if d['name'].startswith(prefix)]
         host = None
@@ -107,6 +108,56 @@ def main():
             host.wait(applied, 'mixer child in Dial Stack')
             current = host.state()['mixer']['config']
             assert current['routes'][1]['volume'] == 36
+            # Live requests share a routing revision; fades affect the actual
+            # owned sink-input while desired values already show the final target.
+            def control(target, **values):
+                revision = host.state()['mixer']['revision']
+                host.post({'command': 'mixer_control', 'revision': revision, 'target': target, **values})
+            route_target = {'kind': 'route', 'channel': 'fixture', 'mix': 'monitor'}
+            control({'kind': 'channel', 'channel': 'fixture'}, linked=True)
+            control({'kind': 'preferences'}, fade_ms=800)
+            control(route_target, muted=False)
+            start_revision = host.state()['mixer']['revision']
+            control(route_target, volume=20)
+            during = host.wait(lambda s: s['mixer']['fading'] and
+                25 < s['mixer']['applied_config']['routes'][0]['volume'] < 75,
+                'intermediate fade accepted by audio server')['mixer']
+            assert during['config']['routes'][0]['volume'] == 20
+            assert during['config']['routes'][1]['volume'] == 0  # same -60 point delta, clamped
+            intermediate = during['applied_config']['routes'][0]['volume']
+            renamed = copy.deepcopy(during['config'])
+            renamed['channels'][0]['name'] = 'Renamed during fade'
+            host.post({'command': 'mixer_config', 'settings': renamed, 'expected': during['config']})
+            after_rename = host.state()['mixer']
+            assert after_rename['fading'] and after_rename['applied_config']['routes'][0]['volume'] > 20
+            start_revision = after_rename['revision']
+            # Retarget mid-ramp, keeping a different mix's mute immediate.
+            control(route_target, volume=65)
+            control({'kind': 'mix', 'mix': 'stream'}, muted=True)
+            host.wait(applied, 'retargeted linked fade completed')
+            current = host.state()['mixer']['config']
+            assert current['routes'][0]['volume'] == 65 and current['routes'][1]['volume'] == 45
+            assert current['mixes'][1]['muted']
+            assert host.state()['mixer']['revision'] == start_revision
+            host.wait(lambda s: not s['mixer']['controls_unsaved'], 'coalesced controls saved')
+            # An explicit same-target duration0 request finishes an active fade.
+            control(route_target, volume=30, fade_ms=2500)
+            host.wait(lambda s: s['mixer']['fading'] and 35 < s['mixer']['applied_config']['routes'][0]['volume'] < 65,
+                      'second active fade')
+            finish_started = time.monotonic()
+            control(route_target, volume=30, fade_ms=0)
+            host.wait(applied, 'same desired level with zero duration finishes fade')
+            assert time.monotonic() - finish_started < 1.0
+            # Preference revision invalidates previously queued control requests.
+            control({'kind': 'preferences'}, fade_ms=0)
+            host.post({'command': 'mixer_control', 'revision': start_revision,
+                       'target': route_target, 'volume': 1}, expected=400)
+            assert host.state()['mixer']['config']['routes'][0]['volume'] == 30
+            current = host.state()['mixer']['config']
+            report.update(live_controls=True, linked_delta_and_clamp=True,
+                          fade_intermediate_percent=intermediate, fade_retarget=True, rename_preserves_fade=True, same_target_zero_duration=True,
+                          mute_during_fade=True, stale_control_rejected=True,
+                          coalesced_save=True)
             host.stop()
             host = None
             assert not owned(), 'Normal shutdown leaked owned routes'
@@ -131,12 +182,28 @@ def main():
             until = time.monotonic() + 5
             while owned() and time.monotonic() < until:
                 time.sleep(.05)
-            assert not owned(), 'Owned test nodes remain'
+            remaining = owned()
+            if remaining:
+                # Preserve the failure, but remove only this invocation's exact
+                # modules after the host exits. Never clean other namespaces.
+                def modules():
+                    rows = subprocess.check_output(['pactl', 'list', 'short', 'modules'], text=True).splitlines()
+                    return {int(parts[0]): parts[1:3] for row in rows if len(parts := row.split('\t')) >= 3 and parts[0].isdigit()}
+                created = {index: details for index, details in modules().items() if prefix in details[1]}
+                for index, details in reversed(list(created.items())):
+                    if modules().get(index) == details:
+                        subprocess.run(['pactl', 'unload-module', str(index)], check=True)
+                report['cleanup_failure_nodes'] = remaining
+                if args.report:
+                    args.report.parent.mkdir(parents=True, exist_ok=True)
+                    args.report.write_text(json.dumps(report, indent=2) + '\n')
+            assert not remaining, 'Owned test nodes remain after worker shutdown'
         after = pulse('info')
         for key in ('default_sink_name', 'default_source_name'):
             assert before[key] == after[key], 'System default changed'
         report['default_devices_unchanged'] = True
     if args.report:
+        args.report.parent.mkdir(parents=True, exist_ok=True)
         args.report.write_text(json.dumps(report, indent=2) + '\n')
     print('PASS: native host mixer inventory, independent routing, dial/key control, feedback, persistence/restart and cleanup; system defaults unchanged.')
 

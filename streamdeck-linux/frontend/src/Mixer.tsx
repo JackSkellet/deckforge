@@ -1,6 +1,19 @@
 import { newId } from "./ids";
+import {
+  meterReading,
+  reconcileMixerDraft,
+  sameMixerRouting,
+  sameMixerConfig,
+  savedControl,
+  patchMixerControl,
+  createMixerControlQueue,
+  type MixerControlTarget,
+  type MixerControlPatch,
+  type MixerLevel,
+} from "./MixerLive";
+import { request } from "./bridge";
 import { useEffect, useRef, useState } from "react";
-import { Check, Field, SelectField } from "./Fields";
+import { Check, Field, NumberField, SelectField } from "./Fields";
 import { clone } from "./model";
 import { getFormDraft, setFormDraft } from "./transient";
 import type { Run } from "./Panels";
@@ -14,11 +27,13 @@ export interface MixerChannel {
   name: string;
   apps: AppSelector[];
   sources: string[];
+  linked?: boolean;
 }
 export interface MixerMix {
   id: string;
   name: string;
   outputs: string[];
+  output_controls?: Record<string, { volume: number; muted: boolean }>;
   volume: number;
   muted: boolean;
 }
@@ -29,6 +44,7 @@ export interface MixerRoute {
   muted: boolean;
 }
 export interface MixerConfig {
+  fade_ms?: number;
   enabled: boolean;
   channels: MixerChannel[];
   mixes: MixerMix[];
@@ -48,6 +64,14 @@ export interface AudioApp {
   sink: string;
 }
 export interface MixerSnapshot {
+  revision?: number;
+  controls_unsaved?: boolean;
+  save_error?: string | null;
+  levels?: {
+    channels: Record<string, { peak: number; available: boolean }>;
+    mixes: Record<string, { peak: number; available: boolean }>;
+  };
+  fading?: boolean;
   config: MixerConfig;
   connected: boolean;
   active: boolean;
@@ -136,22 +160,67 @@ export function appChoices(
     }
   return [...choices.values()];
 }
+export function PeakMeter({
+  label,
+  level,
+}: {
+  label: string;
+  level?: MixerLevel;
+}) {
+  const reading = meterReading(level);
+  if (!reading.available)
+    return (
+      <div
+        className="mixer-meter unavailable"
+        role="img"
+        aria-label={`${label}: meter unavailable`}
+      >
+        <span className="mixer-meter-track" />
+        <span>Unavailable</span>
+      </div>
+    );
+  return (
+    <div
+      className={`mixer-meter${reading.clipping ? " clipping" : ""}`}
+      role="meter"
+      aria-label={`${label} peak level`}
+      aria-valuemin={-60}
+      aria-valuemax={0}
+      aria-valuenow={Math.max(-60, Math.min(0, reading.db ?? -60))}
+      aria-valuetext={`${reading.text}${reading.clipping ? ", full scale" : ""}`}
+    >
+      <span className="mixer-meter-track">
+        <i style={{ width: `${reading.percent}%` }} />
+      </span>
+      <span>
+        {reading.text}
+        {reading.clipping && (
+          <strong title="Peak reached full scale"> · Clip</strong>
+        )}
+      </span>
+    </div>
+  );
+}
 function Gain({
   label,
   value,
   onChange,
   muted,
   onMute,
+  mode,
 }: {
   label: string;
   value: number;
   onChange: (v: number) => void;
   muted: boolean;
   onMute: (v: boolean) => void;
+  mode?: string;
 }) {
   return (
-    <div className="mixer-gain">
-      <Field label={`${label} · ${value}%`}>
+    <div className="mixer-gain" title={mode}>
+      <Field
+        label={`${label} · ${value}%${mode === "Apply routes to save" ? " · Draft" : ""}`}
+      >
         <input
           aria-label={`${label} volume`}
           type="range"
@@ -395,7 +464,7 @@ function ChannelInputs({
   );
 }
 export function AudioMixer({
-  snapshot,
+  snapshot: incomingSnapshot,
   run,
   error,
 }: {
@@ -403,6 +472,11 @@ export function AudioMixer({
   run: Run;
   error?: string;
 }) {
+  const [snapshot, setSnapshot] = useState(incomingSnapshot);
+  const latest = useRef(incomingSnapshot);
+  const [, redraw] = useState(0);
+  const [controlError, setControlError] = useState("");
+  const queue = useRef<ReturnType<typeof createMixerControlQueue> | null>(null);
   const initial = snapshot?.config;
   const [draft, setDraft] = useState<MixerDraft | null>(() => {
     const retained = getFormDraft("audio-mixer");
@@ -416,18 +490,41 @@ export function AudioMixer({
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const form = useRef<HTMLFormElement>(null);
-  const signature = JSON.stringify(canonical(initial));
+  if (!queue.current)
+    queue.current = createMixerControlQueue(
+      async (target, patch) => {
+        const current = latest.current;
+        if (current?.revision === undefined)
+          throw new Error("Mixer controls are not available in this host.");
+        const updated = await request<MixerSnapshot>("mixer_control", {
+          revision: current.revision,
+          target,
+          ...patch,
+        });
+        latest.current = updated;
+        setSnapshot(updated);
+        setDraft((previous) => reconcileMixerDraft(previous, updated.config));
+      },
+      (error) => {
+        setControlError(String(error));
+        void run({ command: "mixer_refresh" });
+      },
+      () => redraw((value) => value + 1),
+    );
   useEffect(() => {
     void run({ command: "mixer_refresh" });
   }, [run]);
   useEffect(() => {
-    if (initial)
-      setDraft((previous) =>
-        previous?.dirty
-          ? previous
-          : { config: clone(initial), base: clone(initial), dirty: false },
-      );
-  }, [signature]);
+    if (!incomingSnapshot || queue.current?.pending) return;
+    latest.current = incomingSnapshot;
+    setSnapshot(incomingSnapshot);
+    setDraft((previous) =>
+      previous && sameMixerConfig(previous.base, incomingSnapshot.config)
+        ? previous
+        : reconcileMixerDraft(previous, incomingSnapshot.config),
+    );
+  }, [incomingSnapshot]);
+  // Closing the panel must not drop already-authored pending controls; the RPC lane drains.
   useEffect(() => {
     if (draft) setFormDraft("audio-mixer", draft);
   }, [draft]);
@@ -446,10 +543,42 @@ export function AudioMixer({
         )}
       </div>
     );
-  const config = draft.config;
-  const stale = !same(draft.base, snapshot.config);
-  const change = (config: MixerConfig) => {
-    setDraft({ ...draft, config, dirty: true });
+  const config = (queue.current?.intents ?? []).reduce(
+    (config, intent) =>
+      patchMixerControl(config, intent.target, intent.patch, snapshot.config),
+    draft.config,
+  );
+  const pendingControls = queue.current?.pending ?? 0;
+  const stale = !sameMixerRouting(draft.base, snapshot.config);
+  function control(target: MixerControlTarget, patch: MixerControlPatch) {
+    setControlError("");
+    if (
+      latest.current?.revision !== undefined &&
+      savedControl(latest.current.config, target)
+    ) {
+      queue.current!.push(target, patch);
+    } else {
+      setDraft((previous) =>
+        previous
+          ? {
+              ...previous,
+              config: patchMixerControl(previous.config, target, patch),
+              dirty: true,
+            }
+          : previous,
+      );
+    }
+  }
+  const change = (next: MixerConfig) => {
+    const configWithoutPendingControls = reconcileMixerDraft(
+      { config: next, base: config, dirty: true },
+      draft.config,
+    ).config;
+    setDraft({
+      ...draft,
+      config: configWithoutPendingControls,
+      dirty: !sameMixerConfig(configWithoutPendingControls, draft.base),
+    });
     setMessage("");
   };
   const channel = (next: MixerChannel) =>
@@ -462,13 +591,20 @@ export function AudioMixer({
       ...config,
       mixes: config.mixes.map((m) => (m.id === next.id ? next : m)),
     });
+  const controlMode = (target: MixerControlTarget) =>
+    snapshot.revision !== undefined && savedControl(snapshot.config, target)
+      ? snapshot.active
+        ? "Live control"
+        : "Saves immediately; routing stays inactive"
+      : "Apply routes to save";
   async function apply() {
     if (
       !draft ||
       !draft.dirty ||
       stale ||
       !form.current?.reportValidity() ||
-      busy
+      busy ||
+      pendingControls > 0
     )
       return;
     setBusy(true);
@@ -510,8 +646,9 @@ export function AudioMixer({
             inputs, then balance each mix independently.
           </p>
           <small>
-            Wave Link-style routing, implemented natively in Rust. Changes apply
-            only when you choose Apply routes.
+            Saved levels, mutes, linked levels and fade time update immediately.
+            Input assignments, names, route switches and routing enablement need
+            Apply routes.
           </small>
         </div>
         <span className={"status " + (snapshot.active ? "good" : "")}>
@@ -529,6 +666,43 @@ export function AudioMixer({
           {snapshot.error || error}
         </p>
       )}
+      {controlError && (
+        <p className="error" role="alert">
+          {controlError}
+        </p>
+      )}
+      {snapshot.save_error && (
+        <p className="error" role="alert">
+          Audio controls changed, but saving failed: {snapshot.save_error}
+        </p>
+      )}
+      <div className="mixer-control-status">
+        <span className={"status " + (snapshot.active ? "good" : "")}>
+          {snapshot.active
+            ? "Live controls"
+            : "Saved controls · routing inactive"}
+        </span>
+        <span>
+          {pendingControls
+            ? "Sending controls…"
+            : snapshot.fading
+              ? "Fading…"
+              : snapshot.controls_unsaved
+                ? "Saving controls…"
+                : ""}
+        </span>
+        <NumberField
+          label="Default fade (ms)"
+          value={config.fade_ms ?? 0}
+          min={0}
+          max={10000}
+          step={1}
+          onChange={(fade_ms) => {
+            if (Number.isInteger(fade_ms) && fade_ms >= 0 && fade_ms <= 10000)
+              control({ kind: "preferences" }, { fade_ms });
+          }}
+        />
+      </div>
       {stale && (
         <p className="warning" role="status">
           Routing settings changed outside this editor. Your draft is kept.
@@ -593,7 +767,10 @@ export function AudioMixer({
           </div>
         </div>
         <div className="mixer-matrix-scroll">
-          <table className="mixer-matrix">
+          <table
+            className="mixer-matrix"
+            style={{ minWidth: 260 + config.mixes.length * 240 }}
+          >
             <caption className="sr-only">
               Audio routing matrix. Each input group has a separate volume and
               mute for each mix.
@@ -613,12 +790,21 @@ export function AudioMixer({
                         onChange={(e) => mix({ ...m, name: e.target.value })}
                       />
                     </Field>
+                    <PeakMeter
+                      label={m.name}
+                      level={snapshot.levels?.mixes[m.id]}
+                    />
                     <Gain
+                      mode={controlMode({ kind: "mix", mix: m.id })}
                       label={`${m.name} master`}
                       value={m.volume}
                       muted={m.muted}
-                      onChange={(volume) => mix({ ...m, volume })}
-                      onMute={(muted) => mix({ ...m, muted })}
+                      onChange={(volume) =>
+                        control({ kind: "mix", mix: m.id }, { volume })
+                      }
+                      onMute={(muted) =>
+                        control({ kind: "mix", mix: m.id }, { muted })
+                      }
                     />
                     <details className="mixer-output-details">
                       <summary>
@@ -632,6 +818,41 @@ export function AudioMixer({
                         unavailableHint="This saved output is kept. No replacement device is chosen automatically."
                         onChange={(outputs) => mix({ ...m, outputs })}
                       />
+                      {m.outputs.map((output) => {
+                        const values = m.output_controls?.[output] ?? {
+                          volume: 100,
+                          muted: false,
+                        };
+                        const name =
+                          snapshot.sinks.find(
+                            (device) => device.name === output,
+                          )?.description || output;
+                        return (
+                          <Gain
+                            mode={controlMode({
+                              kind: "output",
+                              mix: m.id,
+                              output,
+                            })}
+                            key={output}
+                            label={`${m.name} output · ${name}`}
+                            value={values.volume}
+                            muted={values.muted}
+                            onChange={(volume) =>
+                              control(
+                                { kind: "output", mix: m.id, output },
+                                { volume },
+                              )
+                            }
+                            onMute={(muted) =>
+                              control(
+                                { kind: "output", mix: m.id, output },
+                                { muted },
+                              )
+                            }
+                          />
+                        );
+                      })}
                       <p className="hint">
                         The mix is also available as a virtual input to
                         recording and streaming apps.
@@ -663,6 +884,20 @@ export function AudioMixer({
                         ×
                       </button>
                     </div>
+                    <PeakMeter
+                      label={c.name}
+                      level={snapshot.levels?.channels[c.id]}
+                    />
+                    <Check
+                      label={`Link ${c.name} mix levels`}
+                      checked={c.linked ?? false}
+                      onChange={(linked) =>
+                        control({ kind: "channel", channel: c.id }, { linked })
+                      }
+                    />
+                    <span className="hint">
+                      Linked levels move together; mutes stay independent.
+                    </span>
                     <ChannelInputs
                       channel={c}
                       config={config}
@@ -692,14 +927,25 @@ export function AudioMixer({
                         />
                         {route ? (
                           <Gain
+                            mode={controlMode({
+                              kind: "route",
+                              channel: c.id,
+                              mix: m.id,
+                            })}
                             label={`${c.name} → ${m.name}`}
                             value={route.volume}
                             muted={route.muted}
                             onChange={(volume) =>
-                              change(editRoute(config, c.id, m.id, { volume }))
+                              control(
+                                { kind: "route", channel: c.id, mix: m.id },
+                                { volume },
+                              )
                             }
                             onMute={(muted) =>
-                              change(editRoute(config, c.id, m.id, { muted }))
+                              control(
+                                { kind: "route", channel: c.id, mix: m.id },
+                                { muted },
+                              )
                             }
                           />
                         ) : (
@@ -743,13 +989,13 @@ export function AudioMixer({
           <button
             type="submit"
             className="primary"
-            disabled={!draft.dirty || busy || stale}
+            disabled={!draft.dirty || busy || stale || pendingControls > 0}
           >
             {busy ? "Applying…" : "Apply routes"}
           </button>
           <button
             type="button"
-            disabled={busy || (!draft.dirty && !stale)}
+            disabled={busy || pendingControls > 0 || (!draft.dirty && !stale)}
             onClick={() => {
               setDraft({
                 config: clone(snapshot.config),

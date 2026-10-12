@@ -114,6 +114,11 @@ impl Controller {
             STANDARD.encode(image)
         )))
     }
+    pub fn mixer_control(&self, request: Value) -> Result<Value> {
+        let mut host = self.shared.lock().unwrap();
+        host.mixer_control(request)?;
+        Ok(host.mixer_snapshot())
+    }
     pub fn command(&self, request: Value) -> Result<()> {
         if request["command"] == "plugin_update_cancel" {
             return self.cancel_plugin_update(
@@ -418,6 +423,9 @@ struct Host {
     mixer_config: crate::mixer::Config,
     mixer: Option<crate::mixer::Worker>,
     mixer_state: crate::mixer::Snapshot,
+    mixer_revision: u64,
+    mixer_save_due: Option<std::time::Instant>,
+    mixer_save_error: Option<String>,
     reference_app: Option<PathBuf>,
     screensavers: HashMap<String, screensaver::Preferences>,
     saver: screensaver::Runtime,
@@ -586,6 +594,8 @@ impl Host {
             file.sync_all()?;
         }
         fs::rename(pending, &self.state_path)?;
+        self.mixer_save_due = None;
+        self.mixer_save_error = None;
         Ok(())
     }
     fn emit(&self, slot: &Slot, event: &str, extra: Value) {
@@ -1799,6 +1809,7 @@ fn apply_control(host: &mut Host, r: Value) -> Result<()> {
             | "reference_app"
             | "mixer_config"
             | "mixer_refresh"
+            | "mixer_control"
             | "soundboard_refresh"
             | "soundboard_stop"
     );
@@ -1862,6 +1873,7 @@ fn apply_control_local(host: &mut Host, r: Value) -> Result<()> {
     }
     match command {
         "mixer_refresh" => host.ensure_mixer(),
+        "mixer_control" => host.mixer_control(r.clone()),
         "mixer_config" => {
             let config = serde_json::from_value(
                 r.get("settings").context("Mixer settings missing")?.clone(),
@@ -2733,6 +2745,9 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
         mixer_config: saved.mixer,
         mixer: None,
         mixer_state: crate::mixer::Snapshot::default(),
+        mixer_revision: 0,
+        mixer_save_due: None,
+        mixer_save_error: None,
         reference_app: saved.reference_app,
         screensavers: saver_preferences,
         saver: screensaver::Runtime::default(),
@@ -3145,6 +3160,11 @@ fn stop_plugins(host: &mut Host) {
     if let Some(worker) = &host.system_actions {
         worker.cancel();
     }
+    if host.mixer_save_due.is_some()
+        && let Err(error) = host.persist()
+    {
+        host.log(format!("Save mixer controls on exit: {error:#}"));
+    }
     host.running = false;
     if let Some(redraw) = &host.redraw {
         redraw();
@@ -3262,6 +3282,9 @@ mod tests {
             mixer_config: crate::mixer::Config::default(),
             mixer: None,
             mixer_state: crate::mixer::Snapshot::default(),
+            mixer_revision: 0,
+            mixer_save_due: None,
+            mixer_save_error: None,
             reference_app: None,
             screensavers: HashMap::new(),
             saver: screensaver::Runtime::default(),

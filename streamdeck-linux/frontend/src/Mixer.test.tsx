@@ -10,6 +10,7 @@ import {
 import userEvent from "@testing-library/user-event";
 import {
   AudioMixer,
+  PeakMeter,
   sameMixerValue,
   editRoute,
   removeChannel,
@@ -18,6 +19,7 @@ import {
   type MixerSnapshot,
   type MixerConfig,
 } from "./Mixer";
+import { patchMixerControl } from "./MixerLive";
 import { importFormDrafts } from "./transient";
 const config: MixerConfig = {
   enabled: false,
@@ -92,7 +94,10 @@ const inventory = (): MixerSnapshot => ({
   error: null,
 });
 beforeEach(() => importFormDrafts({}));
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  delete window.deckforge;
+});
 describe("mixer graph drafts", () => {
   it("does not mistake Rust object-key reordering for an external edit", () => {
     const reordered = {
@@ -243,6 +248,7 @@ describe("mixer panel", () => {
     );
     const newer = inventory();
     newer.config.mixes[0].volume = 61;
+    newer.config.channels[0].sources = ["another.mic"];
     rerender(<AudioMixer snapshot={newer} run={run} />);
     expect(screen.getByText(/Routing settings changed outside/)).toBeTruthy();
     expect(
@@ -342,4 +348,235 @@ describe("mixer panel", () => {
       ]);
     });
   });
+});
+
+it("renders real peak readings and an explicit unavailable state instead of fake silence", () => {
+  const view = render(
+    <PeakMeter label="Voice" level={{ available: true, peak: 0.5 }} />,
+  );
+  const meter = screen.getByRole("meter", { name: "Voice peak level" });
+  expect(meter.getAttribute("aria-valuetext")).toBe("-6.0 dBFS");
+  view.rerender(
+    <PeakMeter label="Voice" level={{ available: true, peak: 0 }} />,
+  );
+  expect(screen.getByRole("meter").getAttribute("aria-valuetext")).toBe(
+    "−∞ dBFS",
+  );
+  view.rerender(
+    <PeakMeter label="Voice" level={{ available: true, peak: 1 }} />,
+  );
+  expect(screen.getByRole("meter").className).toContain("clipping");
+  view.rerender(
+    <PeakMeter label="Voice" level={{ available: false, peak: 0 }} />,
+  );
+  expect(screen.queryByRole("meter")).toBeNull();
+  expect(
+    screen.getByRole("img", { name: "Voice: meter unavailable" }),
+  ).toBeTruthy();
+});
+
+it("sends saved inactive controls immediately, serializes revisions and preserves pending route drafts", async () => {
+  const user = userEvent.setup(),
+    run = vi.fn(async (_payload: Record<string, any>) => true);
+  let live = { ...inventory(), revision: 7 };
+  const calls: any[] = [];
+  window.deckforge = {
+    onSnapshot: () => () => {},
+    request: vi.fn(async (method, payload: any) => {
+      expect(method).toBe("mixer_control");
+      expect(payload.revision).toBe(live.revision);
+      calls.push(payload);
+      live = {
+        ...live,
+        config: patchMixerControl(live.config, payload.target, payload),
+        revision:
+          live.revision +
+          (["channel", "preferences"].includes(payload.target.kind) ? 1 : 0),
+      };
+      return structuredClone(live) as any;
+    }),
+  };
+  render(<AudioMixer snapshot={live} run={run} />);
+  await user.click(
+    screen.getByRole("checkbox", { name: "Route Music to Stream" }),
+  );
+  fireEvent.change(
+    screen.getByRole("slider", { name: "Music → Stream volume" }),
+    { target: { value: "22" } },
+  );
+  expect(calls).toHaveLength(0);
+  await user.click(
+    screen.getByRole("checkbox", { name: "Link Music mix levels" }),
+  );
+  fireEvent.change(
+    screen.getByRole("slider", { name: "Music → Monitor volume" }),
+    { target: { value: "61" } },
+  );
+  fireEvent.change(
+    screen.getByRole("spinbutton", { name: "Default fade (ms)" }),
+    { target: { value: "250" } },
+  );
+  await waitFor(() => expect(calls).toHaveLength(3));
+  expect(calls.map((c) => c.revision)).toEqual([7, 8, 8]);
+  expect(
+    (
+      screen.getByRole("slider", {
+        name: "Music → Stream volume",
+      }) as HTMLInputElement
+    ).value,
+  ).toBe("22");
+  await user.click(screen.getByRole("button", { name: "Apply routes" }));
+  const apply = run.mock.calls.find(
+    ([arg]: any) => arg.command === "mixer_config",
+  )?.[0] as any;
+  expect(apply.expected).toEqual(live.config);
+  expect(apply.settings.routes).toContainEqual({
+    channel: "music",
+    mix: "stream",
+    volume: 22,
+    muted: false,
+  });
+  expect(apply.settings.enabled).toBe(false);
+});
+it("keeps only latest consecutive fader intent and blocks Apply until accepted", async () => {
+  const user = userEvent.setup(),
+    run = vi.fn(async (_payload: Record<string, any>) => true);
+  let live = { ...inventory(), revision: 1 };
+  const finish: (() => void)[] = [],
+    calls: any[] = [];
+  window.deckforge = {
+    onSnapshot: () => () => {},
+    request: vi.fn(async (_method, payload: any) => {
+      calls.push(payload);
+      await new Promise<void>((resolve) => finish.push(resolve));
+      live = {
+        ...live,
+        config: patchMixerControl(live.config, payload.target, payload),
+      };
+      return structuredClone(live) as any;
+    }),
+  };
+  render(<AudioMixer snapshot={live} run={run} />);
+  await user.click(
+    screen.getByRole("checkbox", { name: "Route Music to Stream" }),
+  );
+  const slider = screen.getByRole("slider", { name: "Music → Monitor volume" });
+  for (const value of ["50", "60", "70"])
+    fireEvent.change(slider, { target: { value } });
+  expect(calls).toHaveLength(1);
+  expect((slider as HTMLInputElement).value).toBe("70");
+  expect(
+    (screen.getByRole("button", { name: "Apply routes" }) as HTMLButtonElement)
+      .disabled,
+  ).toBe(true);
+  finish[0]();
+  await waitFor(() => expect(calls).toHaveLength(2));
+  expect(calls[1].volume).toBe(70);
+  finish[1]();
+  await waitFor(() =>
+    expect(
+      (
+        screen.getByRole("button", {
+          name: "Apply routes",
+        }) as HTMLButtonElement
+      ).disabled,
+    ).toBe(false),
+  );
+  expect((slider as HTMLInputElement).value).toBe("70");
+});
+it("edits output gain separately and surfaces rejection without losing routing edits", async () => {
+  const user = userEvent.setup(),
+    run = vi.fn(async (_payload: Record<string, any>) => true);
+  let live = { ...inventory(), revision: 2 };
+  const rpc = vi.fn(async (_method, payload: any) => {
+    if (payload.muted) throw new Error("Graph changed; retry");
+    live = {
+      ...live,
+      config: patchMixerControl(live.config, payload.target, payload),
+    };
+    return structuredClone(live) as any;
+  });
+  window.deckforge = { request: rpc, onSnapshot: () => () => {} };
+  render(<AudioMixer snapshot={live} run={run} />);
+  await user.click(
+    screen.getByRole("checkbox", { name: "Route Music to Stream" }),
+  );
+  await user.click(
+    screen.getByText("Monitor outputs", { selector: "summary" }),
+  );
+  fireEvent.change(
+    screen.getByRole("slider", {
+      name: "Monitor output · missing.speakers volume",
+    }),
+    { target: { value: "33" } },
+  );
+  await waitFor(() =>
+    expect(
+      live.config.mixes[0].output_controls?.["missing.speakers"].volume,
+    ).toBe(33),
+  );
+  expect(live.config.mixes[0].volume).toBe(100);
+  await user.click(
+    screen.getByRole("button", {
+      name: "Mute Monitor output · missing.speakers",
+    }),
+  );
+  await waitFor(() =>
+    expect(screen.getByRole("alert").textContent).toContain("Graph changed"),
+  );
+  expect(
+    (
+      screen.getByRole("checkbox", {
+        name: "Route Music to Stream",
+      }) as HTMLInputElement
+    ).checked,
+  ).toBe(true);
+});
+
+it("does not bake optimistic controls into a structural edit made while an RPC is pending", async () => {
+  const user = userEvent.setup(),
+    run = vi.fn(async (_payload: Record<string, any>) => true);
+  let live = { ...inventory(), revision: 1 };
+  let finish!: () => void;
+  window.deckforge = {
+    onSnapshot: () => () => {},
+    request: vi.fn(async (_method, payload: any) => {
+      await new Promise<void>((resolve) => (finish = resolve));
+      live = {
+        ...live,
+        config: patchMixerControl(live.config, payload.target, payload),
+      };
+      return structuredClone(live) as any;
+    }),
+  };
+  render(<AudioMixer snapshot={live} run={run} />);
+  fireEvent.change(
+    screen.getByRole("slider", { name: "Music → Monitor volume" }),
+    { target: { value: "60" } },
+  );
+  fireEvent.change(screen.getByRole("textbox", { name: "Monitor mix name" }), {
+    target: { value: "Pending name" },
+  });
+  finish();
+  await waitFor(() =>
+    expect(
+      (
+        screen.getByRole("button", {
+          name: "Apply routes",
+        }) as HTMLButtonElement
+      ).disabled,
+    ).toBe(false),
+  );
+  expect(
+    (
+      screen.getByRole("slider", {
+        name: "Music → Pending name volume",
+      }) as HTMLInputElement
+    ).value,
+  ).toBe("60");
+  await user.click(screen.getByRole("button", { name: "Apply routes" }));
+  const apply = run.mock.calls.find(([p]) => p.command === "mixer_config")?.[0];
+  expect(apply?.expected).toEqual(live.config);
+  expect(apply?.settings.routes[0].volume).toBe(60);
+  expect(apply?.settings.mixes[0].name).toBe("Pending name");
 });

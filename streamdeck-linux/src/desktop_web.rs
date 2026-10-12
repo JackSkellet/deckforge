@@ -304,6 +304,7 @@ fn dispatch(
         "snapshot" => Ok(shared.latest.lock().unwrap().snapshot.clone()),
         "fonts" => Ok(serde_json::to_value(crate::appearance::font_families()?)?),
         "appearance_preview" => controller.appearance_preview(payload),
+        "mixer_control" => controller.mixer_control(payload),
         "command" => {
             ensure!(payload.is_object(), "Host command must be an object");
             controller.command(payload)?;
