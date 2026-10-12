@@ -1,7 +1,8 @@
 # Device models
 
 Deckforge has model-specific HID transports for the documented Mini, 15-key,
-XL, Plus, Plus XL and Neo families, plus an input-only Pedal transport. The
+XL, Plus, Plus XL and Neo families, plus original 2017 and input-only Pedal
+transports. The
 implementations use Elgato's published protocols and static evidence from the
 original application. Only the attached Stream Deck+ has physical
 acceptance evidence. Packet tests, simulated input and native editor tests do
@@ -10,6 +11,7 @@ not establish that another model works on hardware.
 | Layout | Keys | Dials | USB product IDs (vendor `0fd9`) | Evidence boundary |
 | --- | --- | --- | --- | --- |
 | Mini | 3 × 2 | — | `0063`, `0090`, `00b3`, `00b8` | Protocol and packet tests; physical validation pending |
+| Stream Deck 2017 | 5 × 3 | — | `0060` | Native protocol evidence and codec tests; physical validation pending |
 | Stream Deck 2019 / MK.2 / Scissor | 5 × 3 | — | `006d`, `0080`, `00a5`, `00b9` | Protocol and packet tests; physical validation pending |
 | XL / XL 2022 | 8 × 4 | — | `006c`, `008f`, `00ba` | Protocol and packet tests; physical validation pending |
 | Plus | 4 × 2 | 4 | `0084` | Existing physical display/control confirmation; new model generalization has software regression coverage |
@@ -18,8 +20,8 @@ not establish that another model works on hardware.
 | Pedal | 3 × 1 | — | `0086` | Input/metadata protocol recovered from the original executable; physical validation pending |
 
 The module products in the table use the matching documented family. The
-original 2017 Stream Deck (`0060`) has a different, unresolved transport and is
-not opened using a later model's protocol. Studio, Mobile, virtual decks and
+original 2017 Stream Deck uses its own firmware-aware BMP transport, documented
+in [Original HID](LEGACY_HID.md). Studio, Mobile, virtual decks and
 Network Dock remain separate work. One host currently owns one selected device;
 concurrent device management is unfinished.
 
@@ -36,7 +38,9 @@ deckforge desktop --model xl --serial DEVICE_SERIAL
 deckforge desktop --simulate --model plus-xl --state /tmp/deckforge-plus-xl
 ```
 
-Model names are `mini`, `classic`, `xl`, `plus`, `plus-xl`, `neo` and `pedal`.
+Model names are `mini`, `classic`, `classic-2017`, `xl`, `plus`, `plus-xl`, `neo`
+and `pedal`. The two 15-key generations can use each other's profiles while
+keeping their original device metadata and distinct USB protocols.
 The temporary `--legacy-editor` fallback supports Plus only; use the default
 TypeScript editor for other models. Saved sessions retain their model across
 restarts without repeating the flag.
@@ -65,7 +69,11 @@ a profile for another model must not silently truncate to the active device.
   with an 8-pixel horizontal and 4-pixel vertical gutter. This placement is a
   Linux rendering policy inferred from the documented dimensions, not recovered
   vendor pixel placement. The two touch points navigate pages; they are not
-  assignable plugin keys. Their small indicator displays are not implemented.
+  assignable plugin keys. Their 96 × 16 indicator displays use hardware indices 8 and 9, separate from
+  the eight SDK keys. Deckforge lights an available page control in the app
+  accent colour and turns it off at a boundary. The editor uses the same page
+  availability, including exit paths from folders; these colours are a Linux
+  policy, not a claim of vendor theme equivalence.
 - Pedal uses the recovered `20GBF9901` identity and shared input/serial/firmware
   methods from the original executable. Its editor shows software action labels.
   Image, brightness and sleep operations are disabled before USB I/O. The current
@@ -73,7 +81,8 @@ a profile for another model must not silently truncate to the active device.
   size, but an unresolved orientation transform sits before SDK serialization.
   Native profile-coordinate equivalence therefore remains unverified.
 - The recovered Plus brightness curve stays Plus-only. Other documented
-  transports receive the requested percentage directly; physical luminance
+  transports receive the requested percentage directly, except original 2017,
+  which uses its independently recovered firmware-specific curve; physical luminance
   equivalence has not been measured.
 
 No reset, bootloader command or firmware write is part of these tests.
@@ -97,7 +106,7 @@ provide SDK geometry and navigation semantics.
 features and session-frame/reconnect tests. `tests/models_interop.py` exercises
 the real host and plugin WebSocket protocol with simulated devices, checking the
 last key/dial, SDK geometry, profile export/import and persisted-model restart.
-`tests/native_models_interop.py` captures all seven layouts in the actual native
+`tests/native_models_interop.py` captures all eight layouts in the actual native
 WebKit window and checks visible controls and final-key selection. The unchanged
 Counter, Layouts and Lights Out samples, whole Plus profiles, clipboard transfers
 and SDK device-lifecycle regressions also pass.
@@ -119,3 +128,11 @@ reconnected the user's Plus and all four saved plugins, with four assignments
 retained; saved state changed only by adding model metadata. No physical input
 was injected into the user's configuration. The additional models still need
 physical acceptance.
+
+The following device checkpoint adds original 2017 key/input/brightness support
+and Neo sensor indicators. It passes 400 Rust tests (11 explicit probes ignored),
+59 frontend tests, strict Clippy, eight native model captures and the model
+process suite. Both directions of 2017/later 15-key profile import are tested.
+The independent public Qt fixture program reproduces the Rust BMP payload hashes.
+Pedal's orientation-aware native profile coordinates remain unresolved; its
+current layout continues to be an explicit Linux policy.

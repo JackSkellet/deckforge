@@ -4,6 +4,7 @@
 //! stream-deck-xl/, stream-deck-plus/, stream-deck-plus-xl/, stream-deck-neo/.
 //! This module never resets the device or writes firmware.
 
+mod legacy2017;
 use crate::device_model::Model;
 use anyhow::{Context, Result, bail, ensure};
 use hidapi::{HidApi, HidDevice};
@@ -60,6 +61,7 @@ pub struct Deck {
     device: HidDevice,
     serial: String,
     model: Model,
+    legacy_firmware: Option<legacy2017::Firmware>,
     input: InputState,
     trace: bool,
 }
@@ -193,7 +195,11 @@ impl Deck {
                 Some(serial) => serial.to_owned(),
                 None => {
                     let mut report = [0u8; 32];
-                    report[0] = if model == Model::Mini { 0x03 } else { 0x06 };
+                    report[0] = if matches!(model, Model::Mini | Model::Classic2017) {
+                        0x03
+                    } else {
+                        0x06
+                    };
                     let size = device
                         .get_feature_report(&mut report)
                         .context("read Stream Deck serial")?;
@@ -201,12 +207,24 @@ impl Deck {
                     decode_serial(model, &report[..size])?
                 }
             };
+            let legacy_firmware = if model == Model::Classic2017 {
+                let mut report = [0u8; 32];
+                report[0] = 4;
+                let size = device
+                    .get_feature_report(&mut report)
+                    .context("read original 2017 firmware")?;
+                ensure!(size <= report.len(), "oversized 2017 firmware response");
+                Some(legacy2017::decode_firmware(&report[..size])?)
+            } else {
+                None
+            };
             Ok((
                 serial.clone(),
                 Self {
                     device,
                     serial,
                     model,
+                    legacy_firmware,
                     input: InputState::new(model),
                     trace: std::env::var_os("DECKFORGE_TRACE_HID").is_some(),
                 },
@@ -224,6 +242,9 @@ impl Deck {
 
     /// Reads the primary AP2 firmware version, without changing device state.
     pub fn firmware_version(&self) -> Result<String> {
+        if let Some(firmware) = &self.legacy_firmware {
+            return Ok(firmware.version().to_owned());
+        }
         let mut report = [0u8; 32];
         report[0] = if self.model == Model::Mini {
             0xa1
@@ -238,6 +259,13 @@ impl Deck {
         decode_firmware(self.model, &report[..size])
     }
 
+    /// The 2017 firmware has a proven percentage-to-backlight curve.
+    pub fn legacy_brightness_value(&self, percent: u8) -> Result<u8> {
+        self.legacy_firmware
+            .as_ref()
+            .context("device is not original 2017")?
+            .brightness_value(percent)
+    }
     /// HID acceptance only: the protocol documents no brightness getter.
     pub fn set_brightness(&self, brightness: u8) -> Result<()> {
         self.device
@@ -306,7 +334,23 @@ impl Deck {
             key < self.model.key_count(),
             "key index outside device layout"
         );
-        if self.model == Model::Mini {
+        if let Some(firmware) = &self.legacy_firmware {
+            let reports = firmware.key_reports(key, image)?;
+            for (index, report) in reports.iter().enumerate() {
+                if index > 0 {
+                    std::thread::sleep(legacy2017::INTER_REPORT_DELAY);
+                }
+                let written = self
+                    .device
+                    .write(report)
+                    .context("write original 2017 image chunk")?;
+                ensure!(
+                    written == legacy2017::REPORT_SIZE,
+                    "short original 2017 image write: {written}"
+                );
+            }
+            Ok(())
+        } else if self.model == Model::Mini {
             let bmp = encode_mini_bmp(image)?;
             self.write_reports(&mini_image_reports(key, &bmp)?)
         } else {
@@ -341,6 +385,16 @@ impl Deck {
             "Infobar output requires Stream Deck Neo"
         );
         self.set_touchscreen_image(&neo_infobar_frame(image)?)
+    }
+    /// Neo appends its two 96x16 sensor displays at hardware indices8/9.
+    /// They are deliberately separate from the eight SDK keypad positions.
+    pub fn set_sensor_image(&self, sensor: u8, image: &DynamicImage) -> Result<()> {
+        ensure!(
+            self.model == Model::Neo && sensor < 2,
+            "invalid sensor display"
+        );
+        let jpeg = encode_model_jpeg(self.model, image, 96, 16)?;
+        self.write_image(0x07, self.model.key_count() + sensor, &jpeg)
     }
     pub fn set_lcd_image(&self, image: &DynamicImage) -> Result<()> {
         ensure!(
@@ -381,6 +435,9 @@ impl Deck {
 }
 
 fn decode_serial(model: Model, report: &[u8]) -> Result<String> {
+    if model == Model::Classic2017 {
+        return legacy2017::decode_serial(report);
+    }
     if model == Model::Mini {
         ensure!(
             (6..=32).contains(&report.len()) && report[0] == 0x03,
@@ -401,6 +458,9 @@ fn decode_serial(model: Model, report: &[u8]) -> Result<String> {
     }
 }
 fn decode_firmware(model: Model, report: &[u8]) -> Result<String> {
+    if model == Model::Classic2017 {
+        return legacy2017::firmware_string(report);
+    }
     if model == Model::Mini {
         ensure!(
             (17..=32).contains(&report.len()) && report[0] == 0xa1,
@@ -420,7 +480,9 @@ fn model_brightness_report(model: Model, brightness: u8) -> Result<[u8; 32]> {
         model.capabilities().brightness,
         "model has no brightness control"
     );
-    if model == Model::Mini {
+    if model == Model::Classic2017 {
+        legacy2017::brightness_report(brightness)
+    } else if model == Model::Mini {
         ensure!(brightness <= 100, "brightness must be between 0 and 100");
         let mut report = [0; 32];
         report[..6].copy_from_slice(&[0x05, 0x55, 0xaa, 0xd1, 0x01, brightness]);
@@ -578,11 +640,14 @@ fn model_image_reports(
     jpeg: &[u8],
 ) -> Result<Vec<[u8; REPORT_SIZE]>> {
     ensure!(
-        model != Model::Mini && model.capabilities().transport_supported,
+        !matches!(model, Model::Mini | Model::Classic2017)
+            && model.capabilities().transport_supported,
         "Model does not use the main image protocol"
     );
     ensure!(
-        (command == 0x07 && model.capabilities().key_images && key < model.key_count())
+        (command == 0x07
+            && model.capabilities().key_images
+            && key < model.key_count() + model.sensor_count())
             || (command == 0x08 && model.capabilities().full_lcd && key == 0)
             || (command == 0x0b && model.capabilities().strip && key == 0),
         "invalid image command or key"
@@ -646,6 +711,9 @@ impl InputState {
         }))
     }
     fn decode(&mut self, report: &[u8]) -> Result<Vec<InputEvent>> {
+        if self.model == Model::Classic2017 {
+            return self.key_events(&legacy2017::decode_keys(report)?);
+        }
         if self.model == Model::Mini {
             ensure!(
                 report.len() == 65 && report[0] == 1,
@@ -838,6 +906,70 @@ mod tests {
         }
         assert_eq!(rebuilt, jpeg);
     }
+    #[test]
+    fn neo_sensor_images_use_extra_hardware_positions_and_short_jpeg_canvas() {
+        let image = DynamicImage::ImageRgb8(image::RgbImage::from_fn(96, 16, |x, y| {
+            image::Rgb([x as u8, y as u8, 200])
+        }));
+        let jpeg = encode_model_jpeg(Model::Neo, &image, 96, 16).unwrap();
+        let decoded = image::load_from_memory(&jpeg).unwrap().to_rgb8();
+        assert_eq!(decoded.dimensions(), (96, 16));
+        assert!(decoded.get_pixel(0, 0)[0] > 80); // 180-degree physical orientation.
+        for sensor in 0..2 {
+            let reports = model_image_reports(Model::Neo, 7, 8 + sensor, &jpeg).unwrap();
+            let mut rebuilt = Vec::new();
+            for (index, report) in reports.iter().enumerate() {
+                assert_eq!(&report[..3], &[2, 7, 8 + sensor]);
+                assert_eq!(u16::from_le_bytes([report[6], report[7]]) as usize, index);
+                assert_eq!(report[3], u8::from(index + 1 == reports.len()));
+                let length = u16::from_le_bytes([report[4], report[5]]) as usize;
+                rebuilt.extend_from_slice(&report[8..8 + length]);
+            }
+            assert_eq!(rebuilt, jpeg);
+        }
+        assert!(model_image_reports(Model::Neo, 7, 10, &jpeg).is_err());
+        assert!(model_image_reports(Model::Plus, 7, 8, &jpeg).is_err());
+        assert!(model_image_reports(Model::Classic2017, 7, 0, &jpeg).is_err());
+    }
+    #[test]
+    fn original_2017_inputs_use_logical_rows_and_preserve_edges() {
+        let mut state = InputState::new(Model::Classic2017);
+        let mut report = [0; 64];
+        report[0] = 1;
+        report[5] = 1;
+        report[11] = 1;
+        assert_eq!(
+            state.decode(&report).unwrap(),
+            [
+                InputEvent::Key {
+                    index: 0,
+                    pressed: true
+                },
+                InputEvent::Key {
+                    index: 14,
+                    pressed: true
+                }
+            ]
+        );
+        assert!(state.decode(&report).unwrap().is_empty());
+        report[2] = 3;
+        assert!(state.decode(&report).is_err());
+        report.fill(0);
+        assert_eq!(
+            state.decode(&report).unwrap(),
+            [
+                InputEvent::Key {
+                    index: 0,
+                    pressed: false
+                },
+                InputEvent::Key {
+                    index: 14,
+                    pressed: false
+                }
+            ]
+        );
+    }
+
     #[test]
     fn all_key_payloads_and_neo_sensors_are_separate_and_validated_atomically() {
         for model in [

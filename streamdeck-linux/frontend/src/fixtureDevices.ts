@@ -18,6 +18,7 @@ const definitions: [
 ][] = [
   ["mini", "Stream Deck Mini", 3, 2, 0, 80, 0, 0],
   ["classic", "Stream Deck", 5, 3, 0, 72, 0, 0],
+  ["classic-2017", "Stream Deck (2017)", 5, 3, 0, 72, 0, 0],
   ["xl", "Stream Deck XL", 8, 4, 0, 96, 0, 0],
   ["plus", "Stream Deck +", 4, 2, 4, 120, 800, 100],
   ["plus-xl", "Stream Deck + XL", 9, 4, 6, 112, 1200, 100],
@@ -29,7 +30,7 @@ export function fixtureDevice(id: string): FixtureDevice {
     definitions.find(
       (row) =>
         row[0] === (id === "min" ? "mini" : id === "plusxl" ? "plus-xl" : id),
-    ) ?? definitions[3];
+    ) ?? definitions.find((row) => row[0] === "plus")!;
   const [
     model,
     name,
@@ -58,8 +59,8 @@ export function fixtureDevice(id: string): FixtureDevice {
       has_lcd: model !== "pedal",
       key_images: model !== "pedal",
       brightness: model !== "pedal",
-      sleep: model !== "pedal",
-      full_lcd: !["mini", "pedal"].includes(model),
+      sleep: !["pedal", "classic-2017"].includes(model),
+      full_lcd: !["mini", "pedal", "classic-2017"].includes(model),
       strip: strip_width > 0,
       touchscreen: dials > 0,
       sensors: model === "neo" ? 2 : 0,

@@ -59,6 +59,8 @@ export function DeviceCanvas({
             type="button"
             className="neo-sensor"
             aria-label="Previous page"
+            disabled={snapshot.page_navigation?.previous === false}
+            aria-disabled={snapshot.page_navigation?.previous === false}
             title="Previous page · left touch sensor"
             onClick={() => onPage(-1)}
           >
@@ -69,6 +71,8 @@ export function DeviceCanvas({
             type="button"
             className="neo-sensor"
             aria-label="Next page"
+            disabled={snapshot.page_navigation?.next === false}
+            aria-disabled={snapshot.page_navigation?.next === false}
             title="Next page · right touch sensor"
             onClick={() => onPage(1)}
           >

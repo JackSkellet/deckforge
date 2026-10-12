@@ -20,7 +20,7 @@ key reference during package verification and plugin loading.
 ## Device models
 
 Model-specific transports and layouts cover Mini, the 2019/MK.2/Scissor 15-key
-family, XL, Plus, Plus XL and Neo. Only Plus has physical validation so far;
+family, the original 2017 device, XL, Plus, Plus XL and Neo. Only Plus has physical validation so far;
 the additional transports have protocol and software tests. Pedal has an
 input-only transport recovered from the original executable. See [Device models](docs/DEVICES.md) for supported USB
 identities, selection commands and remaining limits.

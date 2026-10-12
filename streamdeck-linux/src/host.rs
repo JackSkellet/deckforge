@@ -433,7 +433,7 @@ impl Host {
             .profiles
             .iter()
             .find(|p| p.id == id)
-            .is_some_and(|p| p.model != self.model)
+            .is_some_and(|p| !p.model.profile_compatible(self.model))
         {
             self.log(
                 "Imported profile retained for its own device model; active profile unchanged",
@@ -682,6 +682,25 @@ impl Host {
             self.log(warning);
         }
         if let Some(hardware) = &self.hardware {
+            if self.model == Model::Neo {
+                let navigation = self.page_navigation();
+                for (index, enabled) in [navigation.previous, navigation.next]
+                    .into_iter()
+                    .enumerate()
+                {
+                    // Solid sensor light: active accent or off at the page boundary.
+                    // This is Deckforge's visual policy, not a copied vendor asset.
+                    let color = if enabled {
+                        Rgb([141, 216, 188])
+                    } else {
+                        Rgb([0, 0, 0])
+                    };
+                    let _ = hardware.send(Draw::Sensor(
+                        index as u8,
+                        DynamicImage::ImageRgb8(RgbImage::from_pixel(96, 16, color)),
+                    ));
+                }
+            }
             for index in 0..self.model.key_count() {
                 if !self
                     .slots
@@ -1088,7 +1107,13 @@ impl Host {
                 );
                 let previous = self.sensor_pressed[index as usize];
                 self.sensor_pressed[index as usize] = pressed;
-                if pressed && !previous {
+                let navigation = self.page_navigation();
+                let enabled = if index == 0 {
+                    navigation.previous
+                } else {
+                    navigation.next
+                };
+                if pressed && !previous && enabled {
                     self.step_page(if index == 0 { -1 } else { 1 })?;
                 }
                 return Ok(());
@@ -1493,7 +1518,7 @@ fn action_snapshot(host: &Host, action: &Action) -> Value {
     })
 }
 fn snapshot(host: &Host) -> Value {
-    json!({"device_model":host.model,"device_name":host.model.name(),"overflow_slots":host.overflow_slots(),"device_capabilities":host.model.capabilities(),"device_geometry":{"columns":host.model.columns(),"rows":host.model.rows(),"keys":host.model.key_count(),"dials":host.model.dial_count(),"key_width":host.model.key_width(),"key_height":host.model.key_height(),"strip_width":host.model.strip_width(),"strip_height":host.model.strip_height()},"clipboard":host.clipboard_snapshot(),"mixer":host.mixer_snapshot(),"screensaver":{"supported":host.model==Model::Plus,"active":host.saver.active,"reason":host.saver.reason,"generation":host.saver.generation,"preferences":host.saver_preferences(),"preview":host.saver.preview,"error":host.saver.error,"frames":host.saver.animation.as_ref().map(|animation|animation.len())},"session":host.session_state,"device_settings":{"desired":host.configured_controls(),"applied":host.controls_observed,"error":host.controls_error},"library":host.library.snapshot(),"running":host.running,"device":host.device,"firmware":host.firmware,"simulate":host.simulate,"connected":host.connected && !host.simulate,"device_online":host.connected,"connection_error":host.connection_error,
+    json!({"page_navigation":host.page_navigation(),"device_model":host.model,"device_name":host.model.name(),"overflow_slots":host.overflow_slots(),"device_capabilities":host.model.capabilities(),"device_geometry":{"columns":host.model.columns(),"rows":host.model.rows(),"keys":host.model.key_count(),"dials":host.model.dial_count(),"key_width":host.model.key_width(),"key_height":host.model.key_height(),"strip_width":host.model.strip_width(),"strip_height":host.model.strip_height()},"clipboard":host.clipboard_snapshot(),"mixer":host.mixer_snapshot(),"screensaver":{"supported":host.model==Model::Plus,"active":host.saver.active,"reason":host.saver.reason,"generation":host.saver.generation,"preferences":host.saver_preferences(),"preview":host.saver.preview,"error":host.saver.error,"frames":host.saver.animation.as_ref().map(|animation|animation.len())},"session":host.session_state,"device_settings":{"desired":host.configured_controls(),"applied":host.controls_observed,"error":host.controls_error},"library":host.library.snapshot(),"running":host.running,"device":host.device,"firmware":host.firmware,"simulate":host.simulate,"connected":host.connected && !host.simulate,"device_online":host.connected,"connection_error":host.connection_error,
         "volume":host.volume_state,"volume_error":host.volume_error,"multi_runs":host.multi.snapshot(),"multi_pending":host.multi_pending.len(),"audio_outputs":host.audio_outputs,"audio_active":host.audio_active,"system_status":host.system_status,"slots":host.slots.iter().map(|s|slot_snapshot(host,s)).collect::<Vec<_>>(),
         "reference_app":host.reference_app,"inspectors":host.inspectors.values().map(|i|json!({"context":i.context,"plugin":host.plugins[i.plugin].id,"connected":i.sender.is_some()})).collect::<Vec<_>>(),
         "actions":host.actions.iter().map(|action|action_snapshot(host,action)).collect::<Vec<_>>(),
@@ -2317,7 +2342,7 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
         }
     }
     library.restore_models()?;
-    if library.current()?.model != model {
+    if !library.current()?.model.profile_compatible(model) {
         library.activate_model(model, &device)?;
     }
     library.validate()?;

@@ -29,7 +29,21 @@ const stage=document.querySelector('.device-stage');
 const columns=getComputedStyle(document.querySelector('.key-grid')).gridTemplateColumns.split(' ').length;
 if(expected.model!=='pedal'&&columns!==expected.columns)throw Error('Wrong key grid columns: '+columns);
 if(expected.model==='pedal'&&stage.dataset.keyImages!=='false')throw Error('Pedal incorrectly advertises a display');
-return {model:initial.device_model,device_name:initial.device_name,keys:keys().length,dials:dials().length,columns,last_key_selected:true,viewport:[innerWidth,innerHeight],key_bounds:rects,usb_access:false};
+let neoNavigation=false;
+if(expected.model==='neo'){
+ const left=()=>document.querySelector('.neo-sensor[aria-label="Previous page"]');
+ const right=()=>document.querySelector('.neo-sensor[aria-label="Next page"]');
+ await until(()=>left()?.disabled&&right()?.disabled);
+ await bridge.request('command',{command:'page_create',name:'Second page'});
+ const second=(await bridge.request('snapshot')).library.active_page;
+ await until(()=>!left()?.disabled&&right()?.disabled);
+ left().click();
+ await until(async()=>{const s=await bridge.request('snapshot');return s.library.active_page!==second&&left()?.disabled&&!right()?.disabled});
+ right().click();
+ await until(async()=>{const s=await bridge.request('snapshot');return s.library.active_page===second&&!left()?.disabled&&right()?.disabled});
+ left().click();await until(()=>left()?.disabled&&!right()?.disabled);neoNavigation=true;
+}
+return {model:initial.device_model,device_name:initial.device_name,keys:keys().length,dials:dials().length,columns,last_key_selected:true,neo_navigation_verified:neoNavigation,viewport:[innerWidth,innerHeight],key_bounds:rects,usb_access:false};
 '''
 
 def main():

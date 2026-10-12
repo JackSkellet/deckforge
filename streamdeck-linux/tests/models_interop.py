@@ -15,6 +15,7 @@ from system_interop import Host
 MODELS = {
     'mini': (3, 2, 0, 1, '20GAI9901'),
     'classic': (5, 3, 0, 0, '20GBA9901'),
+    'classic-2017': (5, 3, 0, 0, '20GAA9901'),
     'xl': (8, 4, 0, 2, '20GAT9901'),
     'plus': (4, 2, 4, 7, '20GBD9901'),
     'plus-xl': (9, 4, 6, 13, '20GBX9901'),
@@ -122,7 +123,18 @@ def main():
                 assert snap['device_capabilities']['transport_supported'] is True
             finally:restarted.stop()
             report.append({'model':model,'keys':columns*rows_count,'dials':dials,'sdk_type':sdk_type,'profile_model':profile_model,'restart':True,'usb_access':False})
+        # The two 15-key hardware generations share profile coordinates, even
+        # though their USB transports and brightness curves differ.
+        for source,target in [('classic','classic-2017'),('classic-2017','classic')]:
+            state=root/('cross-'+target);host=ModelHost(binary,plugin,state,root/('cross-'+target+'.log'),target).ready()
+            try:
+                host.post({'command':'import_profile','path':str(root/(source+'.streamDeckProfile'))})
+                snap=host.state();profile=next(p for p in snap['library']['profiles'] if p['id']==snap['library']['active_profile'])
+                assert profile['model']==source and profile['compatible'] is True
+                assert snap['device_model']==target
+                assert any(s['controller']=='Keypad' and s['index']==14 for s in snap['slots'])
+            finally:host.stop()
     if args.report:args.report.write_text(json.dumps(report,indent=2)+'\n')
-    print('PASS: all seven model layouts, final key coordinates, dial limits, Neo feedback, export/import and persisted-model restart; no USB.')
+    print('PASS: all eight model layouts, final key coordinates, dial limits, Neo feedback, export/import and persisted-model restart and 15-key cross-generation profiles; no USB.')
 
 if __name__=='__main__':main()

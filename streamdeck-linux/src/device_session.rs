@@ -20,6 +20,7 @@ pub enum Draw {
     Key(u8, DynamicImage),
     Strip(DynamicImage),
     Infobar(DynamicImage),
+    Sensor(u8, DynamicImage),
     Controls(Controls),
     /// Keep the firmware idle timer suspended while software sleep is configured.
     SleepPolicy(bool),
@@ -124,6 +125,8 @@ impl Transport for Deck {
     fn set_brightness(&mut self, brightness: u8) -> Result<()> {
         let value = if self.model() == Model::Plus {
             crate::brightness::hid_value(brightness)?
+        } else if self.model() == Model::Classic2017 {
+            self.legacy_brightness_value(brightness)?
         } else {
             brightness
         };
@@ -163,7 +166,12 @@ impl Transport for Deck {
         }
     }
     fn write(&mut self, index: usize, image: &DynamicImage) -> Result<()> {
-        if index == usize::from(self.model().key_count()) {
+        if self.model() == Model::Neo && index > usize::from(self.model().key_count()) {
+            self.set_sensor_image(
+                u8::try_from(index - usize::from(self.model().key_count()) - 1)?,
+                image,
+            )
+        } else if index == usize::from(self.model().key_count()) {
             if self.model() == Model::Neo {
                 self.set_infobar_image(image)
             } else {
@@ -233,7 +241,9 @@ impl<T: Transport> Session<T> {
             .map(|(deck, _)| deck.model())
             .or(expected)
             .unwrap_or_default();
-        let frames = usize::from(model.key_count()) + usize::from(model.capabilities().strip);
+        let frames = usize::from(model.key_count())
+            + usize::from(model.capabilities().strip)
+            + usize::from(model.sensor_count());
         Self {
             model,
             device: initial,
@@ -325,7 +335,17 @@ impl<T: Transport> Session<T> {
             Draw::Infobar(image) if self.model == Model::Neo => {
                 (usize::from(self.model.key_count()), image)
             }
-            Draw::Key(_, _) | Draw::Strip(_) | Draw::Infobar(_) => return false,
+            Draw::Sensor(sensor, image)
+                if self.model == Model::Neo && sensor < self.model.sensor_count() =>
+            {
+                (
+                    usize::from(self.model.key_count()) + 1 + usize::from(sensor),
+                    image,
+                )
+            }
+            Draw::Key(_, _) | Draw::Strip(_) | Draw::Infobar(_) | Draw::Sensor(_, _) => {
+                return false;
+            }
         };
         if !self.desired[index]
             .as_ref()
@@ -930,6 +950,9 @@ mod tests {
             }
             session.cache(Draw::Strip(frame(100)));
             session.cache(Draw::Infobar(frame(101)));
+            for sensor in 0..=model.sensor_count() {
+                session.cache(Draw::Sensor(sensor, frame(110 + sensor)));
+            }
             for _ in 0..40 {
                 session.tick(Duration::ZERO, &mut never);
             }
@@ -938,7 +961,8 @@ mod tests {
                 usize::from(model.key_count())
             } else {
                 0
-            } + usize::from(model.capabilities().strip);
+            } + usize::from(model.capabilities().strip)
+                + usize::from(model.sensor_count());
             assert_eq!(writes.len(), expected, "{model:?}");
             for index in 0..if model.capabilities().key_images {
                 model.key_count()
@@ -950,9 +974,15 @@ mod tests {
                     "{model:?} missing key {index}"
                 );
             }
+            for sensor in 0..model.sensor_count() {
+                assert!(writes.contains(&(
+                    usize::from(model.key_count()) + 1 + usize::from(sensor),
+                    110 + sensor
+                )));
+            }
             if model.capabilities().strip {
                 assert_eq!(
-                    writes.last(),
+                    writes.get(usize::from(model.key_count())),
                     Some(&(
                         usize::from(model.key_count()),
                         if model == Model::Neo { 101 } else { 100 }

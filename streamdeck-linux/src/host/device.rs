@@ -290,7 +290,7 @@ impl Host {
                     self.model = model;
                     self.dial_pressed = vec![false; model.dial_count() as usize];
                     self.sensor_pressed = vec![false; model.sensor_count() as usize];
-                    if self.library.current()?.model != model {
+                    if !self.library.current()?.model.profile_compatible(model) {
                         self.library.activate_model(model, &self.device)?;
                     }
                     self.slots = self.library.visible()?;
@@ -572,6 +572,88 @@ mod tests {
             .is_err()
         );
     }
+    #[test]
+    fn neo_sensor_lights_follow_page_boundaries_and_press_edges() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut host = super::super::tests::fixture(temp.path());
+        host.model = Model::Neo;
+        host.slots.clear();
+        host.library = Library::for_model(vec![], "neo", Model::Neo);
+        host.sensor_pressed = vec![false; 2];
+        let (tx, rx) = std::sync::mpsc::channel();
+        host.hardware = Some(tx);
+        let lights = |rx: &std::sync::mpsc::Receiver<Draw>| {
+            let mut result = [None, None];
+            for draw in rx.try_iter() {
+                if let Draw::Sensor(index, image) = draw {
+                    assert_eq!((image.width(), image.height()), (96, 16));
+                    result[index as usize] =
+                        Some(image.to_rgb8().pixels().any(|p| p.0 != [0, 0, 0]));
+                }
+            }
+            result
+        };
+        host.render().unwrap();
+        assert_eq!(lights(&rx), [Some(false), Some(false)]);
+        let first = host.library.active_page.clone();
+        super::super::apply_control(&mut host, json!({"command":"page_create","name":"Second"}))
+            .unwrap();
+        let second = host.library.active_page.clone();
+        assert_eq!(lights(&rx), [Some(true), Some(false)]);
+        host.input(InputEvent::Sensor {
+            index: 0,
+            pressed: true,
+        })
+        .unwrap();
+        assert_eq!(host.library.active_page, first);
+        assert_eq!(lights(&rx), [Some(false), Some(true)]);
+        host.input(InputEvent::Sensor {
+            index: 0,
+            pressed: true,
+        })
+        .unwrap();
+        assert_eq!(lights(&rx), [None, None]);
+        host.input(InputEvent::Sensor {
+            index: 0,
+            pressed: false,
+        })
+        .unwrap();
+        host.input(InputEvent::Sensor {
+            index: 1,
+            pressed: true,
+        })
+        .unwrap();
+        assert_eq!(host.library.active_page, second);
+        assert_eq!(lights(&rx), [Some(true), Some(false)]);
+        host.input(InputEvent::Sensor {
+            index: 1,
+            pressed: false,
+        })
+        .unwrap();
+        host.input(InputEvent::Sensor {
+            index: 1,
+            pressed: true,
+        })
+        .unwrap();
+        assert_eq!(lights(&rx), [None, None]); // Disabled sensor does not reload the page.
+        let mut folder = host.library.current().unwrap().pages[0].clone();
+        folder.id = "folder-fixture".into();
+        folder.slots.clear();
+        host.library.current_mut().unwrap().pages.push(folder);
+        host.library.folders = vec![first.clone()];
+        host.library.active_page = "folder-fixture".into();
+        let navigation = host.page_navigation();
+        assert!(navigation.previous && navigation.next);
+        host.input(InputEvent::Sensor {
+            index: 0,
+            pressed: true,
+        })
+        .unwrap();
+        assert_eq!(host.library.active_page, first);
+        assert!(host.library.folders.is_empty());
+        assert_eq!(lights(&rx), [Some(false), Some(true)]);
+    }
+
     #[test]
     fn touch_input_requires_matching_dial_segment_and_bounds() {
         let temp = tempfile::tempdir().unwrap();

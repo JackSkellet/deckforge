@@ -226,7 +226,7 @@ fn transferred(
     };
     compatible(&source.slot, controller, actions)?;
     ensure!(
-        source.pages.is_empty() || source.slot.model == current.model,
+        source.pages.is_empty() || source.slot.model.profile_compatible(current.model),
         "Folder geometry must match the destination device model"
     );
     if source.cut && target.is_some_and(|s| s.context == source.anchor.context) {
@@ -262,7 +262,7 @@ fn transferred(
     if let Some(other) = &swapped {
         compatible(&other.slot, &source.anchor.controller, actions)?;
         ensure!(
-            other.pages.is_empty() || other.slot.model == source.slot.model,
+            other.pages.is_empty() || other.slot.model.profile_compatible(source.slot.model),
             "Folder geometry must match the destination device model"
         );
         if other.anchor.profile == source.anchor.profile {

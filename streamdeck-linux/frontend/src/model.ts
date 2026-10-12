@@ -82,6 +82,7 @@ export interface Clipboard {
   context: string;
 }
 export interface Snapshot {
+  page_navigation?: { previous: boolean; next: boolean };
   device_model?: string;
   device_name?: string;
   device_geometry?: DeviceGeometry;

@@ -9,6 +9,7 @@ import {
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import App from "./App";
+import { DeviceCanvas } from "./DeviceCanvas";
 import { installFixture } from "./fixture";
 import { fixtureDevice } from "./fixtureDevices";
 import {
@@ -44,6 +45,7 @@ it("uses exact supported geometry for every descriptor, including display-only N
   for (const [id, keys, dials] of [
     ["mini", 6, 0],
     ["classic", 15, 0],
+    ["classic-2017", 15, 0],
     ["xl", 32, 0],
     ["plus", 8, 4],
     ["plus-xl", 36, 6],
@@ -239,4 +241,103 @@ it("reports retained out-of-layout records and disables foreign profile activati
       .disabled,
   ).toBe(true);
   expect(screen.getByText(/These assignments are preserved/)).toBeTruthy();
+});
+
+it("models Classic 2017 as fifteen display keys with no dials or unsupported sleep controls", async () => {
+  setup("classic-2017");
+  render(<App />);
+  await screen.findByText("Simulated Stream Deck (2017)");
+  expect(screen.getAllByRole("button", { name: /^Key \d+:/ })).toHaveLength(15);
+  expect(screen.queryByRole("button", { name: /^Dial \d+:/ })).toBeNull();
+  const model = fixtureDevice("classic-2017");
+  expect(model.geometry).toMatchObject({
+    columns: 5,
+    rows: 3,
+    keys: 15,
+    dials: 0,
+    key_width: 72,
+    key_height: 72,
+  });
+  expect(model.capabilities).toMatchObject({
+    key_images: true,
+    brightness: true,
+    sleep: false,
+    full_lcd: false,
+  });
+  expect(fixtureDevice("unknown").id).toBe("plus");
+});
+it("disables Neo sensors at the first and last page without wrapping", async () => {
+  const request = setup("neo");
+  const user = userEvent.setup();
+  render(<App />);
+  const previous = await screen.findByRole("button", { name: "Previous page" });
+  const next = screen.getByRole("button", { name: "Next page" });
+  expect((previous as HTMLButtonElement).disabled).toBe(true);
+  expect(previous.getAttribute("aria-disabled")).toBe("true");
+  expect((next as HTMLButtonElement).disabled).toBe(false);
+  await user.click(previous);
+  expect(
+    request.mock.calls.some(
+      ([, payload]) =>
+        (payload as { command?: string } | undefined)?.command === "page_step",
+    ),
+  ).toBe(false);
+  await user.click(next);
+  await waitFor(() => expect((next as HTMLButtonElement).disabled).toBe(true));
+  expect(next.getAttribute("aria-disabled")).toBe("true");
+  expect((previous as HTMLButtonElement).disabled).toBe(false);
+  const count = request.mock.calls.filter(
+    ([, payload]) =>
+      (payload as { command?: string } | undefined)?.command === "page_step",
+  ).length;
+  await user.click(next);
+  expect(
+    request.mock.calls.filter(
+      ([, payload]) =>
+        (payload as { command?: string } | undefined)?.command === "page_step",
+    ),
+  ).toHaveLength(count);
+  await user.click(previous);
+  await waitFor(() =>
+    expect((previous as HTMLButtonElement).disabled).toBe(true),
+  );
+});
+it("uses authoritative folder navigation flags and retains older snapshot fallback", async () => {
+  setup("neo");
+  const snapshot = await window.deckforge!.request<Snapshot>("snapshot");
+  snapshot.library.active_page = "folder";
+  snapshot.library.folder_depth = 1;
+  snapshot.page_navigation = { previous: false, next: true };
+  const onPage = vi.fn();
+  const view = render(
+    <DeviceCanvas
+      snapshot={snapshot}
+      renderSlot={() => null}
+      onPage={onPage}
+    />,
+  );
+  expect(
+    (screen.getByRole("button", { name: "Previous page" }) as HTMLButtonElement)
+      .disabled,
+  ).toBe(true);
+  expect(
+    (screen.getByRole("button", { name: "Next page" }) as HTMLButtonElement)
+      .disabled,
+  ).toBe(false);
+  delete snapshot.page_navigation;
+  view.rerender(
+    <DeviceCanvas
+      snapshot={snapshot}
+      renderSlot={() => null}
+      onPage={onPage}
+    />,
+  );
+  expect(
+    (screen.getByRole("button", { name: "Previous page" }) as HTMLButtonElement)
+      .disabled,
+  ).toBe(false);
+  expect(
+    (screen.getByRole("button", { name: "Next page" }) as HTMLButtonElement)
+      .disabled,
+  ).toBe(false);
 });

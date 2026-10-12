@@ -154,7 +154,12 @@ required device name and cannot activate on incompatible hardware. Out-of-layout
 records remain explicitly visible for inspection/export; no projection silently
 replaces their saved positions.
 
-The isolated browser fixture accepts `&model=mini`, `classic`, `xl`, `plus`,
+The isolated browser fixture accepts `&model=mini`, `classic`, `classic-2017`, `xl`, `plus`,
 `plus-xl`, `neo`, or `pedal`; `&overflow=1` retains its deliberately mismatched
 assignments for inspection. These fixtures and unit tests are software evidence,
 not a claim that every physical device has been tested.
+
+Neo sensor button availability follows the host’s `page_navigation.previous` and
+`page_navigation.next` flags, including folder contexts. Older snapshots without
+those flags keep the previous enabled-button behavior. The synthetic fixture
+models first/last-page boundaries without wrapping.

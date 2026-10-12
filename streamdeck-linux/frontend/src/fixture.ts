@@ -361,6 +361,18 @@ export function installFixture(modelId?: string) {
     profile.device_name = model.name;
     profile.compatible = true;
   }
+  function refreshNavigation() {
+    const profile = snapshot.library.profiles.find(
+      (p) => p.id === snapshot.library.active_profile,
+    );
+    const index =
+      profile?.page_order.indexOf(snapshot.library.active_page) ?? -1;
+    snapshot.page_navigation = {
+      previous: index > 0,
+      next: index >= 0 && index < (profile?.page_order.length ?? 0) - 1,
+    };
+  }
+  refreshNavigation();
   function transfer(
     source: Slot,
     target: { controller: string; index: number },
@@ -566,10 +578,16 @@ export function installFixture(modelId?: string) {
             (p) => p.id === snapshot.library.active_profile,
           )!;
           const old = profile.page_order.indexOf(snapshot.library.active_page);
-          const next =
-            (old + Math.sign(payload.direction) + profile.page_order.length) %
-            profile.page_order.length;
-          snapshot.library.active_page = profile.page_order[next];
+          if (old >= 0) {
+            const next = Math.max(
+              0,
+              Math.min(
+                profile.page_order.length - 1,
+                old + Math.sign(payload.direction),
+              ),
+            );
+            snapshot.library.active_page = profile.page_order[next];
+          }
         }
         if (payload.command === "page_select")
           snapshot.library.active_page = payload.id;
@@ -590,6 +608,7 @@ export function installFixture(modelId?: string) {
           slot
         )
           slot.raw = payload.raw;
+        refreshNavigation();
         listener?.(structuredClone(snapshot));
         return null as T;
       }

@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 pub enum Model {
     Mini,
     Classic,
+    #[serde(rename = "classic-2017", alias = "classic2017")]
+    Classic2017,
     Xl,
     #[default]
     Plus,
@@ -32,6 +34,7 @@ impl Model {
         &[
             Self::Mini,
             Self::Classic,
+            Self::Classic2017,
             Self::Xl,
             Self::Plus,
             Self::PlusXl,
@@ -42,6 +45,7 @@ impl Model {
     pub const fn from_product(pid: u16) -> Option<Self> {
         match pid {
             0x0063 | 0x0090 | 0x00b3 | 0x00b8 => Some(Self::Mini),
+            0x0060 => Some(Self::Classic2017),
             0x006d | 0x0080 | 0x00a5 | 0x00b9 => Some(Self::Classic),
             0x006c | 0x008f | 0x00ba => Some(Self::Xl),
             0x0084 => Some(Self::Plus),
@@ -49,17 +53,14 @@ impl Model {
             0x009a => Some(Self::Neo),
             // Original Windows7.6 registry0x140135a65 and Pedal factory/vtable.
             0x0086 => Some(Self::Pedal),
-            // Legacy2017 has its own protocol; image transformations and version
-            // dependencies remain unresolved, so never open it as Classic2019.
             _ => None,
         }
     }
     pub fn from_profile_model(model: &str) -> Option<Self> {
         match model {
             "20GAI9901" | "20GAI9902" | "mini" => Some(Self::Mini),
-            "20GAA9901" | "20GAA9902" | "20GBA9901" | "20GBL9901" | "classic" => {
-                Some(Self::Classic)
-            }
+            "20GAA9901" | "classic-2017" => Some(Self::Classic2017),
+            "20GAA9902" | "20GBA9901" | "20GBL9901" | "classic" => Some(Self::Classic),
             "20GAT9901" | "20GAT9902" | "xl" => Some(Self::Xl),
             "20GBD9901" | "plus" => Some(Self::Plus),
             "20GBX9901" | "plus-xl" => Some(Self::PlusXl),
@@ -72,12 +73,22 @@ impl Model {
         match self {
             Self::Mini => "mini",
             Self::Classic => "classic",
+            Self::Classic2017 => "classic-2017",
             Self::Xl => "xl",
             Self::Plus => "plus",
             Self::PlusXl => "plus-xl",
             Self::Neo => "neo",
             Self::Pedal => "pedal",
         }
+    }
+    /// Both 15-key generations use the same SDK/profile coordinates. Their HID
+    /// protocols and capabilities remain distinct.
+    pub fn profile_compatible(self, other: Self) -> bool {
+        self == other
+            || matches!(
+                (self, other),
+                (Self::Classic, Self::Classic2017) | (Self::Classic2017, Self::Classic)
+            )
     }
     pub const fn sensor_count(self) -> u8 {
         if matches!(self, Self::Neo) { 2 } else { 0 }
@@ -89,6 +100,7 @@ impl Model {
         match self {
             Self::Mini => "Stream Deck Mini",
             Self::Classic => "Stream Deck",
+            Self::Classic2017 => "Stream Deck (2017)",
             Self::Xl => "Stream Deck XL",
             Self::Plus => "Stream Deck +",
             Self::PlusXl => "Stream Deck + XL",
@@ -100,6 +112,7 @@ impl Model {
         match self {
             Self::Mini => "20GAI9901",
             Self::Classic => "20GBA9901",
+            Self::Classic2017 => "20GAA9901",
             Self::Xl => "20GAT9901",
             Self::Plus => "20GBD9901",
             Self::Neo => "20GBJ9901",
@@ -113,7 +126,7 @@ impl Model {
     pub const fn sdk_type(self) -> u8 {
         match self {
             Self::Mini => 1,
-            Self::Classic => 0,
+            Self::Classic | Self::Classic2017 => 0,
             Self::Xl => 2,
             Self::Plus => 7,
             Self::PlusXl => 13,
@@ -124,7 +137,7 @@ impl Model {
     pub const fn columns(self) -> u8 {
         match self {
             Self::Mini | Self::Pedal => 3,
-            Self::Classic => 5,
+            Self::Classic | Self::Classic2017 => 5,
             Self::Xl => 8,
             Self::Plus | Self::Neo => 4,
             Self::PlusXl => 9,
@@ -133,7 +146,7 @@ impl Model {
     pub const fn rows(self) -> u8 {
         match self {
             Self::Mini | Self::Plus | Self::Neo => 2,
-            Self::Classic => 3,
+            Self::Classic | Self::Classic2017 => 3,
             Self::Xl | Self::PlusXl => 4,
             Self::Pedal => 1,
         }
@@ -151,7 +164,7 @@ impl Model {
     pub const fn key_width(self) -> u32 {
         match self {
             Self::Mini => 80,
-            Self::Classic => 72,
+            Self::Classic | Self::Classic2017 => 72,
             Self::Xl | Self::Neo => 96,
             Self::Plus => 120,
             Self::PlusXl => 112,
@@ -179,7 +192,7 @@ impl Model {
     pub const fn lcd_width(self) -> u32 {
         match self {
             Self::Mini => 320,
-            Self::Classic | Self::Neo => 480,
+            Self::Classic | Self::Classic2017 | Self::Neo => 480,
             Self::Xl => 1024,
             Self::Plus => 800,
             Self::PlusXl => 1280,
@@ -189,7 +202,7 @@ impl Model {
     pub const fn lcd_height(self) -> u32 {
         match self {
             Self::Mini => 240,
-            Self::Classic => 272,
+            Self::Classic | Self::Classic2017 => 272,
             Self::Neo => 320,
             Self::Xl => 600,
             Self::Plus => 480,
@@ -203,8 +216,8 @@ impl Model {
             has_lcd: self.has_lcd(),
             key_images: !matches!(self, Self::Pedal),
             brightness: !matches!(self, Self::Pedal),
-            sleep: !matches!(self, Self::Pedal),
-            full_lcd: !matches!(self, Self::Mini | Self::Pedal),
+            sleep: !matches!(self, Self::Pedal | Self::Classic2017),
+            full_lcd: !matches!(self, Self::Mini | Self::Pedal | Self::Classic2017),
             strip: self.strip_width() > 0,
             touchscreen: self.dial_count() > 0,
             sensors: if matches!(self, Self::Neo) { 2 } else { 0 },
@@ -225,7 +238,7 @@ mod tests {
                 assert_eq!(Model::from_product(pid), Some(model));
             }
         }
-        assert_eq!(Model::from_product(0x60), None);
+        assert_eq!(Model::from_product(0x60), Some(Model::Classic2017));
         assert_eq!(Model::from_product(0x86), Some(Model::Pedal));
         assert!(Model::Pedal.capabilities().transport_supported);
         assert!(!Model::Pedal.capabilities().key_images);
@@ -235,6 +248,7 @@ mod tests {
     #[test]
     fn geometry_and_serialization_roundtrip() {
         for &m in Model::all() {
+            assert_eq!(serde_json::to_value(m).unwrap(), m.id());
             assert_eq!(m.key_count(), m.columns() * m.rows());
             assert_eq!(Model::from_profile_model(m.profile_model()), Some(m));
             assert_eq!(

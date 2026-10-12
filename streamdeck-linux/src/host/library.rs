@@ -273,7 +273,9 @@ impl Library {
             {
                 profile.model = model;
             }
-            let upgraded = previous_model != profile.model;
+            // Recover only a previously narrowed projection. Changing HID generation
+            // with identical profile geometry must not resurrect deleted actions.
+            let upgraded = !previous_model.profile_compatible(profile.model);
             for page in &mut profile.pages {
                 for slot in &mut page.slots {
                     if slot.model != profile.model && slot.controller == "Keypad" {
@@ -307,9 +309,12 @@ impl Library {
         let id = if let Some(profile) = self
             .profiles
             .iter()
-            .find(|p| p.model == model && p.device == device)
-            .or_else(|| self.profiles.iter().find(|p| p.model == model))
-        {
+            .find(|p| p.model.profile_compatible(model) && p.device == device)
+            .or_else(|| {
+                self.profiles
+                    .iter()
+                    .find(|p| p.model.profile_compatible(model))
+            }) {
             profile.id.clone()
         } else {
             let profile = native_profile(&format!("{} profile", model.name()), device, model);
@@ -441,12 +446,29 @@ impl Library {
     pub fn snapshot(&self) -> Value {
         let active_model = self.current().ok().map(|p| p.model);
         json!({"active_profile":self.active_profile,"active_page":self.active_page,"folder_depth":self.folders.len(),
-            "profiles":self.profiles.iter().map(|p|json!({"id":p.id,"name":p.name,"device":p.device,"model":p.model,"device_name":p.model.name(),"compatible":Some(p.model)==active_model,"readonly":p.readonly,"pin_page":p.pin_page,"page_order":p.page_order,
+            "profiles":self.profiles.iter().map(|p|json!({"id":p.id,"name":p.name,"device":p.device,"model":p.model,"device_name":p.model.name(),"compatible":active_model.is_some_and(|model|p.model.profile_compatible(model)),"readonly":p.readonly,"pin_page":p.pin_page,"page_order":p.page_order,
                 "pages":p.page_order.iter().filter_map(|id|p.pages.iter().find(|page| &page.id==id)).chain(p.pages.iter().filter(|page|page.id!=p.pin_page&&!p.page_order.contains(&page.id))).map(|page|json!({"id":page.id,"name":page_label(p,page),"folder":!p.page_order.contains(&page.id)})).collect::<Vec<_>>()})).collect::<Vec<_>>()})
     }
 }
 
+#[derive(Clone, Copy, Serialize)]
+pub(super) struct PageNavigation {
+    pub previous: bool,
+    pub next: bool,
+}
+
 impl Host {
+    /// Use the same root page as step_page when inside a folder.
+    pub(super) fn page_navigation(&self) -> PageNavigation {
+        let changes_page = |direction| {
+            self.page_destination(direction)
+                .is_ok_and(|target| target != self.library.active_page)
+        };
+        PageNavigation {
+            previous: changes_page(-1),
+            next: changes_page(1),
+        }
+    }
     pub(super) fn overflow_slots(&self) -> Vec<Value> {
         let Ok(profile) = self.library.current() else {
             return vec![];
@@ -618,7 +640,7 @@ impl Host {
             .find(|p| p.id == id)
             .context("Profile not found")?;
         anyhow::ensure!(
-            target.model == self.model,
+            target.model.profile_compatible(self.model),
             "Profile is for {}; selected device is {}",
             target.model.name(),
             self.model.name()
@@ -667,7 +689,7 @@ impl Host {
         self.library.active_page = id;
         self.refresh_page()
     }
-    pub(super) fn step_page(&mut self, direction: i64) -> Result<()> {
+    fn page_destination(&self, direction: i64) -> Result<String> {
         let profile = self.library.current()?;
         let base = self
             .library
@@ -681,7 +703,13 @@ impl Host {
             .unwrap_or(0);
         let next = (position as i64 + direction.signum())
             .clamp(0, profile.page_order.len() as i64 - 1) as usize;
-        let id = profile.page_order[next].clone();
+        Ok(profile.page_order[next].clone())
+    }
+    pub(super) fn step_page(&mut self, direction: i64) -> Result<()> {
+        let id = self.page_destination(direction)?;
+        if id == self.library.active_page && self.library.folders.is_empty() {
+            return Ok(());
+        }
         self.select_page(&id, false)
     }
     pub(super) fn goto_page(&mut self, settings: &Value) -> Result<()> {
@@ -1209,7 +1237,7 @@ impl Host {
                     .profiles
                     .iter()
                     .find(|p| p.id == id)
-                    .is_some_and(|p| p.model != self.model)
+                    .is_some_and(|p| !p.model.profile_compatible(self.model))
                 {
                     self.log("Imported profile retained for its own device model; active profile unchanged");
                     self.persist()
@@ -1447,6 +1475,19 @@ mod resource_duplication_tests {
         assert_eq!(leaves[1].resources, Some(BTreeMap::new()));
         assert_eq!(leaves[2].resources, None);
         host.library.validate().unwrap();
+    }
+
+    #[test]
+    fn identifying_2017_transport_does_not_restore_deleted_profile_actions() {
+        let mut library = Library::for_model(vec![], "classic", Model::Classic);
+        let profile = library.current_mut().unwrap();
+        profile.raw["Device"] = json!({"Model":"20GAA9901"});
+        profile.pages[0].raw = json!({"Controllers":[{"Type":"Keypad","Actions":{"0,0":{"UUID":"com.test.deleted","States":[{}]}}}]});
+        library.restore_models().unwrap();
+        let profile = library.current().unwrap();
+        assert_eq!(profile.model, Model::Classic2017);
+        assert!(profile.pages[0].slots.is_empty());
+        assert!(profile.model.profile_compatible(Model::Classic));
     }
 
     #[test]
