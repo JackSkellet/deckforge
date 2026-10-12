@@ -1,5 +1,7 @@
 # Deckforge
 
+**Made with AI.** Elgato wasn't making a Linux port, and I didn't want an expensive paperweight on my table.
+
 An independent Linux Stream Deck+ desktop application written from scratch in
 Rust. The native editor uses egui/eframe and calls the Rust host directly in the
 same process. Plugin HTML runs in isolated native WebKit windows. A separate headless diagnostic mode retains
@@ -23,9 +25,9 @@ Open **Deckforge** from the Linux application menu, or run:
 
 The installed optimized executable is `~/.local/bin/deckforge`. Its desktop entry
 is `~/.local/share/applications/deckforge.desktop`. Default application data lives
-in `$XDG_DATA_HOME/deckforge`, or `~/.local/share/deckforge` when unset. Your earlier
-workspace session was copied into this directory with its sample plugins;
-`state/live/session.json` remains intact as the original.
+in `$XDG_DATA_HOME/deckforge`, or `~/.local/share/deckforge` when unset.
+Local development sessions and external reference fixtures are not included in
+the repository.
 
 Select a key or dial in the native window, choose an action, and assign it. Edit
 simple settings with text, numeric and checkbox controls, then Save changes.
@@ -38,15 +40,16 @@ stops this host and its plugin processes; tray/background mode remains unfinishe
 Build and install an updated native executable:
 
 ```sh
-cd '/home/jack/Documents/ChatGPT/REA Workspace/streamdeck-linux'
+cd streamdeck-linux
 cargo build --release --locked
 python scripts/install-desktop.py
 ```
 
 The per-user installer changes only its executable, icon and launcher; it keeps
 replaced files as `.previous`. It does not install system packages, a startup
-service or udev rules. It leaves application settings unchanged. The connected
-device already grants this user access. No device reset or firmware write is used.
+service or udev rules. It leaves application settings unchanged. Your Linux seat
+or udev configuration must grant access to the device. No device reset or firmware
+write is used.
 
 For development with the workspace's original sample session:
 
