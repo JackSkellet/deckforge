@@ -119,7 +119,7 @@ pub(super) fn decode_image(data: &[u8], svg: bool) -> Result<DynamicImage> {
         &mut pixmap.as_mut(),
     );
     let mut rgba = pixmap.take();
-    for pixel in rgba.chunks_exact_mut(4) {
+    for pixel in rgba.as_chunks_mut::<4>().0 {
         let alpha = pixel[3] as u16;
         for channel in &mut pixel[..3] {
             *channel = (*channel as u16 * 255)

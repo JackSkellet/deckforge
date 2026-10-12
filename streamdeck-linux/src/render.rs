@@ -538,7 +538,7 @@ mod tests {
     #[test]
     fn official_custom_sample_double_bars_are_centered_at_zero() {
         let definition: Value = serde_json::from_str(include_str!(
-            "../../evidence/plugins/com.elgato.layouts.sdPlugin/layouts/custom-layout-4.json"
+            "../tests/fixtures/official-layouts/custom-layout-4.json"
         ))
         .unwrap();
         let image = render(definition, json!({}), HashMap::new());

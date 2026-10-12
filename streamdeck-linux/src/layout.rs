@@ -195,18 +195,10 @@ mod tests {
     #[test]
     fn official_custom_sample_layouts_validate() {
         for input in [
-            include_str!(
-                "../../evidence/plugins/com.elgato.layouts.sdPlugin/layouts/custom-layout-1.json"
-            ),
-            include_str!(
-                "../../evidence/plugins/com.elgato.layouts.sdPlugin/layouts/custom-layout-2.json"
-            ),
-            include_str!(
-                "../../evidence/plugins/com.elgato.layouts.sdPlugin/layouts/custom-layout-3.json"
-            ),
-            include_str!(
-                "../../evidence/plugins/com.elgato.layouts.sdPlugin/layouts/custom-layout-4.json"
-            ),
+            include_str!("../tests/fixtures/official-layouts/custom-layout-1.json"),
+            include_str!("../tests/fixtures/official-layouts/custom-layout-2.json"),
+            include_str!("../tests/fixtures/official-layouts/custom-layout-3.json"),
+            include_str!("../tests/fixtures/official-layouts/custom-layout-4.json"),
         ] {
             validate(&serde_json::from_str(input).unwrap()).unwrap();
         }

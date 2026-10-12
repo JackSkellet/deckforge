@@ -404,7 +404,7 @@ impl Mixer {
     /// not advance. Any odd trailing sample is silent and does not advance a frame.
     pub fn mix(&mut self, output: &str, samples: &mut [f32]) {
         samples.fill(0.0);
-        for frame in samples.chunks_exact_mut(2) {
+        for frame in samples.as_chunks_mut::<2>().0 {
             let mut sum = [0.0f64; 2];
             for voice in self
                 .voices
