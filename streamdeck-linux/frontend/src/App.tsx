@@ -880,7 +880,20 @@ export default function App() {
         <span className="sr-only">{item?.title}</span>
         {controller === "Encoder" && (
           <span className="dial-knob" aria-hidden="true">
-            <i />
+            {item?.software_icon?.trim() ? (
+              <img
+                className="dial-software-icon"
+                src={
+                  item.software_icon.startsWith("data:image/png;base64,")
+                    ? item.software_icon
+                    : `data:image/png;base64,${item.software_icon}`
+                }
+                alt=""
+                draggable={false}
+              />
+            ) : (
+              <i />
+            )}
           </span>
         )}
       </button>

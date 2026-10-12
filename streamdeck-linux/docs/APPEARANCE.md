@@ -57,8 +57,10 @@ override.
   visual equivalence remain open.
 - GIF bytes survive storage/export, but the renderer currently displays the first
   frame. The SDK's `setImage` API itself does not support animated GIF input.
-- Separate SDK hardware/software targets still produce an explicit unsupported
-  error. State-specific updates for the combined target are supported.
+- Key SDK target 0 updates both displays, target 1 only hardware, and target 2
+  only the editor. State-specific updates and independent resets are supported.
+  Dial SDK images update the circular editor icon; feedback controls the LCD.
+  See [display target contracts and tests](PLUGIN_DISPLAY_TARGETS.md).
 - Composite Action Trigger and Dial Stack displays render their child actions;
   parent artwork does not replace those composite layouts.
 

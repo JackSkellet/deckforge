@@ -901,6 +901,7 @@ impl Host {
                     image_cache: HashMap::new(),
                     display_warnings: vec![],
                     preview: String::new(),
+                    software_icon: String::new(),
                 });
             }
             let original = imported.manifest_path();
@@ -1417,6 +1418,7 @@ fn navigation_slot(uuid: &str, name: &str, index: u8, settings: Value, model: Mo
         image_cache: HashMap::new(),
         display_warnings: vec![],
         preview: String::new(),
+        software_icon: String::new(),
     }
 }
 

@@ -60,6 +60,7 @@ export interface Slot {
   pinned: boolean;
   available: boolean;
   preview?: string;
+  software_icon?: string;
   state: number;
   raw: RecordValue;
   has_inspector: boolean;

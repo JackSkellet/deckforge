@@ -6,6 +6,37 @@ use std::collections::BTreeMap;
 
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
+pub(super) struct PluginAppearance {
+    pub title: Option<String>,
+    #[serde(default, with = "image_serde")]
+    pub pixels: Option<DynamicImage>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DisplayTarget {
+    Both,
+    Hardware,
+    Software,
+}
+impl DisplayTarget {
+    fn parse(payload: &Value) -> Result<Self> {
+        match payload.get("target") {
+            None => Ok(Self::Both),
+            Some(value) => match value.as_u64() {
+                Some(0) => Ok(Self::Both),
+                Some(1) => Ok(Self::Hardware),
+                Some(2) => Ok(Self::Software),
+                _ => anyhow::bail!("Display target must be 0, 1 or 2"),
+            },
+        }
+    }
+}
+fn pixel_bytes(pixels: Option<&DynamicImage>) -> usize {
+    pixels.map_or(0, |image| image.as_bytes().len())
+}
+
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub(super) struct StateAppearance {
     pub user_title: Option<String>,
     pub imported_title: bool,
@@ -18,7 +49,59 @@ pub(super) struct StateAppearance {
     pub plugin_title: Option<String>,
     #[serde(default, with = "image_serde")]
     pub plugin_pixels: Option<DynamicImage>,
+    /// None shares the software runtime values. Split before the first targeted write.
+    pub hardware: Option<PluginAppearance>,
+    /// The encoder's circular software canvas is separate from its LCD layout.
+    #[serde(default, with = "image_serde")]
+    pub encoder_pixels: Option<DynamicImage>,
 }
+impl StateAppearance {
+    fn split_hardware(&mut self) {
+        if self.hardware.is_none() {
+            self.hardware = Some(PluginAppearance {
+                title: self.plugin_title.clone(),
+                pixels: self.plugin_pixels.clone(),
+            });
+        }
+    }
+    fn pixel_bytes(&self) -> usize {
+        pixel_bytes(self.user_pixels.as_ref())
+            + pixel_bytes(self.plugin_pixels.as_ref())
+            + self
+                .hardware
+                .as_ref()
+                .map_or(0, |h| pixel_bytes(h.pixels.as_ref()))
+            + pixel_bytes(self.encoder_pixels.as_ref())
+    }
+    fn projected_bytes(&self, target: DisplayTarget, image: Option<usize>, encoder: bool) -> usize {
+        if encoder {
+            return self.pixel_bytes() - pixel_bytes(self.encoder_pixels.as_ref())
+                + image.unwrap_or_else(|| pixel_bytes(self.encoder_pixels.as_ref()));
+        }
+        let software = pixel_bytes(self.plugin_pixels.as_ref());
+        let hardware = self
+            .hardware
+            .as_ref()
+            .map_or(software, |h| pixel_bytes(h.pixels.as_ref()));
+        pixel_bytes(self.user_pixels.as_ref())
+            + pixel_bytes(self.encoder_pixels.as_ref())
+            + if target == DisplayTarget::Hardware {
+                software
+            } else {
+                image.unwrap_or(software)
+            }
+            + if self.hardware.is_some() || target != DisplayTarget::Both {
+                if target == DisplayTarget::Software {
+                    hardware
+                } else {
+                    image.unwrap_or(hardware)
+                }
+            } else {
+                0
+            }
+    }
+}
+
 pub(super) type States = BTreeMap<u64, StateAppearance>;
 
 /// Missing plugin artwork is derived, never written into saved action state.
@@ -142,6 +225,19 @@ pub(super) fn migrate(slot: &mut Slot, actions: &[Action]) {
                         ..Default::default()
                     },
                 );
+            }
+        }
+    }
+    if slot.controller == "Encoder" {
+        // Earlier Deckforge builds stored app-only dial setImage in the LCD
+        // fallback cache. Move those runtime pixels without touching user images.
+        for (state, entry) in &mut slot.appearances {
+            if entry.encoder_pixels.is_none() && entry.plugin_pixels.is_some() {
+                entry.encoder_pixels = entry.plugin_pixels.take();
+                if *state == slot.state {
+                    slot.background = None;
+                    slot.image_changed = false;
+                }
             }
         }
     }
@@ -277,11 +373,11 @@ fn prepare(
         .appearances
         .iter()
         .map(|(index, a)| {
-            a.plugin_pixels.as_ref().map_or(0, |p| p.as_bytes().len())
-                + if *index == state {
-                    0
+            a.pixel_bytes()
+                - if *index == state {
+                    pixel_bytes(a.user_pixels.as_ref())
                 } else {
-                    a.user_pixels.as_ref().map_or(0, |p| p.as_bytes().len())
+                    0
                 }
         })
         .sum();
@@ -599,6 +695,152 @@ pub(super) fn legacy(host: &mut Host, request: &Value) -> Result<()> {
     host.render()
 }
 
+impl Host {
+    /// A disposable physical view. Saved state and editor previews stay canonical
+    /// software values; the same renderer handles both surfaces.
+    pub(super) fn hardware_projection(&mut self, mut slot: Slot) -> Slot {
+        fn project(host: &mut Host, slot: &mut Slot) {
+            if let Some(entry) = slot.appearances.get_mut(&slot.state)
+                && let Some(hardware) = entry.hardware.take()
+            {
+                entry.plugin_title = hardware.title;
+                entry.plugin_pixels = hardware.pixels;
+                slot.title = title(slot, &host.actions);
+                slot.background = host.resolve_state_image(slot, slot.state);
+            }
+            for child in slot.children.iter_mut().flatten() {
+                project(host, child);
+            }
+        }
+        project(self, &mut slot);
+        slot
+    }
+
+    pub(super) fn apply_plugin_display(
+        &mut self,
+        slot: &mut Slot,
+        root: &Path,
+        event: &str,
+        payload: &Value,
+    ) -> Result<()> {
+        let target = DisplayTarget::parse(payload)?;
+        let encoder_image = slot.controller == "Encoder" && event == "setImage";
+        if slot.controller == "Encoder" {
+            ensure!(
+                target != DisplayTarget::Hardware,
+                "Encoder setImage updates the app icon; use setFeedback for the touch display"
+            );
+            ensure!(
+                event != "setTitle" || target == DisplayTarget::Both,
+                "Targeted encoder setTitle is not established; use setFeedback for its title"
+            );
+        }
+        let field = if event == "setImage" {
+            "image"
+        } else {
+            "title"
+        };
+        let value = match payload.get(field) {
+            None | Some(Value::Null) => None,
+            Some(value) => Some(
+                value
+                    .as_str()
+                    .with_context(|| format!("{field} must be text or null"))?,
+            ),
+        };
+        if event == "setTitle" {
+            ensure!(
+                value.is_none_or(|v| v.len() <= 4096),
+                "Title exceeds 4096 bytes"
+            );
+        }
+        migrate(slot, &self.actions);
+        let count = count(slot, &self.actions);
+        ensure!(count <= 1024, "Action state count exceeds limit");
+        let states: BTreeSet<_> = if let Some(state) = payload.get("state") {
+            let state = state.as_u64().context("Invalid state")?;
+            ensure!(state < count as u64 && state < 1024, "State out of range");
+            BTreeSet::from([state])
+        } else {
+            (0..count as u64).collect()
+        };
+        let image = if event == "setImage" {
+            value
+                .filter(|v| !v.is_empty())
+                .map(|value| load_image(root, value))
+                .transpose()?
+        } else {
+            None
+        };
+        // Calculate the complete result before cloning pixels across states or
+        // splitting a shared plane. Title-only writes can also require a split.
+        let image_size = (event == "setImage").then(|| pixel_bytes(image.as_ref()));
+        let all_states: BTreeSet<_> = slot
+            .appearances
+            .keys()
+            .copied()
+            .chain(states.iter().copied())
+            .collect();
+        let total: usize = all_states
+            .iter()
+            .map(|state| {
+                let empty = StateAppearance::default();
+                let entry = slot.appearances.get(state).unwrap_or(&empty);
+                if states.contains(state) {
+                    entry.projected_bytes(target, image_size, encoder_image)
+                } else {
+                    entry.pixel_bytes()
+                }
+            })
+            .sum();
+        ensure!(
+            total <= 64 * 1024 * 1024,
+            "Action image states exceed 64 MiB decoded pixels"
+        );
+        let affects_current = states.contains(&slot.state);
+        for state in states {
+            let entry = slot.appearances.entry(state).or_default();
+            if encoder_image {
+                entry.encoder_pixels = image.clone();
+                continue;
+            }
+            if target != DisplayTarget::Both {
+                entry.split_hardware();
+            }
+            if event == "setTitle" {
+                let title = value.map(str::to_owned);
+                if target != DisplayTarget::Hardware {
+                    entry.plugin_title = title.clone();
+                }
+                if target != DisplayTarget::Software
+                    && let Some(hardware) = &mut entry.hardware
+                {
+                    hardware.title = title;
+                }
+            } else {
+                if target != DisplayTarget::Hardware {
+                    entry.plugin_pixels = image.clone();
+                }
+                if target != DisplayTarget::Software
+                    && let Some(hardware) = &mut entry.hardware
+                {
+                    hardware.pixels = image.clone();
+                }
+            }
+        }
+        if affects_current && target != DisplayTarget::Hardware {
+            if event == "setTitle" {
+                slot.title = title(slot, &self.actions);
+                slot.title_changed = false;
+            } else {
+                slot.background = self.resolve_state_image(slot, slot.state);
+                slot.image_changed = false;
+            }
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -622,6 +864,126 @@ mod tests {
         let path = dir.join(name);
         fs::write(&path,format!(r#"<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><rect width="8" height="8" fill="{color}"/></svg>"#)).unwrap();
         path
+    }
+    #[test]
+    fn targeted_titles_reset_independently_and_blank_is_not_a_reset() {
+        let (_dir, controller) = setup();
+        let mut host = controller.shared.lock().unwrap();
+        for (target, text) in [(0, "Shared"), (1, "Hardware"), (2, "Editor")] {
+            host.plugin_message(0, json!({"event":"setTitle","context":"test.context","payload":{"title":text,"target":target}})).unwrap();
+        }
+        let software = host.slots[0].clone();
+        assert_eq!(software.title, "Editor");
+        assert_eq!(host.hardware_projection(software).title, "Hardware");
+        host.plugin_message(
+            0,
+            json!({"event":"setTitle","context":"test.context","payload":{"target":2}}),
+        )
+        .unwrap();
+        let software = host.slots[0].clone();
+        assert_eq!(software.title, "Zero");
+        assert_eq!(host.hardware_projection(software).title, "Hardware");
+        host.plugin_message(
+            0,
+            json!({"event":"setTitle","context":"test.context","payload":{"target":1,"title":""}}),
+        )
+        .unwrap();
+        let software = host.slots[0].clone();
+        assert_eq!(host.hardware_projection(software).title, "");
+        host.plugin_message(
+            0,
+            json!({"event":"setTitle","context":"test.context","payload":{"target":1}}),
+        )
+        .unwrap();
+        let software = host.slots[0].clone();
+        assert_eq!(host.hardware_projection(software).title, "Zero");
+        assert!(host.slots[0].appearances[&1].plugin_title.is_none());
+    }
+    #[test]
+    fn malformed_display_payloads_leave_the_action_unchanged() {
+        let (_dir, controller) = setup();
+        let mut host = controller.shared.lock().unwrap();
+        let before = serde_json::to_value(&host.slots[0]).unwrap();
+        for (event, payload) in [
+            ("setTitle", json!({"target":"2","title":"bad"})),
+            ("setImage", json!({"target":null,"image":""})),
+            ("setTitle", json!({"title":42})),
+            ("setImage", json!({"image":{}})),
+            ("setImage", json!({"state":true,"image":""})),
+            ("setTitle", json!({"title":"x".repeat(4097)})),
+        ] {
+            assert!(
+                host.plugin_message(
+                    0,
+                    json!({"event":event,"context":"test.context","payload":payload})
+                )
+                .is_err()
+            );
+            assert_eq!(serde_json::to_value(&host.slots[0]).unwrap(), before);
+        }
+    }
+    #[test]
+    fn title_only_target_split_checks_pixel_budget_before_cloning_all_states() {
+        let (_dir, controller) = setup();
+        let mut host = controller.shared.lock().unwrap();
+        host.slots[0].states = json!(vec![json!({}); 11]);
+        let pixels = DynamicImage::ImageRgb8(RgbImage::new(1024, 1024));
+        for state in 0..11 {
+            host.slots[0].appearances.insert(
+                state,
+                StateAppearance {
+                    plugin_pixels: Some(pixels.clone()),
+                    ..Default::default()
+                },
+            );
+        }
+        let error = host.plugin_message(0,json!({"event":"setTitle","context":"test.context","payload":{"target":1,"title":"Device"}})).unwrap_err();
+        assert!(error.to_string().contains("64 MiB"));
+        assert!(
+            host.slots[0]
+                .appearances
+                .values()
+                .all(|a| a.hardware.is_none() && a.plugin_title.is_none())
+        );
+    }
+    #[test]
+    fn legacy_encoder_runtime_image_migrates_without_relabelling_user_artwork() {
+        let (_dir, controller) = setup();
+        let mut host = controller.shared.lock().unwrap();
+        let slot = &mut host.slots[0];
+        slot.controller = "Encoder".into();
+        slot.image_changed = true;
+        let runtime = DynamicImage::ImageRgb8(RgbImage::from_pixel(4, 4, Rgb([10, 20, 30])));
+        let user = DynamicImage::ImageRgb8(RgbImage::from_pixel(4, 4, Rgb([40, 50, 60])));
+        slot.background = Some(runtime.clone());
+        slot.appearances.insert(
+            0,
+            StateAppearance {
+                plugin_pixels: Some(runtime.clone()),
+                user_pixels: Some(user.clone()),
+                ..Default::default()
+            },
+        );
+        migrate(slot, &[]);
+        assert!(slot.appearances[&0].plugin_pixels.is_none());
+        assert_eq!(
+            slot.appearances[&0]
+                .encoder_pixels
+                .as_ref()
+                .unwrap()
+                .as_bytes(),
+            runtime.as_bytes()
+        );
+        assert_eq!(
+            slot.appearances[&0]
+                .user_pixels
+                .as_ref()
+                .unwrap()
+                .as_bytes(),
+            user.as_bytes()
+        );
+        assert!(!slot.image_changed);
+        assert!(slot.background.is_none());
     }
     #[test]
     fn inactive_title_and_style_emit_correct_state_without_changing_live_key() {

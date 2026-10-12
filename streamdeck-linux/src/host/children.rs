@@ -222,6 +222,7 @@ impl Slot {
                         image_cache: HashMap::new(),
                         display_warnings: vec![],
                         preview: String::new(),
+                        software_icon: String::new(),
                     }
                 };
                 child.in_multi_action = multi;

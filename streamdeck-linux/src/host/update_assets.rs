@@ -182,12 +182,17 @@ fn refresh_slot(slot: &mut Slot, old_actions: &[Action], new_actions: &[Action])
         });
         for appearance in slot.appearances.values_mut() {
             appearance.plugin_pixels = None;
+            appearance.encoder_pixels = None;
+            if let Some(hardware) = &mut appearance.hardware {
+                hardware.pixels = None;
+            }
         }
         slot.image_changed = false;
         slot.layout_cache = None;
         slot.image_cache.clear();
         slot.display_warnings.clear();
         slot.preview.clear();
+        slot.software_icon.clear();
     }
     for child in slot.children.iter_mut().flatten() {
         refresh_slot(child, old_actions, new_actions);
@@ -275,6 +280,11 @@ mod tests {
                     user_pixels: user.then(|| authored.clone()),
                     plugin_pixels: Some(image([1, 2, 3])),
                     plugin_title: Some("SDK title retained".into()),
+                    hardware: Some(appearance::PluginAppearance {
+                        title: Some("Hardware title retained".into()),
+                        pixels: Some(image([4, 5, 6])),
+                    }),
+                    encoder_pixels: Some(image([7, 8, 9])),
                     ..Default::default()
                 },
             );
@@ -287,6 +297,24 @@ mod tests {
                 authored.as_bytes()
             );
             assert!(slot.appearances[&0].plugin_pixels.is_none());
+            assert!(slot.appearances[&0].encoder_pixels.is_none());
+            assert!(
+                slot.appearances[&0]
+                    .hardware
+                    .as_ref()
+                    .unwrap()
+                    .pixels
+                    .is_none()
+            );
+            assert_eq!(
+                slot.appearances[&0]
+                    .hardware
+                    .as_ref()
+                    .unwrap()
+                    .title
+                    .as_deref(),
+                Some("Hardware title retained")
+            );
             assert_eq!(
                 slot.appearances[&0].plugin_title.as_deref(),
                 Some("SDK title retained")

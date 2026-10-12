@@ -2,6 +2,7 @@
 import { afterEach, beforeEach, it, expect, vi } from "vitest";
 import {
   cleanup,
+  act,
   render,
   screen,
   fireEvent,
@@ -413,7 +414,7 @@ it("renders Studio rectangular keys and screenless dials with keyboard assignmen
   expect(screen.getAllByRole("button", { name: /^Key \d+:/ })).toHaveLength(32);
   const dials = screen.getAllByRole("button", { name: /^Dial \d+:/ });
   expect(dials).toHaveLength(2);
-  expect(dials.every((dial) => !dial.querySelector("img"))).toBe(true);
+  expect(dials.every((dial) => !dial.querySelector(":scope > img"))).toBe(true);
   expect(lastKey.title).toBe("Key 32: Counter\nKey 32");
   expect(dials[1].title).toBe("Dial 2: Unassigned");
   lastKey.focus();
@@ -530,3 +531,67 @@ it("hides screenless stack appearance without dropping its stored value when beh
     ).checked,
   ).toBe(false);
 });
+
+it.each(["plus", "studio"])(
+  "renders %s dial software icons independently of touchscreen feedback",
+  async (model) => {
+    setup(model);
+    const bridge = window.deckforge!,
+      snapshot = await bridge.request<Snapshot>("snapshot");
+    const dial = snapshot.slots.find((slot) => slot.controller === "Encoder")!;
+    const first =
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aZAAAAABJRU5ErkJggg==";
+    const second =
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+    dial.software_icon = first;
+    let emit!: (snapshot: Snapshot) => void;
+    window.deckforge = {
+      onSnapshot: (callback) => {
+        emit = callback;
+        return () => {};
+      },
+      request: async <T,>(method: string, payload?: unknown) =>
+        method === "snapshot"
+          ? (structuredClone(snapshot) as T)
+          : bridge.request<T>(method, payload),
+    };
+    render(<App />);
+    const button = await screen.findByRole("button", {
+      name: `Dial 1: ${dial.name}`,
+    });
+    const software = () =>
+      button.querySelector<HTMLImageElement>(".dial-knob .dial-software-icon");
+    expect(software()?.getAttribute("src")).toBe(
+      `data:image/png;base64,${first}`,
+    );
+    expect(software()?.draggable).toBe(false);
+    const lcd = button.querySelector<HTMLImageElement>(":scope > img");
+    expect(lcd?.getAttribute("src") ?? null).toBe(
+      model === "plus" ? dial.preview : null,
+    );
+    const lcdBefore = lcd?.getAttribute("src");
+    await act(async () => {
+      dial.software_icon = second;
+      emit(structuredClone(snapshot));
+    });
+    expect(software()?.getAttribute("src")).toBe(
+      `data:image/png;base64,${second}`,
+    );
+    expect(
+      button
+        .querySelector<HTMLImageElement>(":scope > img")
+        ?.getAttribute("src"),
+    ).toBe(lcdBefore);
+    await act(async () => {
+      dial.software_icon = "";
+      emit(structuredClone(snapshot));
+    });
+    expect(software()).toBeNull();
+    expect(button.querySelector(".dial-knob i")).toBeTruthy();
+    expect(
+      button
+        .querySelector<HTMLImageElement>(":scope > img")
+        ?.getAttribute("src"),
+    ).toBe(lcdBefore);
+  },
+);

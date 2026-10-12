@@ -41,6 +41,7 @@ mod device;
 mod device_management;
 mod device_pool;
 mod display;
+mod display_targets;
 mod export;
 mod feedback;
 mod inspectors;
@@ -265,6 +266,8 @@ struct Slot {
     display_warnings: Vec<String>,
     #[serde(skip)]
     preview: String,
+    #[serde(skip)]
+    software_icon: String,
 }
 #[derive(Clone, Serialize)]
 struct Action {
@@ -676,137 +679,60 @@ impl Host {
                 visible.background = Some(image);
             }
         }
+        let candidates = self
+            .slots
+            .iter()
+            .map(|slot| display_targets::has_hardware(slot).then(|| slot.clone()))
+            .collect::<Vec<_>>();
+        let mut projections = candidates
+            .into_iter()
+            .map(|slot| slot.map(|slot| self.hardware_projection(slot)))
+            .collect::<Vec<_>>();
+        let display = display_targets::Display {
+            model: self.model,
+            renderer: &self.renderer,
+            actions: &self.actions,
+            plugins: &self.plugins,
+            badges: &self.badges,
+            now: self.multi_clock.elapsed(),
+        };
         let mut strip = DynamicImage::ImageRgb8(RgbImage::from_pixel(
             self.model.strip_width().max(1),
             self.model.strip_height().max(1),
             Rgb([14, 21, 29]),
         ));
         let mut warnings = Vec::new();
-        for slot in &mut self.slots {
+        for (slot, projection) in self.slots.iter_mut().zip(&mut projections) {
             appearance::apply_user_titles(slot, &self.actions);
+            if slot.controller == "Encoder" {
+                slot.software_icon = display.encoder_icon(slot)?;
+            }
             if slot.controller == "Encoder" && !self.model.capabilities().strip {
-                // Studio encoders have no LCD. Keep SDK metadata/settings, but
-                // neither load a Plus layout nor manufacture a hardware image.
+                // Studio has editor icons but no physical encoder LCD.
                 slot.preview.clear();
+                warnings.append(&mut slot.display_warnings);
                 continue;
             }
-            let mut picture = if !self.actions.iter().any(|action| action.uuid == slot.uuid) {
-                let size = if slot.controller == "Encoder" {
-                    (
-                        self.model.strip_width() / u32::from(self.model.dial_count()).max(1),
-                        self.model.strip_height(),
-                    )
-                } else if slot.controller == "Neo" {
-                    (232, 50)
-                } else if self.model.key_width() == self.model.key_height() {
-                    // Pedal has no physical key pixels; retain its 120x120
-                    // software preview, as for ordinary square-key rendering.
-                    (120, 120)
-                } else {
-                    (self.model.key_width(), self.model.key_height())
-                };
-                appearance::unavailable_picture(&self.renderer, size)
-            } else if slot.controller == "Neo" {
-                let root = self
-                    .actions
-                    .iter()
-                    .find(|a| a.uuid == slot.uuid)
-                    .and_then(|a| self.plugins.iter().find(|p| p.id == a.plugin))
-                    .map(|p| p.root.as_path());
-                display::dial_image(&self.renderer, slot, root, &self.actions)?
-            } else if slot.controller == "Encoder" {
-                let stacked = slot.uuid == crate::dial_stack::UUID;
-                let index = slot.active_stack_index();
-                let has_child = stacked
-                    && slot
-                        .children
-                        .first()
-                        .is_some_and(|children| index < children.len());
-                let show_mark =
-                    has_child && slot.settings["ShowStackIcon"].as_bool().unwrap_or(true);
-                let target = if has_child {
-                    &mut slot.children[0][index]
-                } else {
-                    &mut *slot
-                };
-                let root = self
-                    .actions
-                    .iter()
-                    .find(|a| a.uuid == target.uuid)
-                    .and_then(|a| self.plugins.iter().find(|p| p.id == a.plugin))
-                    .map(|p| p.root.as_path());
-                let mut picture =
-                    if has_child && !self.actions.iter().any(|a| a.uuid == target.uuid) {
-                        let mut placeholder = target.clone();
-                        placeholder.layout = "$X1".into();
-                        placeholder.layout_cache = None;
-                        placeholder.feedback = json!({"title":"Unavailable"});
-                        placeholder.background = None;
-                        display::dial_image(&self.renderer, &mut placeholder, None, &self.actions)?
-                    } else {
-                        if target.uuid == crate::action_trigger::UUID {
-                            trigger::picture(
-                                &self.renderer,
-                                &self.actions,
-                                target,
-                                &self.badges,
-                                self.multi_clock.elapsed(),
-                            )?
-                        } else {
-                            display::dial_image(&self.renderer, target, root, &self.actions)?
-                        }
-                    };
-                warnings.append(&mut target.display_warnings);
-                if has_child {
-                    let mut preview = Cursor::new(Vec::new());
-                    picture.write_to(&mut preview, image::ImageFormat::Png)?;
-                    target.preview = STANDARD.encode(preview.into_inner());
-                }
-                if show_mark {
-                    stack::mark(&mut picture);
-                }
-                picture
+            let software = display.picture(slot, &mut warnings)?;
+            slot.preview = display_targets::png(&software)?;
+            let physical = if let Some(projected) = projection {
+                appearance::apply_user_titles(projected, &self.actions);
+                display.picture(projected, &mut Vec::new())?
             } else {
-                let size = if self.model.key_width() != self.model.key_height() {
-                    (self.model.key_width(), self.model.key_height())
-                } else {
-                    (120, 120)
-                };
-                let mut picture = self.renderer.key_styled_size(
-                    &slot.title,
-                    slot.background.as_ref(),
-                    &appearance::style(slot, &self.actions),
-                    size,
-                );
-                feedback::paint_key(&self.badges, &mut picture, slot, self.multi_clock.elapsed());
-                picture
+                software
             };
-            if slot.controller == "Encoder" {
-                feedback::paint_dial(&self.badges, &mut picture, slot, self.multi_clock.elapsed());
-            }
-            if slot.controller == "Keypad" && self.model.capabilities().key_images {
-                picture = picture.resize_exact(
-                    self.model.key_width(),
-                    self.model.key_height(),
-                    image::imageops::FilterType::Lanczos3,
-                );
-            }
-            let mut png = Cursor::new(Vec::new());
-            picture.write_to(&mut png, image::ImageFormat::Png)?;
-            slot.preview = STANDARD.encode(png.into_inner());
-            warnings.append(&mut slot.display_warnings);
             if slot.controller == "Encoder" && self.model.capabilities().strip {
                 strip.copy_from(
-                    &picture,
+                    &physical,
                     slot.index as u32
                         * (self.model.strip_width() / u32::from(self.model.dial_count()).max(1)),
                     0,
                 )?;
             } else if let Some(hardware) = &self.hardware {
                 if slot.controller == "Neo" {
-                    let _ = hardware.send(Draw::Infobar(picture));
+                    let _ = hardware.send(Draw::Infobar(physical));
                 } else if self.model.capabilities().key_images {
-                    let _ = hardware.send(Draw::Key(slot.index, picture));
+                    let _ = hardware.send(Draw::Key(slot.index, physical));
                 }
             }
         }
@@ -961,6 +887,7 @@ impl Host {
             image_cache: HashMap::new(),
             display_warnings: Vec::new(),
             preview: String::new(),
+            software_icon: String::new(),
         };
         if let Some(plugin) = self.plugins.iter().find(|p| p.id == action.plugin) {
             slot.background = state_image(&plugin.root, &slot.states, 0);
@@ -1472,78 +1399,8 @@ impl Host {
         // Validate a replacement before exposing it to any display or saved state.
         let mut replacement = original;
         let slot = &mut replacement;
-        if matches!(event, "setImage" | "setTitle")
-            && payload.get("target").is_some_and(|v| v.as_u64() != Some(0))
-        {
-            bail!("Separate hardware/software targets are not implemented");
-        }
         match event {
-            "setTitle" | "setImage" => {
-                let count = appearance::count(slot, &self.actions);
-                anyhow::ensure!(count <= 1024, "Action state count exceeds limit");
-                let states = if let Some(state) = payload.get("state") {
-                    let state = state.as_u64().context("Invalid state")?;
-                    anyhow::ensure!(state < count as u64 && state < 1024, "State out of range");
-                    vec![state]
-                } else {
-                    (0..count as u64).collect()
-                };
-                let image = if event == "setImage" {
-                    match payload
-                        .get("image")
-                        .and_then(Value::as_str)
-                        .filter(|s| !s.is_empty())
-                    {
-                        Some(source) => Some(load_image(&root, source)?),
-                        None => None,
-                    }
-                } else {
-                    None
-                };
-                if event == "setImage" {
-                    let existing: usize = slot
-                        .appearances
-                        .iter()
-                        .map(|(state, a)| {
-                            a.user_pixels.as_ref().map_or(0, |p| p.as_bytes().len())
-                                + if states.contains(state) {
-                                    0
-                                } else {
-                                    a.plugin_pixels.as_ref().map_or(0, |p| p.as_bytes().len())
-                                }
-                        })
-                        .sum();
-                    let updated = image
-                        .as_ref()
-                        .map_or(0, |p| p.as_bytes().len())
-                        .saturating_mul(states.len());
-                    anyhow::ensure!(
-                        existing.saturating_add(updated) <= 64 * 1024 * 1024,
-                        "Action image states exceed 64 MiB decoded pixels"
-                    );
-                }
-                let affects_current = states.contains(&slot.state);
-                for state in states {
-                    let entry = slot.appearances.entry(state).or_default();
-                    if event == "setTitle" {
-                        entry.plugin_title = payload
-                            .get("title")
-                            .and_then(Value::as_str)
-                            .map(str::to_owned);
-                    } else {
-                        entry.plugin_pixels = image.clone();
-                    }
-                }
-                if affects_current {
-                    if event == "setTitle" {
-                        slot.title = appearance::title(slot, &self.actions);
-                        slot.title_changed = false;
-                    } else {
-                        slot.background = self.resolve_state_image(slot, slot.state);
-                        slot.image_changed = false;
-                    }
-                }
-            }
+            "setTitle" | "setImage" => self.apply_plugin_display(slot, &root, event, &payload)?,
             "setState" => {
                 let state = payload["state"].as_u64().context("Invalid state")?;
                 anyhow::ensure!(
@@ -1658,7 +1515,7 @@ async fn root(
     Html(include_str!("ui.html").replace("__TOKEN__", &token)).into_response()
 }
 fn slot_snapshot(host: &Host, s: &Slot) -> Value {
-    json!({"appearance":appearance::snapshot(s,&host.actions),"state_count":appearance::count(s,&host.actions),"plugin_disabled":host.action_plugin_disabled(&s.uuid),"available":host.actions.iter().any(|a|a.uuid==s.uuid)&&!host.action_plugin_disabled(&s.uuid),"pinned":s.pinned,"context":s.context,"controller":s.controller,"index":s.index,"uuid":s.uuid,"name":host.presented_slot_name(s),"state_names":host.state_names(s),"settings":s.settings,"resources":s.resources.clone().unwrap_or_default(),"title":s.title,"state":s.state,"feedback":s.feedback,"layout":s.layout,"preview":s.preview,"raw":s.raw,
+    json!({"appearance":appearance::snapshot(s,&host.actions),"state_count":appearance::count(s,&host.actions),"plugin_disabled":host.action_plugin_disabled(&s.uuid),"available":host.actions.iter().any(|a|a.uuid==s.uuid)&&!host.action_plugin_disabled(&s.uuid),"pinned":s.pinned,"context":s.context,"controller":s.controller,"index":s.index,"uuid":s.uuid,"name":host.presented_slot_name(s),"state_names":host.state_names(s),"settings":s.settings,"resources":s.resources.clone().unwrap_or_default(),"title":s.title,"state":s.state,"feedback":s.feedback,"layout":s.layout,"preview":s.preview,"software_icon":s.software_icon,"raw":s.raw,
         "trigger_description":host.trigger_description(s),
         "trigger_children":if s.uuid==crate::action_trigger::UUID {s.children.iter().map(|g|g.first().map(|c|slot_snapshot(host,c)).unwrap_or(Value::Null)).collect::<Vec<_>>()}else{vec![]},
         "stack_children":if s.uuid==crate::dial_stack::UUID {s.children.first().map(|children|children.iter().map(|c|slot_snapshot(host,c)).collect::<Vec<_>>()).unwrap_or_default()}else{vec![]},
@@ -3375,6 +3232,7 @@ mod tests {
                 image_cache: HashMap::new(),
                 display_warnings: Vec::new(),
                 preview: String::new(),
+                software_icon: String::new(),
             }],
             globals: HashMap::new(),
             application_mappings: HashMap::new(),
@@ -3569,12 +3427,12 @@ mod tests {
         );
     }
     #[test]
-    fn inactive_state_updates_do_not_change_live_title_and_separate_targets_remain_explicit() {
+    fn inactive_state_updates_do_not_change_live_title_and_invalid_targets_are_atomic() {
         let temp = tempfile::tempdir().unwrap();
         let mut host = fixture(temp.path());
         host.plugin_message(0,json!({"event":"setTitle","context":"test.context","payload":{"title":"inactive","state":1}})).unwrap();
         assert_eq!(host.slots[0].title, "before");
-        assert!(host.plugin_message(0,json!({"event":"setTitle","context":"test.context","payload":{"title":"bad","target":2}})).is_err());
+        assert!(host.plugin_message(0,json!({"event":"setTitle","context":"test.context","payload":{"title":"bad","target":99}})).is_err());
         assert_eq!(host.slots[0].title, "before");
         host.plugin_message(
             0,

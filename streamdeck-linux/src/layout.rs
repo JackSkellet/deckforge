@@ -177,7 +177,10 @@ pub fn resolved_items(layout: &Value, feedback: &Value) -> Result<Vec<Value>> {
             item["value"] = update.clone();
         }
     }
-    let resolved = json!({"id":layout["id"],"items":items});
+    let mut resolved = json!({"id":layout["id"],"items":items});
+    if let Some(controller) = layout.get("controller") {
+        resolved["controller"] = controller.clone();
+    }
     validate(&resolved)?;
     items.sort_by_key(|v| v["zOrder"].as_u64().unwrap_or(0));
     Ok(items)

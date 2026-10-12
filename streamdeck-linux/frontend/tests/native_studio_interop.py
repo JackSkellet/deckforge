@@ -38,7 +38,7 @@ await command({command:'assign',controller:'Encoder',index:1,uuid:'com.elgato.st
 await until(()=>!dials()[1].getAttribute('aria-label').includes('Unassigned'),'dial assignment');
 dials()[1].click();
 await until(()=>document.body.textContent.includes('Studio LED and ring feedback is not supported.'),'screenless feedback boundary');
-if(dials().some(dial=>dial.querySelector('img')))throw Error('Studio dial rendered a fake screen');
+if(dials().some(dial=>dial.querySelector(':scope > img')))throw Error('Studio dial rendered a fake screen');
 if(document.querySelector('.appearance-preview'))throw Error('Studio dial offered display appearance');
 const button=name=>[...document.querySelectorAll('button')].find(b=>b.textContent.trim()===name);
 if(document.body.textContent.includes('Show stack icon'))throw Error('Screenless dial offered stack display option');
