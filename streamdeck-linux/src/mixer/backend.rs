@@ -51,7 +51,21 @@ struct Identity {
     process: Option<String>,
     binary: Option<String>,
     app: Option<String>,
+    #[serde(default)]
+    desktop_app: Option<String>,
     name: String,
+}
+impl Identity {
+    // Desktop resolution is derived metadata. Installing/removing a launcher
+    // must not turn a still-running audio stream into a different owner.
+    fn same_stream(&self, other: &Self) -> bool {
+        self.index == other.index
+            && self.client == other.client
+            && self.process == other.process
+            && self.binary == other.binary
+            && self.app == other.app
+            && self.name == other.name
+    }
 }
 #[derive(Clone)]
 struct Input {
@@ -92,6 +106,8 @@ struct Moved {
 }
 
 pub(super) struct Engine {
+    catalog: discovery::Catalog,
+    catalog_at: Instant,
     namespace: String,
     session: String,
     journal: Option<journal::Journal>,
@@ -100,7 +116,7 @@ pub(super) struct Engine {
     pending_loads: BTreeMap<String, (String, String)>,
     moved: BTreeMap<u32, Moved>,
     yielded: BTreeSet<Identity>,
-    last_members: Vec<(String, Vec<AppSelector>)>,
+    last_members: Vec<(String, Vec<AppSelector>, bool)>,
     last_enabled: bool,
     paused: BTreeSet<String>,
     meters: BTreeMap<String, meter::Meter>,
@@ -111,6 +127,8 @@ pub(super) struct Engine {
 impl Engine {
     pub fn new(namespace: String) -> Self {
         Self {
+            catalog: discovery::Catalog::default(),
+            catalog_at: Instant::now(),
             namespace,
             session: uuid::Uuid::new_v4().simple().to_string(),
             journal: None,
@@ -129,7 +147,12 @@ impl Engine {
         }
     }
     pub fn update(&mut self, config: &Config, stop: &AtomicBool) -> Snapshot {
+        if Instant::now() >= self.catalog_at {
+            self.catalog = discovery::Catalog::scan(stop);
+            self.catalog_at = Instant::now() + Duration::from_secs(5);
+        }
         let mut snapshot = Snapshot {
+            applications: self.catalog.applications(&BTreeSet::new()),
             config: config.clone(),
             ..Snapshot::default()
         };
@@ -145,6 +168,7 @@ impl Engine {
                 self.connection = Some(Connection::new(stop)?);
             }
             let mut connection = self.connection.take().unwrap();
+            connection.catalog = self.catalog.clone();
             self.meter_client = connection.context.get_index();
             let result = (|| -> Result<()> {
                 if !config.enabled {
@@ -166,16 +190,7 @@ impl Engine {
                     .collect();
                 self.adopt_pending(&inv);
                 snapshot.connected = true;
-                let members = config
-                    .channels
-                    .iter()
-                    .map(|c| (c.id.clone(), c.apps.clone()))
-                    .collect::<Vec<_>>();
-                if members != self.last_members || (config.enabled && !self.last_enabled) {
-                    self.yielded.clear();
-                    self.last_members = members;
-                }
-                self.last_enabled = config.enabled;
+                self.update_memberships(config);
                 if config.enabled {
                     let targets = self.meter_targets(config, &inv);
                     self.trim_meters(&targets);
@@ -217,6 +232,13 @@ impl Engine {
                     })
                     .map(|i| i.app.clone())
                     .collect();
+                snapshot.applications = self.catalog.applications(
+                    &snapshot
+                        .apps
+                        .iter()
+                        .filter_map(|a| a.desktop_application.clone())
+                        .collect(),
+                );
                 snapshot.active = config.enabled && !ids.is_empty();
                 if config.enabled {
                     self.reconcile_meters(&mut connection, config, &inv, &mut snapshot.warnings);
@@ -431,7 +453,7 @@ impl Engine {
                 .filter(|(_, m)| {
                     inv.inputs
                         .iter()
-                        .any(|i| i.identity == m.identity && i.app.sink == m.target)
+                        .any(|i| i.identity.same_stream(&m.identity) && i.app.sink == m.target)
                         && inv.sinks.iter().any(|s| {
                             s.device.name == m.target
                                 && s.module.is_some_and(|id| ids.contains(&id))
@@ -769,6 +791,32 @@ impl Engine {
         }
         Ok(())
     }
+    fn update_memberships(&mut self, config: &Config) {
+        let members = config
+            .channels
+            .iter()
+            .map(|c| (c.id.clone(), c.apps.clone(), c.capture_unassigned))
+            .collect::<Vec<_>>();
+        if config.enabled && !self.last_enabled {
+            // Re-enabling routing is an explicit request to take ownership again.
+            self.yielded.clear();
+        } else if members != self.last_members {
+            self.yielded.retain(|identity| {
+                let target = |entries: &[(String, Vec<AppSelector>, bool)]| {
+                    selected_target(
+                        entries
+                            .iter()
+                            .map(|(id, apps, default)| (id.as_str(), apps.as_slice(), *default)),
+                        identity,
+                    )
+                    .map(|v| v.map(str::to_owned))
+                };
+                target(&self.last_members) == target(&members)
+            });
+        }
+        self.last_members = members;
+        self.last_enabled = config.enabled;
+    }
     fn sync_apps(
         &mut self,
         c: &mut Connection,
@@ -778,10 +826,7 @@ impl Engine {
         stop: &AtomicBool,
     ) -> Result<()> {
         self.restore(c, inv, warnings, stop, |m| {
-            !config
-                .channels
-                .iter()
-                .any(|ch| ch.apps.iter().any(|s| matches_app(s, &m.identity)))
+            selected_channel(config, &m.identity).is_ok_and(|channel| channel.is_none())
         })?;
         let ids = self.verified_ids(inv);
         for input in &inv.inputs {
@@ -789,30 +834,34 @@ impl Engine {
                 continue;
             }
             if let Some(previous) = self.moved.get(&input.app.index)
-                && (previous.identity != input.identity || input.app.sink != previous.target)
+                && (!previous.identity.same_stream(&input.identity)
+                    || input.app.sink != previous.target)
             {
                 self.moved.remove(&input.app.index);
                 self.yielded.insert(input.identity.clone());
             }
-            if self.yielded.contains(&input.identity) {
-                continue;
-            }
-            let matches = config
-                .channels
+            if self
+                .yielded
                 .iter()
-                .filter(|ch| ch.apps.iter().any(|s| matches_app(s, &input.identity)))
-                .collect::<Vec<_>>();
-            if matches.len() > 1 {
-                warnings.push(format!(
-                    "App {} matches more than one channel; no routing changed",
-                    input.app.name
-                ));
+                .any(|identity| identity.same_stream(&input.identity))
+            {
                 continue;
             }
-            let Some(channel) = matches.first() else {
-                continue;
+            let channel = match selected_channel(config, &input.identity) {
+                Ok(Some(channel)) => channel,
+                Ok(None) => continue,
+                Err(()) => {
+                    warnings.push(format!(
+                        "App {} matches more than one channel; no routing changed",
+                        input.app.name
+                    ));
+                    continue;
+                }
             };
             let target = channel_sink(&self.namespace, &channel.id);
+            if default_must_yield(channel, input, &target, &self.moved, inv, &ids) {
+                continue;
+            }
             if input.app.sink == target {
                 continue;
             }
@@ -865,7 +914,7 @@ impl Engine {
             let Some(current) = inv
                 .inputs
                 .iter()
-                .find(|i| i.app.index == id && i.identity == moved.identity)
+                .find(|i| i.app.index == id && i.identity.same_stream(&moved.identity))
             else {
                 self.moved.remove(&id);
                 continue;
@@ -1071,16 +1120,70 @@ fn reject_monitor_cycles(config: &Config, inv: &Inventory) -> Result<()> {
     }
     Ok(())
 }
+/// Explicit assignments win. Ambiguous explicit selectors never become catch-all.
+fn selected_channel<'a>(
+    config: &'a Config,
+    identity: &Identity,
+) -> std::result::Result<Option<&'a Channel>, ()> {
+    let target = selected_target(
+        config
+            .channels
+            .iter()
+            .map(|ch| (ch.id.as_str(), ch.apps.as_slice(), ch.capture_unassigned)),
+        identity,
+    )?;
+    Ok(target.and_then(|id| config.channels.iter().find(|ch| ch.id == id)))
+}
+fn selected_target<'a>(
+    channels: impl Iterator<Item = (&'a str, &'a [AppSelector], bool)>,
+    identity: &Identity,
+) -> std::result::Result<Option<&'a str>, ()> {
+    let mut selected = None;
+    let mut fallback = None;
+    for (id, apps, default) in channels {
+        if default {
+            fallback = Some(id);
+        }
+        if apps.iter().any(|s| matches_app(s, identity)) {
+            if selected.is_some() {
+                return Err(());
+            }
+            selected = Some(id);
+        }
+    }
+    Ok(selected.or(fallback))
+}
+
+fn default_must_yield(
+    channel: &Channel,
+    input: &Input,
+    target: &str,
+    moved: &BTreeMap<u32, Moved>,
+    inv: &Inventory,
+    owned: &BTreeSet<u32>,
+) -> bool {
+    // A direct route to an owned channel is already an intentional assignment.
+    // Our own previously moved stream can still follow a changed default group.
+    channel.capture_unassigned
+        && !channel.apps.iter().any(|s| matches_app(s, &input.identity))
+        && input.app.sink != target
+        && !moved.contains_key(&input.app.index)
+        && inv.sinks.iter().any(|sink| {
+            sink.device.name == input.app.sink && sink.module.is_some_and(|id| owned.contains(&id))
+        })
+}
 fn matches_app(selector: &AppSelector, identity: &Identity) -> bool {
     match selector {
         AppSelector::ApplicationId(v) => identity.app.as_ref() == Some(v),
         AppSelector::ProcessBinary(v) => identity.binary.as_ref() == Some(v),
+        AppSelector::DesktopApplication(v) => identity.desktop_app.as_ref() == Some(v),
     }
 }
 fn quote(value: &str) -> String {
     format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
 }
 struct Connection {
+    catalog: discovery::Catalog,
     context: Context,
     mainloop: Mainloop,
     deadline: Option<Instant>,
@@ -1094,6 +1197,7 @@ impl Connection {
             .connect(None, pulse::context::FlagSet::NOAUTOSPAWN, None)
             .context("Connect to audio server")?;
         let mut c = Self {
+            catalog: discovery::Catalog::default(),
             context,
             mainloop,
             deadline: None,
@@ -1283,6 +1387,7 @@ impl Connection {
             .map(|s| (s.index, s.device.name.clone()))
             .collect();
         self.ready(stop)?;
+        let catalog = self.catalog.clone();
         let mut op = self
             .context
             .introspect()
@@ -1294,18 +1399,29 @@ impl Connection {
                         .unwrap_or_else(|| i.name.as_deref().unwrap_or("Audio stream").into());
                     let app = i.proplist.get_str("application.id");
                     let binary = i.proplist.get_str("application.process.binary");
+                    let process = i.proplist.get_str("application.process.id");
+                    let desktop = i.proplist.get_str("application.desktop");
+                    let desktop_app = catalog.resolve(
+                        app.as_deref(),
+                        desktop.as_deref(),
+                        binary.as_deref(),
+                        process.as_deref(),
+                        &name,
+                    );
                     to.borrow_mut().push(Input {
                         app: App {
                             index: i.index,
                             name: name.clone(),
                             application_id: app.clone(),
                             process_binary: binary.clone(),
+                            desktop_application: desktop_app.clone(),
                             sink: lookup.get(&i.sink).cloned().unwrap_or_default(),
                         },
                         identity: Identity {
                             index: i.index,
                             client: i.client,
-                            process: i.proplist.get_str("application.process.id"),
+                            process,
+                            desktop_app,
                             binary,
                             app,
                             name: i.name.as_deref().unwrap_or("").into(),
@@ -1641,6 +1757,7 @@ mod tests {
             process: Some("5".into()),
             binary: Some("discord".into()),
             app: Some("com.discord.App".into()),
+            desktop_app: Some("com.discord.App.desktop".into()),
             name: "Discord".into(),
         };
         assert!(matches_app(
@@ -1651,6 +1768,238 @@ mod tests {
             &AppSelector::ProcessBinary("Discord".into()),
             &id
         ));
+    }
+    #[test]
+    fn default_group_yields_to_explicit_assignments_and_ambiguity() {
+        let identity = Identity {
+            index: 1,
+            client: Some(2),
+            process: None,
+            binary: Some("player".into()),
+            app: None,
+            desktop_app: Some("player.desktop".into()),
+            name: "Stream".into(),
+        };
+        let mut config = Config {
+            channels: vec![
+                Channel {
+                    id: "default".into(),
+                    name: "Other apps".into(),
+                    capture_unassigned: true,
+                    ..Default::default()
+                },
+                Channel {
+                    id: "music".into(),
+                    name: "Music".into(),
+                    apps: vec![AppSelector::DesktopApplication("player.desktop".into())],
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        config.validate().unwrap();
+        assert_eq!(
+            selected_channel(&config, &identity).unwrap().unwrap().id,
+            "music"
+        );
+        let mut unmatched = identity.clone();
+        unmatched.desktop_app = None;
+        assert_eq!(
+            selected_channel(&config, &unmatched).unwrap().unwrap().id,
+            "default"
+        );
+        config.channels.push(Channel {
+            id: "overlap".into(),
+            name: "Overlap".into(),
+            apps: vec![AppSelector::ProcessBinary("player".into())],
+            ..Default::default()
+        });
+        assert!(selected_channel(&config, &identity).is_err());
+        config.channels[2].capture_unassigned = true;
+        assert!(config.validate().is_err());
+        config.channels[0].capture_unassigned = false;
+        config.channels[2].capture_unassigned = false;
+        config.channels[2].apps.clear();
+        assert!(selected_channel(&config, &unmatched).unwrap().is_none());
+    }
+    #[test]
+    fn membership_changes_reset_only_affected_manual_routes() {
+        let identity = Identity {
+            index: 1,
+            client: Some(2),
+            process: None,
+            binary: Some("player".into()),
+            app: None,
+            desktop_app: Some("player.desktop".into()),
+            name: "Stream".into(),
+        };
+        let mut config = Config {
+            enabled: true,
+            channels: vec![
+                Channel {
+                    id: "default".into(),
+                    capture_unassigned: true,
+                    ..Default::default()
+                },
+                Channel {
+                    id: "music".into(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let mut engine = Engine::new("fixture".into());
+        engine.update_memberships(&config);
+        engine.yielded.insert(identity.clone());
+        config.channels[1]
+            .apps
+            .push(AppSelector::DesktopApplication("unrelated.desktop".into()));
+        engine.update_memberships(&config);
+        assert!(
+            engine.yielded.contains(&identity),
+            "Unrelated assignment must preserve manual route"
+        );
+        config.channels[1]
+            .apps
+            .push(AppSelector::DesktopApplication("player.desktop".into()));
+        engine.update_memberships(&config);
+        assert!(
+            engine.yielded.is_empty(),
+            "Changed explicit destination resets only affected stream"
+        );
+        engine.yielded.insert(identity.clone());
+        config.channels[0].capture_unassigned = false;
+        config.channels.push(Channel {
+            id: "new-default".into(),
+            capture_unassigned: true,
+            ..Default::default()
+        });
+        engine.update_memberships(&config);
+        assert!(
+            engine.yielded.contains(&identity),
+            "Explicitly assigned stream ignores default changes"
+        );
+        config.channels[1].apps.clear();
+        engine.update_memberships(&config);
+        assert!(
+            engine.yielded.is_empty(),
+            "Moving explicit app to default changes its destination"
+        );
+        engine.yielded.insert(identity.clone());
+        config.channels[2].capture_unassigned = false;
+        config.channels[0].capture_unassigned = true;
+        engine.update_memberships(&config);
+        assert!(
+            engine.yielded.is_empty(),
+            "Changing default resets affected default stream"
+        );
+        engine.yielded.insert(identity.clone());
+        config.enabled = false;
+        engine.update_memberships(&config);
+        assert!(engine.yielded.contains(&identity));
+        config.enabled = true;
+        engine.update_memberships(&config);
+        assert!(
+            engine.yielded.is_empty(),
+            "Explicit re-enable takes ownership again"
+        );
+    }
+    #[test]
+    fn default_group_preserves_direct_owned_route_but_can_move_its_previous_assignment() {
+        let identity = Identity {
+            index: 1,
+            client: Some(2),
+            process: None,
+            binary: None,
+            app: None,
+            desktop_app: None,
+            name: "Stream".into(),
+        };
+        let mut input = Input {
+            app: App {
+                index: 1,
+                sink: "deckforge.test.channel.explicit".into(),
+                ..Default::default()
+            },
+            identity: identity.clone(),
+            module: None,
+            channels: 2,
+            volume: ChannelVolumes::default(),
+            muted: false,
+        };
+        let channel = Channel {
+            capture_unassigned: true,
+            ..Default::default()
+        };
+        let inv = Inventory {
+            sinks: vec![Sink {
+                device: Device {
+                    name: input.app.sink.clone(),
+                    ..Default::default()
+                },
+                index: 3,
+                module: Some(7),
+                channels: 2,
+                volume: ChannelVolumes::default(),
+                muted: false,
+            }],
+            ..Default::default()
+        };
+        let owned = BTreeSet::from([7]);
+        let target = "deckforge.test.channel.default";
+        assert!(default_must_yield(
+            &channel,
+            &input,
+            target,
+            &BTreeMap::new(),
+            &inv,
+            &owned
+        ));
+        let moved = BTreeMap::from([(
+            1,
+            Moved {
+                identity,
+                original: "external".into(),
+                target: input.app.sink.clone(),
+            },
+        )]);
+        assert!(!default_must_yield(
+            &channel, &input, target, &moved, &inv, &owned
+        ));
+        input.app.sink = "external".into();
+        assert!(!default_must_yield(
+            &channel,
+            &input,
+            target,
+            &BTreeMap::new(),
+            &inv,
+            &owned
+        ));
+    }
+    #[test]
+    fn derived_desktop_identity_does_not_invalidate_restoration_owner() {
+        let saved = Identity {
+            index: 1,
+            client: Some(2),
+            process: Some("42".into()),
+            binary: Some("player".into()),
+            app: None,
+            desktop_app: None,
+            name: "Stream".into(),
+        };
+        let mut resolved = saved.clone();
+        resolved.desktop_app = Some("player.desktop".into());
+        assert!(saved.same_stream(&resolved));
+        assert!(matches_app(
+            &AppSelector::DesktopApplication("player.desktop".into()),
+            &resolved
+        ));
+        assert!(!matches_app(
+            &AppSelector::ApplicationId("player.desktop".into()),
+            &resolved
+        ));
+        resolved.client = Some(3);
+        assert!(!saved.same_stream(&resolved));
     }
     #[test]
     fn rejects_feedback_through_foreign_sink_monitors() {

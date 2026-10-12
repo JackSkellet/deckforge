@@ -8,16 +8,15 @@ The official [7.6 release notes](https://help.elgato.com/hc/en-us/articles/51156
 
 ## Current work order
 
-The appearance and multi-device checkpoints are published. The user's latest
-instruction on 12 October 2026 is to skip Studio LED work and go directly to
-plugin compatibility. Remaining device transports are deferred while that work
-proceeds. Wave Link meters follow plugin support; sharing and Smart Profiles
-come at the end. The native mixer Add input group/Add mix failure has been fixed and checked
-with actual before/after window interactions. Clearer input setup and live
-fader/mute controls still follow plugin work alongside meters; current faders
-remain draft-only until Apply routes. Wave Link effects and screensaver completion remain deferred.
-The user will perform long-running reliability testing. Short functional and
-regression checks continue; GitHub CI remains manual-only.
+The user currently prioritizes the audio mixer: automatic installed-app discovery,
+an All audio default with explicit exceptions, and a clearer Wave Link-style view.
+Live meters, immediate controls, linked levels, fades and per-output controls were
+published first. The current pass adds the compact matrix and separate routing setup,
+guided by screenshots and offline REA inspection of Wave Link 3.3.0.3125.
+Plugin compatibility resumes afterward; Studio LED and remaining device transports
+are deferred. Sharing and Smart Profiles come at the end. Effects and screensaver
+completion remain deferred. The user performs long-running reliability testing;
+short functional checks continue and GitHub CI stays manual-only.
 
 ## Status and evidence rules
 
@@ -630,11 +629,13 @@ in [Audio mixer](AUDIO_MIXER.md).
 
 | ID | Required behavior | Current evidence and remaining work |
 | --- | --- | --- |
-| WL-01 | Independent application/input groups, monitor/stream mixes and physical output assignment | **Verified subset, C/T.** Original Rust Pulse-compatible graph, five mixes/twelve groups, exact app/source/output assignments, separate route/master gain and mute, persisted configuration and native TypeScript matrix. Generated virtual PCM verifies separation, levels, mute and routing primitives. Real microphones/speakers and audible acceptance remain unverified. |
+| WL-01 | Independent application/input groups, monitor/stream mixes and physical output assignment | **Verified subset, C/T.** Original Rust Pulse-compatible graph, five mixes/twelve groups, installed-app discovery with stable desktop identities, one optional All audio channel excluding explicit assignments, exact source/output choices, route/master gain and mute, persisted configuration and compact native matrix. Generated virtual PCM verifies separation, levels, mute and routing primitives. Real microphones/speakers and audible acceptance remain unverified. |
 | WL-02 | Mixer key/dial actions and imported official plugin compatibility | **Partial, C/T.** Original Deckforge actions support route/master targets, step size, mute, key set/change operations, Multi Actions and Dial Stacks. Host-process tests verify feedback and restart. Shipped profiles prove six official `com.elgato.wave-link` identities but all settings are empty. Current plugin schema/protocol compatibility remains unresolved; unknown imports remain preserved. |
 | WL-03 | Live metering, immediate faders, fades, linked mixes and output controls | **Verified subset, C/T.** Native immediate route/master/output faders and mutes, linked percentage-point deltas, retargetable linear fades, and measured stereo peak meters. Native-window tests cover controls and routing-draft preservation. Virtual PCM verifies meters, fade progression, output gains and cleanup; actual-host tests cover intermediate fades, retargeting, persistence and revision guards. Vendor curve/link equivalence and physical audio acceptance remain unverified. |
 | WL-04 | Effects, effect switching and Wave hardware/DSP controls | **Deferred.** No VST/AU effect hosting or proprietary Wave-device DSP implementation is present. These require separate contracts, supported Linux mappings and hardware evidence. |
 | WL-05 | Background operation, disable, shutdown and recovery | **Verified subset, C/T.** Exact owned-node journals and kernel ownership leases preserve parked apps/recorders across normal Quit/restart. Disabled fresh startup leaves audio untouched; explicit Enable recovers matching nodes. Tests verify original-output restoration, respect manual routing changes, silent attached-reader retention and unchanged system defaults. Abrupt crashes and full audio-daemon restart remain unverified. |
+| WL-06 | Main listening output and monitored mix selection | **Missing, A.** Wave Link 3.3 resources describe one main listening device, an ear selector and a no-mix state. Deckforge currently uses explicit per-mix output assignments. The separate monitoring workflow remains to implement and verify. |
+| WL-07 | Channel master controls and detailed meter behavior | **Partial/Unresolved, A/C/T.** Measured channel/mix peaks exist. Shipped resources distinguish channel, route and mix mute/zero-level issues; native names also reference stereo dB peaks, per-route peak hold and meter decay. Separate channel master controls and exact vendor meter timing/curves are not established by the current implementation. See [reference investigation](WAVE_LINK_REFERENCE.md). |
 
 `tests/mixer_host_interop.py --run-virtual` uses the actual application, simulated
 key/dial input and silent owned nodes. `tests/mixer_virtual.py --run-virtual`

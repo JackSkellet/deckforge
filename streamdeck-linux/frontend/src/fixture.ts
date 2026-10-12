@@ -249,6 +249,19 @@ export function installFixture(modelId?: string) {
       preferences: { after_minutes: 0, disable_on_lock: true, image: null },
     },
     mixer: {
+      applications: [
+        {
+          id: "org.example.Music.desktop",
+          name: "Music player",
+          detected: true,
+        },
+        { id: "org.example.Chat.desktop", name: "Voice chat", detected: true },
+        {
+          id: "org.example.Browser.desktop",
+          name: "Web browser",
+          detected: false,
+        },
+      ],
       revision: 1,
       levels: { channels: {}, mixes: {} },
       config: {
@@ -301,6 +314,7 @@ export function installFixture(modelId?: string) {
           index: 1,
           name: "Music player",
           application_id: "org.example.Music",
+          desktop_application: "org.example.Music.desktop",
           process_binary: "music-player",
           sink: "fixture.speakers",
         },
@@ -308,6 +322,7 @@ export function installFixture(modelId?: string) {
           index: 2,
           name: "Voice chat",
           application_id: "org.example.Chat",
+          desktop_application: "org.example.Chat.desktop",
           process_binary: "voice-chat",
           sink: "fixture.headphones",
         },

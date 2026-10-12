@@ -37,7 +37,10 @@ export function mixerRoutingShape(config: MixerConfig) {
   const { fade_ms: _fade, ...rest } = config;
   return {
     ...rest,
-    channels: config.channels.map(({ linked: _linked, ...channel }) => channel),
+    channels: config.channels.map(({ linked: _linked, ...channel }) => ({
+      ...channel,
+      capture_unassigned: channel.capture_unassigned ?? false,
+    })),
     mixes: config.mixes.map(
       ({ volume: _volume, muted: _muted, output_controls: _outputs, ...mix }) =>
         mix,
@@ -60,6 +63,7 @@ function semanticConfig(config: MixerConfig) {
     channels: config.channels.map((channel) => ({
       ...channel,
       linked: channel.linked ?? false,
+      capture_unassigned: channel.capture_unassigned ?? false,
     })),
     mixes: config.mixes.map((mix) => ({
       ...mix,

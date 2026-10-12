@@ -539,7 +539,22 @@ mod tests {
         for filename in ["owned-sleep", "owned-sleep (deleted)"] {
             let executable = root.path().join(filename);
             fs::copy("/usr/bin/sleep", &executable).unwrap();
-            let mut child = Command::new(&executable).arg("0.2").spawn().unwrap();
+            // A parallel test can fork while fs::copy's writable descriptor is
+            // open. Its inherited CLOEXEC descriptor briefly causes ETXTBSY;
+            // wait only for that kernel race, without relaxing identity checks.
+            let deadline = std::time::Instant::now() + Duration::from_secs(1);
+            let mut child = loop {
+                match Command::new(&executable).arg("0.2").spawn() {
+                    Ok(child) => break child,
+                    Err(error)
+                        if error.raw_os_error() == Some(libc::ETXTBSY)
+                            && std::time::Instant::now() < deadline =>
+                    {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => panic!("Could not start owned executable fixture: {error}"),
+                }
+            };
             let pid = child.id();
             let path = PathBuf::from(format!("/proc/{pid}"));
             let before = observe(&path, pid, uid());

@@ -5,6 +5,8 @@
 mod backend;
 #[path = "mixer/control.rs"]
 pub mod control;
+#[path = "mixer/discovery.rs"]
+mod discovery;
 use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -52,6 +54,7 @@ impl Default for Config {
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct Channel {
+    pub capture_unassigned: bool,
     pub linked: bool,
     pub id: String,
     pub name: String,
@@ -109,6 +112,7 @@ pub struct Levels {
 pub enum AppSelector {
     ApplicationId(String),
     ProcessBinary(String),
+    DesktopApplication(String),
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
@@ -141,10 +145,18 @@ pub struct App {
     pub name: String,
     pub application_id: Option<String>,
     pub process_binary: Option<String>,
+    pub desktop_application: Option<String>,
     pub sink: String,
 }
 #[derive(Clone, Debug, Default, Serialize, PartialEq)]
+pub struct InstalledApplication {
+    pub id: String,
+    pub name: String,
+    pub detected: bool,
+}
+#[derive(Clone, Debug, Default, Serialize, PartialEq)]
 pub struct Snapshot {
+    pub applications: Vec<InstalledApplication>,
     pub levels: Levels,
     pub fading: bool,
     pub config: Config,
@@ -167,6 +179,14 @@ impl Config {
             "At most 12 mixer channels are supported"
         );
         ensure!(self.mixes.len() <= 5, "At most five mixes are supported");
+        ensure!(
+            self.channels
+                .iter()
+                .filter(|c| c.capture_unassigned)
+                .count()
+                <= 1,
+            "Only one input group can capture unassigned apps"
+        );
         let mut channels = BTreeSet::new();
         let mut mixes = BTreeSet::new();
         let mut selectors = BTreeSet::new();
@@ -177,7 +197,9 @@ impl Config {
             ensure!(channels.insert(&c.id), "Duplicate channel ID");
             for a in &c.apps {
                 let v = match a {
-                    AppSelector::ApplicationId(v) | AppSelector::ProcessBinary(v) => v,
+                    AppSelector::ApplicationId(v)
+                    | AppSelector::ProcessBinary(v)
+                    | AppSelector::DesktopApplication(v) => v,
                 };
                 valid_external(v)?;
                 ensure!(

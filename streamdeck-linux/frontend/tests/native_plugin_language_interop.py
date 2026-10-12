@@ -28,7 +28,7 @@ const choose=value=>{Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype
 if(phase==='mixer'){
  const before=initial.mixer.config;
  if(before.enabled)throw Error('Mixer fixture must start with routing disabled');
- button('Audio mixer').click();
+ button('Audio mixer').click(); await pause(80); button('Routing setup')?.click();
  await until(()=>button('＋ Add input group')&&button('＋ Add mix'),'mixer creation controls');
  button('＋ Add input group').click();
  const draft=async()=>(await bridge.request('ui_state_get'))?.formDrafts?.['audio-mixer'];

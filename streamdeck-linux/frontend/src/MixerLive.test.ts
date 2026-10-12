@@ -4,6 +4,7 @@ import {
   meterReading,
   reconcileMixerDraft,
   sameMixerRouting,
+  sameMixerConfig,
   patchMixerControl,
 } from "./MixerLive";
 import type { MixerConfig } from "./Mixer";
@@ -199,4 +200,14 @@ it("rebases immediate preferences and link settings without discarding routing d
     name: "Voice pending",
     linked: true,
   });
+});
+
+it("normalizes a missing catch-all flag as false but guards a changed default group", () => {
+  const explicit = structuredClone(config);
+  explicit.channels[0].capture_unassigned = false;
+  expect(sameMixerConfig(config, explicit)).toBe(true);
+  expect(sameMixerRouting(config, explicit)).toBe(true);
+  explicit.channels[0].capture_unassigned = true;
+  expect(sameMixerConfig(config, explicit)).toBe(false);
+  expect(sameMixerRouting(config, explicit)).toBe(false);
 });

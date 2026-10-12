@@ -64,8 +64,8 @@ const gain=(channel,mix)=>document.querySelector(`input[aria-label="${channel} â
 const state=await bridge.request('ui_state_get');
 const retained=state?.formDrafts?.['audio-mixer'];
 if(draftCase&&retained?.dirty&&retained.config.mixes.find(m=>m.id==='monitor')?.name==='Monitor draft'){
- const input=await until(()=>gain('Voice','Monitor draft'));
- if(input.value!=='75')throw Error('Mixer draft was not restored into native DOM');
+ const input=await until(()=>[...document.querySelectorAll('label.field')].find(l=>l.querySelector('span')?.textContent==='Monitor draft mix name')?.querySelector('input'));
+ if(input.value!=='Monitor draft')throw Error('Mixer draft was not restored into native DOM');
  const host=await bridge.request('snapshot');
  if(host.mixer.config.enabled||host.mixer.config.mixes.find(m=>m.id==='monitor').name!=='Monitor')throw Error('Unapplied mixer draft changed saved routing');
  return {phase:'restored',draftName:'Monitor draft',savedName:'Monitor',enabled:false};
@@ -75,13 +75,13 @@ await bridge.request('command',{command:'mixer_config',settings:config,expected:
 if(!document.querySelector('.audio-mixer'))[...document.querySelectorAll('button')].find(b=>b.textContent.trim()==='Audio mixer').click();
 const input=await until(()=>gain('Music','Monitor'));
 if(input.value!=='55')throw Error('Routing matrix did not load bridge config');
-const enabled=[...document.querySelectorAll('.audio-mixer label')].find(label=>label.textContent.includes('Enable audio routing'))?.querySelector('input,textarea');
-if(!enabled||enabled.checked)throw Error('Routing must remain disabled');
+if((await bridge.request('snapshot')).mixer.config.enabled)throw Error('Routing must remain disabled');
 const set=(input,value)=>{Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(input,String(value));input.dispatchEvent(new Event('input',{bubbles:true}));input.dispatchEvent(new Event('change',{bubbles:true}));};
 set(input,62);
 await until(async()=>{const state=await bridge.request('ui_state_get');return route(state?.formDrafts?.['audio-mixer']?.config||{routes:[]},'music','monitor')?.volume===62});
 const immediate=await until(async()=>{const s=await bridge.request('snapshot');return route(s.mixer.config,'music','monitor')?.volume===62&&s});
 if(immediate.mixer.active||immediate.mixer.config.enabled)throw Error('Immediate saved control enabled routing');
+[...document.querySelectorAll('button')].find(b=>b.textContent.trim()==='Routing setup').click();await pause(60);
 const nameField=()=>[...document.querySelectorAll('label.field')].find(l=>l.querySelector('span')?.textContent==='Stream mix name')?.querySelector('input');
 set(nameField(),'Streaming');
 await until(async()=>(await bridge.request('ui_state_get'))?.formDrafts?.['audio-mixer']?.dirty);
@@ -91,6 +91,7 @@ const applied=await until(async()=>{const s=await bridge.request('snapshot');ret
 if(applied.mixer.config.enabled||applied.mixer.active||applied.mixer.sinks.some(s=>s.owned))throw Error('Disabled fixture created an audio graph');
 if(applied.mixer.config.channels.some(c=>c.apps.length||c.sources.length)||applied.mixer.config.mixes.some(m=>m.outputs.length))throw Error('Fixture selected real audio members');
 await until(()=>document.querySelector('.mixer-footer [role="status"]')?.textContent.includes('Routing settings saved'));
+if(!draftCase){[...document.querySelectorAll('button')].find(b=>b.textContent.trim()==='Mixer').click();await pause(60);}
 const applyRect=document.querySelector('.audio-mixer button[type="submit"]').getBoundingClientRect();
 const dialogRect=document.querySelector('dialog[open]').getBoundingClientRect();
 if(applyRect.bottom>dialogRect.bottom+1||applyRect.top<dialogRect.top)throw Error('Mixer Apply button is clipped outside its dialog');
@@ -100,7 +101,7 @@ if(draftCase){
  await until(async()=>{const d=(await bridge.request('ui_state_get'))?.formDrafts?.['audio-mixer'];return d?.dirty&&d.config.mixes.find(m=>m.id==='monitor')?.name==='Monitor draft'});
  return {phase:'edited',draftName:'Monitor draft',savedName:'Monitor',enabled:false};
 }
-return {phase:'applied',channels:[...document.querySelectorAll('.mixer-matrix tbody th strong')].map(n=>n.textContent),savedMusicMonitor:62,otherRoutes:applied.mixer.config.routes,enabled:false,active:false,ownedAudioNodes:0,levelsImmediate:true,structuralApplyRequired:true,applyButtonBottom:applyRect.bottom,dialogBottom:dialogRect.bottom};
+return {phase:'applied',channels:[...document.querySelectorAll('.mixer-console tbody th strong')].map(n=>n.textContent),savedMusicMonitor:62,otherRoutes:applied.mixer.config.routes,enabled:false,active:false,ownedAudioNodes:0,levelsImmediate:true,structuralApplyRequired:true,applyButtonBottom:applyRect.bottom,dialogBottom:dialogRect.bottom};
 """
 
 

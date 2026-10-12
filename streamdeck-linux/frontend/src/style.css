@@ -2547,24 +2547,6 @@ dialog.mixer-dialog {
   background: transparent;
 }
 
-.mixer-control-status {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 12px;
-  padding: 10px 12px;
-  border-block: 1px solid #344b55;
-  font-size: 11px;
-  color: #9fb5bd;
-}
-.mixer-control-status > .field {
-  margin-left: auto;
-  min-width: 150px;
-  max-width: 180px;
-}
-.mixer-control-status > .field input {
-  min-height: 30px;
-}
 .mixer-matrix tbody th > .hint {
   display: block;
   margin-top: 6px;
@@ -2574,4 +2556,406 @@ dialog.mixer-dialog {
 .mixer-output-details .mixer-gain {
   padding-top: 10px;
   border-top: 1px solid #405763;
+}
+
+.installed-app-chooser {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+.installed-app-chooser select[size] {
+  height: 112px;
+  padding: 4px;
+}
+.installed-app-chooser select[size] option {
+  padding: 6px 8px;
+}
+.installed-app-chooser button {
+  align-self: flex-start;
+}
+.playing-app-chooser > summary {
+  cursor: pointer;
+  margin-bottom: 10px;
+}
+.selector-list strong {
+  display: block;
+  margin-bottom: 4px;
+  font-weight: 500;
+}
+
+.installed-app-chooser .hint code {
+  overflow-wrap: anywhere;
+}
+.installed-app-chooser select {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.mixer-default-badge {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 2px 5px;
+  border: 1px solid #649b89;
+  border-radius: 3px;
+  color: #b4e8d3;
+  font-size: 10px;
+  font-weight: 400;
+}
+
+.mixer-navigation,
+.mixer-section-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+.mixer-navigation {
+  padding-bottom: 12px;
+  border-bottom: 1px solid #405763;
+}
+.mixer-navigation .segmented {
+  display: flex;
+  gap: 4px;
+}
+.mixer-navigation button[aria-pressed="true"] {
+  background: #315448;
+  border-color: #89cbb2;
+  color: #d8ffee;
+}
+.mixer-off-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 12px 15px;
+  background: #2d3030;
+  border-left: 3px solid #baad80;
+}
+.mixer-off-banner strong {
+  color: #e8ddba;
+  font-size: 12px;
+}
+.mixer-off-banner p {
+  margin: 5px 0 0;
+  color: #b9c6ca;
+  font-size: 11px;
+  line-height: 1.5;
+}
+.mixer-off-banner button {
+  flex-shrink: 0;
+}
+.mixer-daily,
+.mixer-setup {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.mixer-live-progress:empty {
+  display: none;
+}
+.mixer-live-progress {
+  color: #9fc8bb;
+  font-size: 11px;
+}
+.mixer-setup-card {
+  min-width: 0;
+  padding: 16px;
+  border: 1px solid #405763;
+  background: #1b2932;
+  border-radius: 6px;
+}
+.mixer-setup-card h3,
+.mixer-section-heading h3 {
+  margin: 0;
+  font-size: 14px;
+  color: #d9e8eb;
+}
+.mixer-section-heading h3 {
+  font-size: 15px;
+}
+.mixer-section-heading p {
+  margin: 6px 0 0;
+}
+.mixer-section-heading button {
+  flex-shrink: 0;
+}
+.mixer-setup-groups,
+.mixer-setup-mixes {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(290px, 1fr));
+  gap: 12px;
+}
+.mixer-setup-mixes {
+  margin-bottom: 5px;
+}
+.mixer-route-choices {
+  border: 0;
+  border-top: 1px solid #405763;
+  margin: 16px 0 0;
+  padding: 12px 0 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+.mixer-route-choices legend {
+  font-size: 11px;
+  color: #9fb6bf;
+  padding: 0 8px 0 0;
+}
+.mixer-route-choices .check {
+  font-size: 11px;
+}
+.mixer-setup-card .mixer-device-choices {
+  margin-top: 14px;
+}
+.mixer-setup-empty {
+  padding: 18px;
+  border: 1px dashed #52636b;
+  color: #adc0c7;
+  font-size: 12px;
+}
+@media (max-width: 850px) {
+  .mixer-off-banner {
+    flex-wrap: wrap;
+  }
+  .mixer-setup-groups,
+  .mixer-setup-mixes {
+    grid-template-columns: 1fr;
+  }
+}
+.mixer-console-scroll {
+  overflow: auto;
+}
+.mixer-console {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 5px;
+  table-layout: fixed;
+  font-size: 12px;
+}
+.mixer-console th,
+.mixer-console td {
+  padding: 10px 12px;
+  background: #1a2a32;
+  border: 1px solid #344a54;
+  border-radius: 4px;
+  text-align: left;
+  vertical-align: middle;
+  font-weight: 400;
+}
+.mixer-console thead th {
+  background: #23353e;
+  padding-block: 8px;
+}
+.mixer-console thead th:first-child {
+  width: 215px;
+  background: transparent;
+  border-color: transparent;
+  color: #91aab5;
+}
+.mixer-console tbody th {
+  background: #21333b;
+}
+.mixer-console-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.mixer-console-heading strong {
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.mixer-console-heading button {
+  padding: 2px 6px;
+  background: transparent;
+  border-color: transparent;
+  font-size: 16px;
+  color: #b6d1d6;
+}
+.mixer-console .mixer-meter {
+  margin: 5px 0 0;
+  gap: 6px;
+  font-size: 9px;
+}
+.mixer-console .mixer-meter-track {
+  height: 5px;
+}
+.mixer-console .compact-link {
+  margin-top: 7px;
+  font-size: 9px;
+  color: #a0b9c1;
+  gap: 5px;
+}
+.mixer-console .compact-link input {
+  width: 12px;
+  height: 12px;
+}
+.mixer-gain.compact {
+  display: grid;
+  grid-template-columns: 28px minmax(35px, 1fr) 33px;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+}
+.mixer-gain.compact .field {
+  grid-column: 2;
+  grid-row: 1;
+  min-width: 0;
+}
+.mixer-gain.compact .field > span {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+}
+.mixer-gain.compact .mute {
+  grid-column: 1;
+  grid-row: 1;
+  padding: 4px;
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-content: center;
+  border-color: transparent;
+  background: transparent;
+}
+.mixer-gain.compact .mute.active {
+  background: #754d47;
+  color: #ffe1cf;
+}
+.mixer-gain.compact output {
+  grid-column: 3;
+  font-size: 10px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  color: #aecad1;
+}
+.mixer-add-route {
+  display: block;
+  width: 100%;
+  background: transparent;
+  border: 1px dashed #3d565f;
+  font-size: 10px;
+  color: #8faeb9;
+  padding: 7px;
+}
+.mixer-draft-label {
+  display: block;
+  margin-top: 3px;
+  text-align: right;
+  color: #c0b788;
+  font-size: 9px;
+}
+.mixer-create-channel {
+  position: relative;
+  align-self: flex-start;
+  margin-left: 5px;
+}
+.mixer-create-channel > button {
+  min-width: 215px;
+  border-style: dashed;
+  background: transparent;
+}
+.mixer-create-menu {
+  position: absolute;
+  z-index: 5;
+  top: calc(100% + 5px);
+  left: 0;
+  width: 320px;
+  max-width: calc(100vw - 100px);
+  padding: 12px;
+  border: 1px solid #527267;
+  border-radius: 5px;
+  background: #182a31;
+  box-shadow: 0 8px 18px #0006;
+}
+.mixer-create-menu > button,
+.mixer-create-results button {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: 0;
+  border-radius: 2px;
+  padding: 9px 7px;
+  font-size: 12px;
+}
+.mixer-create-menu button:hover {
+  background: #2b4942;
+}
+.mixer-create-menu button small {
+  display: block;
+  font-size: 10px;
+  color: #a5bbc2;
+  margin-top: 3px;
+}
+.mixer-create-results {
+  max-height: 190px;
+  overflow: auto;
+  margin-block: 9px;
+  border-bottom: 1px solid #405763;
+}
+.mixer-output-panel {
+  padding: 14px 16px;
+  border: 1px solid #405763;
+  border-radius: 5px;
+  background: #20333c;
+}
+.mixer-output-panel h3 {
+  margin: 0;
+  font-size: 13px;
+}
+.mixer-output-panel-controls {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 18px;
+}
+.mixer-output-panel > .hint {
+  margin-top: 12px;
+  font-size: 11px;
+}
+
+.mixer-create-results h4 {
+  font-size: 10px;
+  color: #87aaab;
+  font-weight: 500;
+  margin: 8px 7px 3px;
+}
+
+.mixer-setup-groups,
+.mixer-setup-mixes {
+  align-items: start;
+}
+.mixer-create-menu {
+  overflow: auto;
+}
+.mixer-create-menu.opens-up {
+  top: auto;
+  bottom: calc(100% + 5px);
+}
+
+.mixer-global-settings {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  border: 1px solid #405763;
+  padding: 12px 15px;
+  border-radius: 4px;
+}
+.mixer-global-settings legend {
+  padding-inline: 6px;
+  font-size: 11px;
+  color: #a2bbc3;
+}
+.mixer-global-settings > .field {
+  min-width: 150px;
+  max-width: 180px;
+}
+.mixer-global-settings > .hint {
+  font-size: 11px;
 }

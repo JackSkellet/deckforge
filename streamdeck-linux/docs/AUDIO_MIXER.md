@@ -6,25 +6,63 @@ mixes inside the desktop application. It does not run Wave Link or Wine.
 
 ![Native mixer with an isolated test configuration](../assets/screenshots/audio-mixer.png)
 
-## Configure routing
+## Mixer and routing setup
 
-1. Open **Audio mixer** in the editor header. This reads the available devices and
-   playing applications; it does not enable routing.
-2. Add an input group. Expand **Edit inputs** to choose applications or exact input
-   devices. App IDs and process names match future streams from that application.
-3. Enable a route from each input group to the desired mixes. Set its level and
-   mute independently. Expand a mix's outputs to select physical destinations.
-4. Enable audio routing and choose **Apply routes**. Group membership, routes,
-   output assignments and names remain drafts until applied. Saved levels and
-   mutes respond immediately; changing them preserves unapplied routing drafts.
-5. Select a mix's **Deckforge mix** virtual input in the application that should
-   record or broadcast it. The mixer does not change system default devices.
+**Mixer** shows compact channel rows and mix columns. Each routed cell has a mute
+button and level slider; meters stay beside channel and mix names. Click an empty
+cell to add that route to your draft. Detailed names, membership and device
+choices live in **Routing setup**.
 
-Monitor and Stream are the initial mix names. You can add up to five mixes and
-twelve input groups. A group can contain several applications and input devices;
-a mix can feed several outputs. Missing saved devices remain visible and are not
-silently replaced with the system default. The implementation currently uses
-48 kHz stereo audio and linear-amplitude volume percentages.
+1. Open **Audio mixer**. Browsing reads applications and devices without enabling
+   routing.
+2. Choose **Create channel** and search for an installed application or input
+   device. Selecting it creates a named channel with its identity already filled
+   in. An empty channel can group several apps later.
+3. Add the desired mix routes by clicking empty cells. Open **Routing setup** to
+   choose listening outputs, rename channels/mixes or edit their members.
+4. Enable routing and choose **Apply routes**. Membership, route switches, output
+   assignments and names stay drafts until applied. Saved levels and mutes respond
+   immediately and preserve unapplied routing drafts.
+5. Select a mix's **Deckforge mix** virtual input in your recording or streaming
+   application. Deckforge does not change system default devices.
+
+Monitor and Stream are the initial mixes. Up to five mixes and twelve channels
+are supported. A channel can contain several apps and input devices; a mix can
+feed several outputs. Missing saved devices stay visible and are never silently
+replaced with the system default. Audio uses 48 kHz stereo; volume percentages
+represent linear amplitude.
+
+## Automatic app discovery
+
+The picker includes installed desktop applications before they play audio. It
+reads XDG desktop entries and Flatpak exports, uses localized display names and
+saves a stable desktop-entry ID. Hidden helper entries stay out of the picker;
+identical hidden portal aliases fold into their visible application. No application
+is launched to identify it.
+
+When a stream appears, Deckforge matches explicit app/desktop identities, launch
+hints, Flatpak metadata or a unique executable identity. Wrapper-based apps can
+also match an exact reported name within the same private installation directory.
+Shared launchers such as
+`flatpak`, `env`, interpreters and Electron are not treated as unique applications.
+Ambiguous matches remain unresolved. **Playing applications** provides observed
+audio IDs/process names as a fallback; **Advanced: manual identity** remains
+available. An installed app marked **Pending audio** has no currently resolved
+stream, so it can be configured ahead of time.
+
+## All audio and explicit exceptions
+
+Choose **All audio** under Create channel, or enable **Default for other apps** on
+an existing channel. Only one channel can be the default. After Apply, it accepts
+application audio that has no explicit channel assignment, including new streams.
+Explicit app assignments take priority. A stream deliberately sent to another
+Deckforge channel stays there; manually moving an already routed stream to another
+output is also respected, including when an unrelated app assignment changes.
+Changing that stream's assignment or explicitly re-enabling routing can route it
+again. Turning the default option off restores streams Deckforge moved to it.
+
+This does not automatically capture microphones or loop Deckforge's own mixer
+streams into themselves. Input devices still require explicit selection.
 
 ## Live controls and meters
 
@@ -106,6 +144,14 @@ creating an item. A shared secure-random UUID fallback fixes both mixer creation
 and nested-action creation. Before/after tests keep routing disabled and do not
 apply routes or alter the audio backend.
 
+`tests/mixer_application_discovery_interop.py --run-virtual` creates a private
+PipeWire/Pulse server with policy support and no hardware monitors. A generated
+native audio client proves installed-app selection before playback, automatic
+future matching, default capture, explicit exceptions, manual-route preservation
+and original-output restoration. It cannot route applications on the user's audio
+server. The native installed-app fixture verifies creation, search, draft retention
+and default selection through actual controls while routing stays disabled.
+
 `tests/mixer_host_interop.py --run-virtual` exercises the real host, saved config,
 independent routes, simulated keys/dials, linked fades/retargeting, immediate mute,
 revision guards, coalesced saving, control feedback, restart and cleanup.
@@ -119,3 +165,10 @@ meter cleanup. `frontend/tests/native_mixer_controls_interop.py` exercises the a
 native sliders, links, output controls and fade preference with routing disabled,
 including preservation of an unapplied mix. Physical audio acceptance and full
 Wave Link parity remain unverified.
+
+## Reference behavior
+
+The compact matrix, app-first creation and All audio exclusion rule are grounded
+in the user's Wave Link 3.3 screenshots and shipped resources. See
+[Wave Link 3.3 reference investigation](WAVE_LINK_REFERENCE.md) for artifact identity,
+REA evidence and the distinction between recovered declarations and inferred code.

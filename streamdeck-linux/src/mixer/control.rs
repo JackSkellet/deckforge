@@ -175,7 +175,7 @@ fn write(
 
 /// Routing equality ignores display order/names and every control parameter.
 pub fn same_routing(a: &Config, b: &Config) -> bool {
-    fn channels(config: &Config) -> Vec<(&str, Vec<&super::AppSelector>, Vec<&str>)> {
+    fn channels(config: &Config) -> Vec<(&str, bool, Vec<&super::AppSelector>, Vec<&str>)> {
         let mut result: Vec<_> = config
             .channels
             .iter()
@@ -184,7 +184,12 @@ pub fn same_routing(a: &Config, b: &Config) -> bool {
                 apps.sort();
                 let mut sources: Vec<_> = channel.sources.iter().map(String::as_str).collect();
                 sources.sort();
-                (channel.id.as_str(), apps, sources)
+                (
+                    channel.id.as_str(),
+                    channel.capture_unassigned,
+                    apps,
+                    sources,
+                )
             })
             .collect();
         result.sort();

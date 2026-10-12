@@ -16,6 +16,7 @@ import {
   removeChannel,
   removeMix,
   appChoices,
+  sameApplication,
   type MixerSnapshot,
   type MixerConfig,
 } from "./Mixer";
@@ -151,6 +152,24 @@ describe("mixer graph drafts", () => {
     ]);
   });
 });
+function setupView() {
+  fireEvent.click(screen.getByRole("button", { name: "Routing setup" }));
+}
+function dailyView() {
+  fireEvent.click(screen.getByRole("button", { name: "Mixer" }));
+}
+function gain(name: string) {
+  dailyView();
+  if (name.includes(" master ") || name.includes(" output · ")) {
+    const mixName = name.split(/ master | output · /)[0];
+    const toggle = screen.getByRole("button", {
+      name: `${mixName} mix settings`,
+    });
+    if (toggle.getAttribute("aria-expanded") !== "true")
+      fireEvent.click(toggle);
+  }
+  return screen.getByRole("slider", { name });
+}
 describe("mixer panel", () => {
   it("excludes other-session mixer endpoints but retains saved unavailable identities", async () => {
     const user = userEvent.setup();
@@ -175,9 +194,8 @@ describe("mixer panel", () => {
         run={vi.fn(async (_payload: Record<string, any>) => true)}
       />,
     );
-    await user.click(
-      screen.getByText("Monitor outputs", { selector: "summary" }),
-    );
+    setupView();
+    setupView();
     await user.click(screen.getByText("Edit inputs", { selector: "summary" }));
     expect(
       screen.queryByRole("checkbox", { name: "Other session output" }),
@@ -204,23 +222,22 @@ describe("mixer panel", () => {
       expect(run).toHaveBeenCalledWith({ command: "mixer_refresh" }),
     );
     expect(run).toHaveBeenCalledTimes(1);
-    await user.click(
-      screen.getByText("Monitor outputs", { selector: "summary" }),
-    );
+    setupView();
     expect(screen.getByText("missing.speakers")).toBeTruthy();
     expect(
       screen.queryByRole("checkbox", { name: "Owned mixer output" }),
     ).toBeNull();
+    setupView();
     await user.click(
       screen.getByRole("checkbox", { name: "Enable audio routing" }),
     );
+    setupView();
     await user.click(
       screen.getByRole("checkbox", { name: "Route Music to Stream" }),
     );
-    fireEvent.change(
-      screen.getByRole("slider", { name: "Music → Stream volume" }),
-      { target: { value: "27" } },
-    );
+    fireEvent.change(gain("Music → Stream volume"), {
+      target: { value: "27" },
+    });
     expect(run).toHaveBeenCalledTimes(1);
     await user.click(screen.getByRole("button", { name: "Apply routes" }));
     await waitFor(() =>
@@ -243,6 +260,7 @@ describe("mixer panel", () => {
     const run = vi.fn(async (_payload: Record<string, any>) => true);
     const first = inventory();
     const { rerender } = render(<AudioMixer snapshot={first} run={run} />);
+    setupView();
     await user.click(
       screen.getByRole("checkbox", { name: "Enable audio routing" }),
     );
@@ -258,6 +276,7 @@ describe("mixer panel", () => {
         }) as HTMLButtonElement
       ).disabled,
     ).toBe(true);
+    setupView();
     expect(
       (
         screen.getByRole("checkbox", {
@@ -268,6 +287,7 @@ describe("mixer panel", () => {
     await user.click(
       screen.getByRole("button", { name: "Reload current settings" }),
     );
+    setupView();
     expect(
       (
         screen.getByRole("checkbox", {
@@ -275,34 +295,27 @@ describe("mixer panel", () => {
         }) as HTMLInputElement
       ).checked,
     ).toBe(false);
-    expect(
-      (
-        screen.getByRole("slider", {
-          name: "Monitor master volume",
-        }) as HTMLInputElement
-      ).value,
-    ).toBe("61");
+    expect((gain("Monitor master volume") as HTMLInputElement).value).toBe(
+      "61",
+    );
   });
   it("restores unapplied graph edits when the panel is recreated", async () => {
     const user = userEvent.setup();
     const run = vi.fn(async (_payload: Record<string, any>) => true);
     const view = render(<AudioMixer snapshot={inventory()} run={run} />);
+    setupView();
     await user.click(
       screen.getByRole("checkbox", { name: "Enable audio routing" }),
     );
-    fireEvent.change(
-      screen.getByRole("slider", { name: "Monitor master volume" }),
-      { target: { value: "36" } },
-    );
+    fireEvent.change(gain("Monitor master volume"), {
+      target: { value: "36" },
+    });
     view.unmount();
     render(<AudioMixer snapshot={inventory()} run={run} />);
-    expect(
-      (
-        screen.getByRole("slider", {
-          name: "Monitor master volume",
-        }) as HTMLInputElement
-      ).value,
-    ).toBe("36");
+    expect((gain("Monitor master volume") as HTMLInputElement).value).toBe(
+      "36",
+    );
+    setupView();
     expect(
       (
         screen.getByRole("checkbox", {
@@ -318,6 +331,7 @@ describe("mixer panel", () => {
     const user = userEvent.setup();
     const run = vi.fn(async (_payload: Record<string, any>) => true);
     render(<AudioMixer snapshot={inventory()} run={run} />);
+    setupView();
     await user.click(screen.getByText("Edit inputs", { selector: "summary" }));
     expect(screen.getByText("missing.mic")).toBeTruthy();
     expect(
@@ -397,34 +411,25 @@ it("sends saved inactive controls immediately, serializes revisions and preserve
     }),
   };
   render(<AudioMixer snapshot={live} run={run} />);
+  setupView();
   await user.click(
     screen.getByRole("checkbox", { name: "Route Music to Stream" }),
   );
-  fireEvent.change(
-    screen.getByRole("slider", { name: "Music → Stream volume" }),
-    { target: { value: "22" } },
-  );
+  fireEvent.change(gain("Music → Stream volume"), { target: { value: "22" } });
   expect(calls).toHaveLength(0);
+  dailyView();
   await user.click(
     screen.getByRole("checkbox", { name: "Link Music mix levels" }),
   );
-  fireEvent.change(
-    screen.getByRole("slider", { name: "Music → Monitor volume" }),
-    { target: { value: "61" } },
-  );
+  fireEvent.change(gain("Music → Monitor volume"), { target: { value: "61" } });
+  setupView();
   fireEvent.change(
     screen.getByRole("spinbutton", { name: "Default fade (ms)" }),
     { target: { value: "250" } },
   );
   await waitFor(() => expect(calls).toHaveLength(3));
   expect(calls.map((c) => c.revision)).toEqual([7, 8, 8]);
-  expect(
-    (
-      screen.getByRole("slider", {
-        name: "Music → Stream volume",
-      }) as HTMLInputElement
-    ).value,
-  ).toBe("22");
+  expect((gain("Music → Stream volume") as HTMLInputElement).value).toBe("22");
   await user.click(screen.getByRole("button", { name: "Apply routes" }));
   const apply = run.mock.calls.find(
     ([arg]: any) => arg.command === "mixer_config",
@@ -457,10 +462,11 @@ it("keeps only latest consecutive fader intent and blocks Apply until accepted",
     }),
   };
   render(<AudioMixer snapshot={live} run={run} />);
+  setupView();
   await user.click(
     screen.getByRole("checkbox", { name: "Route Music to Stream" }),
   );
-  const slider = screen.getByRole("slider", { name: "Music → Monitor volume" });
+  const slider = gain("Music → Monitor volume");
   for (const value of ["50", "60", "70"])
     fireEvent.change(slider, { target: { value } });
   expect(calls).toHaveLength(1);
@@ -498,18 +504,14 @@ it("edits output gain separately and surfaces rejection without losing routing e
   });
   window.deckforge = { request: rpc, onSnapshot: () => () => {} };
   render(<AudioMixer snapshot={live} run={run} />);
+  setupView();
   await user.click(
     screen.getByRole("checkbox", { name: "Route Music to Stream" }),
   );
-  await user.click(
-    screen.getByText("Monitor outputs", { selector: "summary" }),
-  );
-  fireEvent.change(
-    screen.getByRole("slider", {
-      name: "Monitor output · missing.speakers volume",
-    }),
-    { target: { value: "33" } },
-  );
+  dailyView();
+  fireEvent.change(gain("Monitor output · missing.speakers volume"), {
+    target: { value: "33" },
+  });
   await waitFor(() =>
     expect(
       live.config.mixes[0].output_controls?.["missing.speakers"].volume,
@@ -524,6 +526,7 @@ it("edits output gain separately and surfaces rejection without losing routing e
   await waitFor(() =>
     expect(screen.getByRole("alert").textContent).toContain("Graph changed"),
   );
+  setupView();
   expect(
     (
       screen.getByRole("checkbox", {
@@ -550,10 +553,8 @@ it("does not bake optimistic controls into a structural edit made while an RPC i
     }),
   };
   render(<AudioMixer snapshot={live} run={run} />);
-  fireEvent.change(
-    screen.getByRole("slider", { name: "Music → Monitor volume" }),
-    { target: { value: "60" } },
-  );
+  fireEvent.change(gain("Music → Monitor volume"), { target: { value: "60" } });
+  setupView();
   fireEvent.change(screen.getByRole("textbox", { name: "Monitor mix name" }), {
     target: { value: "Pending name" },
   });
@@ -567,16 +568,327 @@ it("does not bake optimistic controls into a structural edit made while an RPC i
       ).disabled,
     ).toBe(false),
   );
-  expect(
-    (
-      screen.getByRole("slider", {
-        name: "Music → Pending name volume",
-      }) as HTMLInputElement
-    ).value,
-  ).toBe("60");
+  expect((gain("Music → Pending name volume") as HTMLInputElement).value).toBe(
+    "60",
+  );
   await user.click(screen.getByRole("button", { name: "Apply routes" }));
   const apply = run.mock.calls.find(([p]) => p.command === "mixer_config")?.[0];
   expect(apply?.expected).toEqual(live.config);
   expect(apply?.settings.routes[0].volume).toBe(60);
   expect(apply?.settings.mixes[0].name).toBe("Pending name");
+});
+
+it("matches observed identities to installed apps only when unambiguous", () => {
+  const apps = [
+    {
+      index: 1,
+      name: "Chat",
+      application_id: "chat",
+      process_binary: "electron",
+      desktop_application: "chat.desktop",
+      sink: "speakers",
+    },
+    {
+      index: 2,
+      name: "Music",
+      application_id: "music",
+      process_binary: "electron",
+      desktop_application: "music.desktop",
+      sink: "speakers",
+    },
+  ];
+  expect(
+    sameApplication(
+      { field: "desktop_application", value: "chat.desktop" },
+      { field: "application_id", value: "chat" },
+      apps,
+    ),
+  ).toBe(true);
+  expect(
+    sameApplication(
+      { field: "desktop_application", value: "chat.desktop" },
+      { field: "process_binary", value: "electron" },
+      apps,
+    ),
+  ).toBe(false);
+  expect(
+    appChoices(apps).some(
+      (choice) => choice.selector.field === "process_binary",
+    ),
+  ).toBe(false);
+  expect(
+    sameApplication(
+      { field: "desktop_application", value: "chat.desktop" },
+      { field: "application_id", value: "chat" },
+      [...apps, { ...apps[0], index: 3, desktop_application: null }],
+    ),
+  ).toBe(false);
+});
+it("searches installed apps, fills stable identity, and retains pending matches without applying routing", async () => {
+  const user = userEvent.setup(),
+    run = vi.fn(async (_payload: Record<string, any>) => true),
+    snapshot = inventory();
+  snapshot.applications = [
+    { id: "org.example.Chat.desktop", name: "Chat App", detected: false },
+    { id: "org.example.Browser.desktop", name: "Browser", detected: true },
+  ];
+  snapshot.apps[0].desktop_application = "org.example.Browser.desktop";
+  const view = render(<AudioMixer snapshot={snapshot} run={run} />);
+  setupView();
+  await user.click(screen.getByText(/Edit inputs/, { selector: "summary" }));
+  const search = screen.getByRole("searchbox", {
+    name: "Search installed applications for Music",
+  });
+  await user.type(search, "Chat");
+  const chooser = screen.getByRole("listbox", {
+    name: "Installed application for Music",
+  });
+  expect(
+    screen.queryByRole("option", { name: /Browser · Detected/ }),
+  ).toBeNull();
+  await user.selectOptions(chooser, "org.example.Chat.desktop");
+  expect(screen.getByText(/Exact identity:/).textContent).toContain(
+    "org.example.Chat.desktop",
+  );
+  await user.click(screen.getByRole("button", { name: "Add application" }));
+  expect(run).toHaveBeenCalledTimes(1);
+  expect(screen.getByText("Chat App", { selector: "strong" })).toBeTruthy();
+  expect(
+    screen.getByText("Installed application · Pending audio"),
+  ).toBeTruthy();
+  expect(
+    (
+      screen
+        .getByText("Advanced: manual identity")
+        .closest("details") as HTMLDetailsElement
+    ).open,
+  ).toBe(false);
+  view.unmount();
+  render(<AudioMixer snapshot={snapshot} run={run} />);
+  setupView();
+  await user.click(screen.getByText(/Edit inputs/, { selector: "summary" }));
+  expect(screen.getByText("Chat App", { selector: "strong" })).toBeTruthy();
+  await user.click(screen.getByRole("button", { name: "Apply routes" }));
+  const applied = run.mock.calls.find(
+    ([payload]) => payload.command === "mixer_config",
+  )?.[0];
+  expect(applied?.settings.channels[0].apps).toContainEqual({
+    field: "desktop_application",
+    value: "org.example.Chat.desktop",
+  });
+  expect(applied?.settings.enabled).toBe(false);
+});
+it("excludes installed aliases already assigned through a playing identity in another group", async () => {
+  const user = userEvent.setup(),
+    snapshot = inventory();
+  snapshot.applications = [
+    { id: "browser.desktop", name: "Browser", detected: true },
+  ];
+  snapshot.apps[0].desktop_application = "browser.desktop";
+  snapshot.config.channels.push({
+    id: "other",
+    name: "Other",
+    sources: [],
+    apps: [{ field: "application_id", value: "org.example.Browser" }],
+  });
+  render(<AudioMixer snapshot={snapshot} run={vi.fn(async () => true)} />);
+  setupView();
+  await user.click(
+    screen.getAllByText(/Edit inputs/, { selector: "summary" })[0],
+  );
+  expect(
+    screen.queryByRole("option", { name: /Browser · Detected/ }),
+  ).toBeNull();
+});
+
+it("switches the default catch-all group atomically as a routing draft", async () => {
+  const user = userEvent.setup(),
+    snapshot = inventory(),
+    run = vi.fn(async (_payload: Record<string, any>) => true);
+  snapshot.config.channels[0].capture_unassigned = true;
+  snapshot.config.channels.push({
+    id: "other",
+    name: "Other",
+    apps: [],
+    sources: [],
+  });
+  render(<AudioMixer snapshot={snapshot} run={run} />);
+  setupView();
+  for (const summary of screen.getAllByText(/Edit inputs/, {
+    selector: "summary",
+  }))
+    await user.click(summary);
+  await user.click(
+    screen.getByRole("checkbox", { name: "Default for other apps · Other" }),
+  );
+  expect(
+    (
+      screen.getByRole("checkbox", {
+        name: "Default for other apps · Music",
+      }) as HTMLInputElement
+    ).checked,
+  ).toBe(false);
+  expect(
+    (
+      screen.getByRole("checkbox", {
+        name: "Default for other apps · Other",
+      }) as HTMLInputElement
+    ).checked,
+  ).toBe(true);
+  expect(screen.getAllByText("Default", { selector: "small" })).toHaveLength(1);
+  expect(run).toHaveBeenCalledTimes(1);
+  await user.click(screen.getByRole("button", { name: "Apply routes" }));
+  const applied = run.mock.calls.find(
+    ([p]) => p.command === "mixer_config",
+  )?.[0];
+  expect(
+    applied?.settings.channels.map((c: any) => !!c.capture_unassigned),
+  ).toEqual([false, true]);
+  expect(applied?.settings.channels[0].apps).toEqual(
+    snapshot.config.channels[0].apps,
+  );
+  expect(applied?.settings.enabled).toBe(false);
+});
+
+it("keeps all mix columns compact, separates setup forms and restores view/settings after reopening", async () => {
+  const user = userEvent.setup(),
+    snapshot = inventory(),
+    run = vi.fn(async (_p: Record<string, any>) => true);
+  snapshot.config.routes.push({
+    channel: "music",
+    mix: "stream",
+    volume: 70,
+    muted: false,
+  });
+  const view = render(<AudioMixer snapshot={snapshot} run={run} />);
+  expect(
+    screen.getByRole("slider", { name: "Music → Monitor volume" }),
+  ).toBeTruthy();
+  expect(
+    screen.getByRole("slider", { name: "Music → Stream volume" }),
+  ).toBeTruthy();
+  expect(
+    screen.queryByRole("textbox", { name: "Monitor mix name" }),
+  ).toBeNull();
+  expect(
+    screen.queryByRole("checkbox", { name: "Enable audio routing" }),
+  ).toBeNull();
+  await user.click(screen.getByRole("button", { name: "Stream mix settings" }));
+  expect(
+    screen.getByRole("slider", { name: "Stream master volume" }),
+  ).toBeTruthy();
+  view.unmount();
+  const reopened = render(<AudioMixer snapshot={snapshot} run={run} />);
+  expect(
+    screen
+      .getByRole("button", { name: "Stream mix settings" })
+      .getAttribute("aria-expanded"),
+  ).toBe("true");
+  await user.click(screen.getByRole("button", { name: "Routing setup" }));
+  expect(screen.queryByRole("slider")).toBeNull();
+  fireEvent.change(screen.getByRole("textbox", { name: "Monitor mix name" }), {
+    target: { value: "Headphones" },
+  });
+  reopened.unmount();
+  render(<AudioMixer snapshot={snapshot} run={run} />);
+  expect(
+    screen
+      .getByRole("button", { name: "Routing setup" })
+      .getAttribute("aria-pressed"),
+  ).toBe("true");
+  expect(
+    (
+      screen.getByRole("textbox", {
+        name: "Headphones mix name",
+      }) as HTMLInputElement
+    ).value,
+  ).toBe("Headphones");
+  await user.click(screen.getByRole("button", { name: "Mixer" }));
+  expect(
+    (screen.getByRole("button", { name: "Apply routes" }) as HTMLButtonElement)
+      .disabled,
+  ).toBe(false);
+  expect(
+    run.mock.calls.filter(([p]) => p.command === "mixer_config"),
+  ).toHaveLength(0);
+});
+it("creates a named app-bound channel from search, adds a draft route and makes an optional catch-all", async () => {
+  const user = userEvent.setup(),
+    snapshot = inventory(),
+    run = vi.fn(async (_p: Record<string, any>) => true);
+  snapshot.applications = [
+    { id: "chat.desktop", name: "Chat App", detected: false },
+  ];
+  render(<AudioMixer snapshot={snapshot} run={run} />);
+  await user.click(screen.getByRole("button", { name: "＋ Create channel" }));
+  await user.type(
+    screen.getByRole("searchbox", { name: "Search apps and inputs" }),
+    "Chat",
+  );
+  await user.click(
+    screen.getByRole("button", { name: "Chat App Not playing" }),
+  );
+  expect(screen.getByText("Chat App", { selector: "strong" })).toBeTruthy();
+  await user.click(
+    screen.getByRole("button", { name: "Add route Chat App to Monitor" }),
+  );
+  expect(
+    screen.getByRole("slider", { name: "Chat App → Monitor volume" }),
+  ).toBeTruthy();
+  await user.click(screen.getByRole("button", { name: "＋ Create channel" }));
+  await user.click(
+    screen.getByRole("button", { name: /All audio System sounds/ }),
+  );
+  expect(screen.getByText("Default", { selector: "small" })).toBeTruthy();
+  expect(run).toHaveBeenCalledTimes(1);
+  await user.click(screen.getByRole("button", { name: "Apply routes" }));
+  const saved = run.mock.calls.find(([p]) => p.command === "mixer_config")?.[0]
+    .settings;
+  expect(saved.channels.find((c: any) => c.name === "Chat App").apps).toEqual([
+    { field: "desktop_application", value: "chat.desktop" },
+  ]);
+  expect(saved.channels.filter((c: any) => c.capture_unassigned)).toHaveLength(
+    1,
+  );
+  expect(saved.enabled).toBe(false);
+});
+
+it("quick-creates a physical input channel without selecting owned devices or enabling routes", async () => {
+  const user = userEvent.setup(),
+    run = vi.fn(async (_p: Record<string, any>) => true);
+  render(<AudioMixer snapshot={inventory()} run={run} />);
+  await user.click(screen.getByRole("button", { name: "＋ Create channel" }));
+  expect(
+    screen.queryByRole("button", { name: "Owned mixer source" }),
+  ).toBeNull();
+  await user.click(screen.getByRole("button", { name: "USB microphone" }));
+  expect(
+    screen.getByText("USB microphone", { selector: "strong" }),
+  ).toBeTruthy();
+  expect(
+    screen.getByRole("button", { name: "Add route USB microphone to Monitor" }),
+  ).toBeTruthy();
+  await user.click(screen.getByRole("button", { name: "Apply routes" }));
+  const config = run.mock.calls.find(([p]) => p.command === "mixer_config")?.[0]
+    .settings;
+  expect(
+    config.channels.find((c: any) => c.name === "USB microphone").sources,
+  ).toEqual(["physical.mic"]);
+  expect(config.enabled).toBe(false);
+  expect(config.routes).toHaveLength(1);
+});
+
+it("keeps fade preferences in setup and exposes saving/fading status in both views", async () => {
+  const user = userEvent.setup(),
+    snapshot = { ...inventory(), fading: true };
+  render(<AudioMixer snapshot={snapshot} run={vi.fn(async () => true)} />);
+  expect(
+    screen.queryByRole("spinbutton", { name: "Default fade (ms)" }),
+  ).toBeNull();
+  expect(screen.getByText("Fading…")).toBeTruthy();
+  await user.click(screen.getByRole("button", { name: "Routing setup" }));
+  expect(
+    screen.getByRole("spinbutton", { name: "Default fade (ms)" }),
+  ).toBeTruthy();
+  expect(screen.getByText("Fading…")).toBeTruthy();
 });

@@ -19,7 +19,7 @@ const until=async(fn,name)=>{for(let n=0;n<150;n++){const value=await fn();if(va
 const initial=await bridge.request('snapshot');if(!initial.simulate||initial.mixer.config.enabled)throw Error('Requires simulated, disabled-routing fixture');
 const errors=[];window.addEventListener('error',event=>errors.push(String(event.message)));
 const button=name=>[...document.querySelectorAll('button')].find(b=>b.textContent.trim()===name);
-button('Audio mixer').click();
+button('Audio mixer').click(); await pause(80); button('Routing setup')?.click();
 const draft=async()=>(await bridge.request('ui_state_get'))?.formDrafts?.['audio-mixer'];
 const before=await until(async()=>button('＋ Add input group')&&button('＋ Add mix')&&await draft(),'mixer controls');
 if(button('＋ Add input group').disabled||button('＋ Add mix').disabled)throw Error('Creation buttons unexpectedly disabled');
@@ -37,7 +37,7 @@ if(expectFailure){
  if(!uuid.test(group.id)||!uuid.test(mix.id)||group.id===mix.id)throw Error('Created records need distinct UUIDv4 identities');
  if(group.apps.length||group.sources.length||mix.outputs.length)throw Error('Draft chose real audio endpoints');
  document.querySelector('[aria-label="Close Audio mixer"]').click();
- await until(()=>!document.querySelector('dialog[open]'),'mixer closed');button('Audio mixer').click();
+ await until(()=>!document.querySelector('dialog[open]'),'mixer closed');button('Audio mixer').click(); await pause(80); button('Routing setup')?.click();
  await until(async()=>JSON.stringify(counts((await draft()).config))===JSON.stringify(counts(after.config)),'creation drafts retained after reopening');
 }
 const backend=await bridge.request('snapshot');

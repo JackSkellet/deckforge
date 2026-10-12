@@ -27,17 +27,17 @@ const draft=async()=>(await bridge.request('ui_state_get'))?.formDrafts?.['audio
 button('Audio mixer').click();await until(()=>input('Voice → Monitor volume'),'mixer visible');
 if((await saved()).revision===undefined)throw Error('Host has no graph revision');
 // A new draft mix must survive every live update without becoming saved.
-button('＋ Add mix').click();await until(async()=>(await draft())?.config.mixes.length===3,'draft mix');
+button('Routing setup').click();await pause(50);button('＋ Add mix').click();await until(async()=>(await draft())?.config.mixes.length===3,'draft mix');button('Mixer').click();await pause(50);
 set(input('Voice → Monitor volume'),52);await until(async()=>(await saved()).config.routes[0].volume===52,'immediate route volume');
 input('Link Voice mix levels').click();await until(async()=>(await saved()).config.channels[0].linked,'immediate link');
 set(input('Voice → Monitor volume'),62);await until(async()=>(await saved()).config.routes[1].volume===70,'linked percentage delta');
 input('Mute Voice → Monitor').click();await until(async()=>(await saved()).config.routes[0].muted,'route mute');
 if((await saved()).config.routes[1].muted)throw Error('Linked mutes were not independent');
-set(input('Monitor master volume'),77);await until(async()=>(await saved()).config.mixes[0].volume===77,'master level');
-[...document.querySelectorAll('summary')].find(s=>s.textContent.startsWith('Monitor outputs')).click();
+document.querySelector('[aria-label="Monitor mix settings"]').click();await until(()=>input('Monitor master volume'),'mix settings');set(input('Monitor master volume'),77);await until(async()=>(await saved()).config.mixes[0].volume===77,'master level');
+// Output gains are directly available in the selected mix master.
 set(input('Monitor output · fixture.output volume'),33);await until(async()=>(await saved()).config.mixes[0].output_controls['fixture.output']?.volume===33,'output level');
 input('Mute Monitor output · fixture.output').click();await until(async()=>(await saved()).config.mixes[0].output_controls['fixture.output'].muted,'output mute');
-set(input('Default fade (ms)'),250);await until(async()=>(await saved()).config.fade_ms===250,'default fade');
+button('Routing setup').click();await pause(50);set(input('Default fade (ms)'),250);await until(async()=>(await saved()).config.fade_ms===250,'default fade');button('Mixer').click();await pause(50);
 for(const value of [63,64,65,66])set(input('Voice → Monitor volume'),value);
 await until(async()=>(await saved()).config.routes[0].volume===66,'rapid final value');
 const pending=await draft();if(!pending.dirty||pending.config.mixes.length!==3||(await saved()).config.mixes.length!==2)throw Error('Live updates lost or saved the draft mix');
