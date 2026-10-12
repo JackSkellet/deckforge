@@ -422,6 +422,52 @@ describe("desktop interactions", () => {
       }),
     );
   });
+  it("advertises a standard Linux drag format without accepting plain text as an action", async () => {
+    render(<App />);
+    const target = await screen.findByRole("button", {
+      name: "Key 2: Unassigned",
+    });
+    const library = document.querySelector(".library-action")!;
+    const data = new Map<string, string>();
+    const transfer = {
+      setData: (type: string, value: string) => data.set(type, value),
+      getData: (type: string) => data.get(type) ?? "",
+      get types() {
+        return [...data.keys()];
+      },
+      effectAllowed: "none",
+      dropEffect: "none",
+    };
+    fireEvent.dragStart(library, { dataTransfer: transfer });
+    expect(transfer.effectAllowed).toBe("copy");
+    expect(transfer.types).toContain("text/plain");
+    expect(transfer.getData("text/plain")).not.toBe("");
+    expect(transfer.getData("application/x-deckforge-action")).toBe("counter");
+    expect(fireEvent.dragOver(target, { dataTransfer: transfer })).toBe(false);
+    expect(transfer.dropEffect).toBe("copy");
+    fireEvent.drop(target, { dataTransfer: transfer });
+    await waitFor(() =>
+      expect(request).toHaveBeenCalledWith("command", {
+        device: "test",
+        command: "assign",
+        controller: "Keypad",
+        index: 1,
+        uuid: "counter",
+      }),
+    );
+    request.mockClear();
+    data.delete("application/x-deckforge-action");
+    fireEvent.drop(target, { dataTransfer: transfer });
+    expect(request.mock.calls.some(([, p]) => p?.command === "assign")).toBe(
+      false,
+    );
+    data.clear();
+    const source = screen.getByRole("button", { name: "Key 1: Counter" });
+    fireEvent.dragStart(source, { dataTransfer: transfer });
+    expect(transfer.effectAllowed).toBe("copyMove");
+    expect(transfer.getData("text/plain")).not.toBe("");
+    expect(transfer.getData("application/x-deckforge-slot")).toBe("counter-1");
+  });
 
   it("flushes the newest editor state before native Hide", async () => {
     const user = userEvent.setup();

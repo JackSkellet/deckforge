@@ -802,6 +802,9 @@ export default function App() {
             "application/x-deckforge-slot",
             item.context,
           );
+          // WebKitGTK needs a standard format for native drag feedback. The
+          // custom type remains the only payload accepted by our drop handler.
+          event.dataTransfer.setData("text/plain", item.name || item.uuid);
           event.dataTransfer.effectAllowed = "copyMove";
           setSelected(target);
         }}
@@ -1587,6 +1590,10 @@ export default function App() {
                         event.dataTransfer.setData(
                           "application/x-deckforge-action",
                           a.uuid,
+                        );
+                        event.dataTransfer.setData(
+                          "text/plain",
+                          a.name || a.uuid,
                         );
                         event.dataTransfer.effectAllowed = "copy";
                       }}
