@@ -9,6 +9,7 @@ license = "MIT"
 anyhow = "1"
 axum = { version = "0.8", features = ["ws"] }
 base64 = "0.22"
+blake3 = "1.8.2"
 clap = { version = "4", features = ["derive"] }
 csscolorparser = "0.7"
 eframe = { version = "0.36.2", default-features = false, features = ["default_fonts", "glow", "wayland", "x11", "accesskit"] }

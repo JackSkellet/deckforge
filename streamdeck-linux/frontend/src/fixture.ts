@@ -137,6 +137,7 @@ function assigned(
 }
 export function installFixture() {
   let listener: ((s: Snapshot) => void) | undefined;
+  let actionClipboard: { slot: Slot; mode: "copy" | "cut" } | null = null;
   let uiState: unknown = null;
   const snapshot: Snapshot = {
     running: true,
@@ -283,6 +284,50 @@ export function installFixture() {
       "Development fixture. No real hardware, files or plugins are accessed.",
     ],
   };
+  function transfer(
+    source: Slot,
+    target: { controller: string; index: number },
+    copy: boolean,
+    expected: string | null,
+  ) {
+    const destination = snapshot.slots.find(
+      (s) => s.controller === target.controller && s.index === target.index,
+    );
+    if ((destination?.context ?? null) !== expected)
+      throw new Error(
+        "The destination changed. Select it again before pasting.",
+      );
+    if (source.context === destination?.context) return;
+    const metadata = actions.find((a) => a.uuid === source.uuid);
+    if (metadata && !metadata.controllers.includes(target.controller as any))
+      throw new Error("Action does not support that control");
+    const reverse = actions.find((a) => a.uuid === destination?.uuid);
+    if (
+      !copy &&
+      destination &&
+      reverse &&
+      !reverse.controllers.includes(source.controller)
+    )
+      throw new Error("These actions cannot swap");
+    const result = structuredClone(source);
+    result.controller = target.controller as Slot["controller"];
+    result.index = target.index;
+    if (copy) {
+      result.context = crypto.randomUUID();
+      result.raw.ActionID = result.context;
+    }
+    snapshot.slots = snapshot.slots.filter(
+      (s) =>
+        s.context !== destination?.context &&
+        (copy || s.context !== source.context),
+    );
+    if (!copy && destination) {
+      destination.controller = source.controller;
+      destination.index = source.index;
+      snapshot.slots.push(destination);
+    }
+    snapshot.slots.push(result);
+  }
   window.deckforge = {
     onSnapshot(fn) {
       listener = fn;
@@ -302,6 +347,52 @@ export function installFixture() {
         return { enabled: payload?.enabled ?? false, this_session: true } as T;
       if (method === "pick_file") return null as T;
       if (method === "command") {
+        if (payload.command === "slot_copy" || payload.command === "slot_cut") {
+          const source = snapshot.slots.find(
+            (s) => s.context === payload.context,
+          );
+          if (!source) throw new Error("Unknown action");
+          const mode = payload.command === "slot_copy" ? "copy" : "cut";
+          actionClipboard = { slot: structuredClone(source), mode };
+          snapshot.clipboard = {
+            context: source.context,
+            name: source.name,
+            uuid: source.uuid,
+            controller: source.controller,
+            mode,
+          };
+        }
+        if (payload.command === "slot_clipboard_clear") {
+          actionClipboard = null;
+          snapshot.clipboard = null;
+        }
+        if (payload.command === "slot_paste") {
+          if (!actionClipboard) throw new Error("Action clipboard is empty");
+          const source =
+            actionClipboard.mode === "cut"
+              ? snapshot.slots.find(
+                  (s) => s.context === actionClipboard!.slot.context,
+                )
+              : actionClipboard.slot;
+          if (!source) throw new Error("Cut source is unavailable");
+          transfer(
+            source,
+            payload,
+            actionClipboard.mode === "copy",
+            payload.expected_target,
+          );
+          if (actionClipboard.mode === "cut") {
+            actionClipboard = null;
+            snapshot.clipboard = null;
+          }
+        }
+        if (payload.command === "slot_transfer") {
+          const source = snapshot.slots.find(
+            (s) => s.context === payload.context,
+          );
+          if (!source) throw new Error("Unknown source action");
+          transfer(source, payload, payload.copy, payload.expected_target);
+        }
         if (payload.command === "mixer_config") {
           if (!sameMixerValue(snapshot.mixer.config, payload.expected))
             throw new Error(

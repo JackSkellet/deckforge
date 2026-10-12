@@ -2,6 +2,7 @@
 //! application locally; no vendor key or decrypted asset is embedded or saved.
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce, aead::Aead};
 use anyhow::{Context, Result, bail, ensure};
+use base64::Engine as _;
 use ed25519_dalek::{Signature, VerifyingKey};
 use hkdf::Hkdf;
 use minicbor::{Decoder, data::Type};
@@ -35,6 +36,80 @@ pub fn validate_reference(path: &Path) -> Result<()> {
 pub fn read(bytes: &[u8], reference: &Path) -> Result<Value> {
     let plaintext = Zeroizing::new(decode(bytes, reference)?);
     serde_json::from_slice(&plaintext).context("Authenticated manifest is not valid JSON")
+}
+
+/// The original 7.6 verifier selects only Required=true records and compares
+/// raw file bytes using unkeyed BLAKE3-256 against Base64-decoded Hash. Missing
+/// Required defaults to false. Optional file hashes are deliberately not used.
+pub(crate) struct RequiredFile {
+    pub path: String,
+    pub digest: [u8; 32],
+}
+impl RequiredFile {
+    pub fn verify(&self, bytes: &[u8]) -> Result<()> {
+        ensure!(
+            blake3::hash(bytes).as_bytes() == &self.digest,
+            "Required plugin file integrity mismatch: {}",
+            self.path
+        );
+        Ok(())
+    }
+}
+pub(crate) fn required_files(manifest: &Value) -> Result<Vec<RequiredFile>> {
+    let files = manifest["Files"]
+        .as_array()
+        .context("Protected plugin Files table is missing or invalid")?;
+    ensure!(
+        files.len() <= 10_000,
+        "Protected plugin Files table exceeds 10000 entries"
+    );
+    let mut seen = std::collections::HashSet::new();
+    let mut required = vec![];
+    for record in files {
+        ensure!(record.is_object(), "Invalid protected plugin file record");
+        let required_flag = match record.get("Required") {
+            None => false,
+            Some(value) => value
+                .as_bool()
+                .context("Invalid protected plugin Required flag")?,
+        };
+        if !required_flag {
+            continue;
+        }
+        let path = record["Path"]
+            .as_str()
+            .context("Required plugin file Path missing")?
+            .replace('\\', "/");
+        ensure!(
+            !path.is_empty()
+                && path.len() <= 4096
+                && !path.starts_with('/')
+                && !path.contains(':')
+                && !path.chars().any(char::is_control)
+                && path
+                    .split('/')
+                    .all(|part| !part.is_empty() && part != "." && part != ".."),
+            "Unsafe required plugin file path"
+        );
+        ensure!(
+            seen.insert(path.clone()),
+            "Duplicate required plugin file path: {path}"
+        );
+        let hash = record["Hash"]
+            .as_str()
+            .context("Required plugin file Hash missing")?;
+        ensure!(hash.len() <= 128, "Required plugin file Hash is too long");
+        // Qt's default decoder is more permissive. Strict canonical Base64 is a
+        // deliberate input-validation policy; the observed file table is canonical.
+        let digest = base64::engine::general_purpose::STANDARD
+            .decode(hash)
+            .context("Invalid required plugin file Base64 hash")?;
+        let digest: [u8; 32] = digest
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("Required plugin file Hash must decode to 32 bytes"))?;
+        required.push(RequiredFile { path, digest });
+    }
+    Ok(required)
 }
 
 /// Returns authenticated plaintext in memory, never a plaintext file.
@@ -433,6 +508,41 @@ fn decode_with_keys(bytes: &[u8], keys: &Keys) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn required_file_blake3_and_optional_semantics() {
+        let bytes = b"independent file fixture";
+        let hash = base64::engine::general_purpose::STANDARD.encode(blake3::hash(bytes).as_bytes());
+        let manifest = serde_json::json!({"Files":[{"Path":"sub\\code.bin","Hash":hash,"Required":true},{"Path":"optional.bin","Hash":"not decoded","Required":false},{"Path":"default-optional.bin"}]});
+        let files = required_files(&manifest).unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, "sub/code.bin");
+        files[0].verify(bytes).unwrap();
+        assert!(files[0].verify(b"changed").is_err());
+        assert!(files[0].verify(&bytes[..bytes.len() - 1]).is_err());
+    }
+    #[test]
+    fn required_table_rejects_paths_duplicates_flags_and_bad_digests() {
+        let hash = base64::engine::general_purpose::STANDARD.encode([0; 32]);
+        for path in ["../x", "/absolute", "C:\\x", "a//b", "a/./b", "a/../b", ""] {
+            assert!(
+                required_files(
+                    &serde_json::json!({"Files":[{"Path":path,"Hash":hash,"Required":true}]})
+                )
+                .is_err()
+            );
+        }
+        let record = serde_json::json!({"Path":"a/b","Hash":hash,"Required":true});
+        assert!(required_files(&serde_json::json!({"Files":[record.clone(),record]})).is_err());
+        for bad in [
+            serde_json::json!({}),
+            serde_json::json!({"Files":null}),
+            serde_json::json!({"Files":[{"Required":"true"}]}),
+            serde_json::json!({"Files":[{"Path":"x","Required":true,"Hash":"!"}]}),
+            serde_json::json!({"Files":[{"Path":"x","Required":true,"Hash":"YQ=="}]}),
+        ] {
+            assert!(required_files(&bad).is_err());
+        }
+    }
     use ed25519_dalek::{Signer, SigningKey};
     use minicbor::Encoder;
 

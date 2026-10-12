@@ -59,10 +59,7 @@ fn parse(path: &Path, reference: Option<&Path>) -> Result<(Plugin, Vec<Action>)>
     let root = path
         .canonicalize()
         .with_context(|| format!("Plugin directory unavailable: {}", path.display()))?;
-    let manifest = crate::package::read_manifest_with_reference(
-        &fs::read(root.join("manifest.json")).context("Read plugin manifest.json")?,
-        reference,
-    )?;
+    let manifest = crate::package::read_installed_manifest(&root, reference)?;
     let id = manifest["UUID"]
         .as_str()
         .filter(|value| !value.is_empty())

@@ -39,6 +39,8 @@ pub(super) struct Page {
     pub slots: Vec<Slot>,
     pub raw: Value,
     pub source_manifest: Option<String>,
+    #[serde(default)]
+    pub asset_source: Option<transfer::AssetSource>,
     pub manifest_path: String,
 }
 #[derive(Clone, Serialize, Deserialize)]
@@ -71,10 +73,10 @@ pub(super) struct Library {
     #[serde(default)]
     pub bundles: HashMap<String, HashMap<String, Option<String>>>,
 }
-fn new_id() -> String {
+pub(super) fn new_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
-fn page_path(id: &str) -> String {
+pub(super) fn page_path(id: &str) -> String {
     format!(
         "Profiles/{}/manifest.json",
         profile::encoded_uuid(id).unwrap_or_else(|| id.into())
@@ -88,6 +90,7 @@ fn page(name: &str) -> Page {
         slots: vec![],
         raw: json!({"Controllers":[]}),
         source_manifest: None,
+        asset_source: None,
         manifest_path: page_path(&id),
     }
 }
@@ -134,7 +137,7 @@ fn page_label(profile: &Profile, page: &Page) -> String {
     }
     "Folder".into()
 }
-fn remap_page_references(value: &mut Value, mapping: &HashMap<String, String>) {
+pub(super) fn remap_page_references(value: &mut Value, mapping: &HashMap<String, String>) {
     match value {
         Value::Object(fields) => {
             for (key, value) in fields {
@@ -176,12 +179,12 @@ fn renew_action_ids(value: &mut Value) {
     }
 }
 
-fn duplicate_slot_identity(slot: &mut Slot, actions: &[Action]) -> Result<()> {
+pub(super) fn duplicate_slot_identity(slot: &mut Slot, actions: &[Action]) -> Result<()> {
     let original = slot.clone();
     slot.children.clear();
     slot.context = new_id();
     renew_action_ids(&mut slot.raw);
-    if slot.raw.is_object() {
+    if slot.raw.as_object().is_some_and(|raw| !raw.is_empty()) {
         slot.raw["ActionID"] = json!(slot.context);
     }
     slot.hydrate_children(actions)?;
@@ -193,11 +196,25 @@ fn duplicate_slot_identity(slot: &mut Slot, actions: &[Action]) -> Result<()> {
 
 fn restore_resource_bindings(original: &Slot, duplicate: &mut Slot) {
     duplicate.resources = original.resources.clone();
+    duplicate.asset_source = original.asset_source.clone();
     for (old_group, new_group) in original.children.iter().zip(&mut duplicate.children) {
         for (old, new) in old_group.iter().zip(new_group) {
+            let context = new.context.clone();
+            let child_id = new.child_id.clone();
+            let action_id = new.raw.get("ActionID").cloned();
+            let children = std::mem::take(&mut new.children);
+            *new = old.clone();
+            new.context = context;
+            new.child_id = child_id;
+            new.children = children;
+            if let Some(id) = action_id {
+                new.raw["ActionID"] = id;
+            }
             restore_resource_bindings(old, new);
+            new.sync_children_raw();
         }
     }
+    duplicate.sync_children_raw();
 }
 
 impl Library {
@@ -341,14 +358,9 @@ impl Host {
             .and_then(|s| s["Image"].as_str())
             .filter(|s| !s.is_empty())
         {
-            let source = self.library.profiles.iter().find_map(|profile| {
-                profile
-                    .pages
-                    .iter()
-                    .find(|page| page.slots.iter().any(|s| s.find(&slot.context).is_some()))
-                    .and_then(|page| Some((profile.source.clone()?, page.source_manifest.clone()?)))
-            });
-            if let Some((path, manifest)) = source {
+            if let Some(origin) = self.asset_origin(slot) {
+                let path = origin.source;
+                let manifest = origin.manifest;
                 if !self.profile_assets.contains_key(&path)
                     && let Ok(bundle) = profile::load_bundle(&path)
                 {
@@ -639,6 +651,7 @@ impl Host {
                     children: vec![],
                     child_id: String::new(),
                     resources: None,
+                    asset_source: None,
                     in_multi_action: false,
                     context: new_id(),
                     controller: item.controller.clone(),
@@ -690,6 +703,7 @@ impl Host {
                 name: imported.page_raw["Name"].as_str().unwrap_or("").into(),
                 slots,
                 raw: imported.page_raw.clone(),
+                asset_source: None,
                 source_manifest: Some(original),
                 manifest_path: target,
             });
@@ -1140,6 +1154,7 @@ fn navigation_slot(uuid: &str, name: &str, index: u8, settings: Value) -> Slot {
         children: vec![],
         child_id: String::new(),
         resources: None,
+        asset_source: None,
         in_multi_action: false,
         context: new_id(),
         controller: "Keypad".into(),

@@ -50,18 +50,11 @@ impl Host {
         if refs.is_empty() {
             return Ok(BTreeMap::new());
         }
-        let owner = self
-            .library
-            .profiles
-            .iter()
-            .find(|p| {
-                p.pages
-                    .iter()
-                    .any(|page| page.slots.iter().any(|s| s.find(&slot.context).is_some()))
-            })
-            .context("Resource profile missing")?;
-        let profile_id = owner.id.clone();
-        let source = owner.source.clone().context("Resource archive missing")?;
+        let origin = self
+            .asset_origin(slot)
+            .context("Resource archive missing")?;
+        let profile_id = origin.profile;
+        let source = origin.source;
         if !self.profile_assets.contains_key(&source) {
             self.profile_assets
                 .insert(source.clone(), profile::load_bundle(&source)?);

@@ -13,8 +13,9 @@ are dependencies. Linux HTML support uses system GTK3 and WebKitGTK4.1 libraries
 
 This is a working early compatibility build, **not a complete port of Elgato's
 application**. Its first targets are the unchanged official Counter and Layouts
-feedback sample plugins. Elgato's Windows executable is an analysis input, not a
-runtime dependency.
+feedback sample plugins. Elgato's Windows executable is never run. The supported
+protected Marketplace format can optionally use a local executable as a static
+key reference during package verification and plugin loading.
 
 ## Native Discord plugin
 
@@ -53,6 +54,11 @@ control. Categories and action icons come from plugin manifests; **All**, **Keys
 and **Dials** filter the library. Incompatible assignments are disabled.
 Edit simple settings with text, numeric and checkbox controls,
 then Save changes.
+Right-click a control or use **Edit** to copy, cut, paste or remove it. Dragging
+between occupied controls swaps them; Ctrl-drag copies. See
+[Action editing](docs/ACTION_EDITING.md) for shortcuts, folder copies and draft
+protection. [Protected packages](docs/PROTECTED_PACKAGES.md) describes the optional
+static reference needed by some Marketplace downloads.
 Use **Plugin settings…** to open an action's original HTML property inspector
 when its manifest provides one. Advanced JSON editing remains available. Draft changes survive periodic refresh
 and switching between controls. **Plugins** contains installation and runtime

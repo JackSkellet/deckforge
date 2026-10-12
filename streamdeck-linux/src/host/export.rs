@@ -10,10 +10,8 @@ impl Host {
         if let Ok(destination) = path.canonicalize() {
             ensure!(
                 !self
-                    .library
-                    .profiles
-                    .iter()
-                    .filter_map(|p| p.source.as_ref())
+                    .retained_asset_sources()
+                    .into_iter()
                     .filter_map(|source| source.canonicalize().ok())
                     .any(|source| source == destination),
                 "Choose an export destination outside the managed profile sources"
@@ -94,7 +92,19 @@ pub(super) fn build_profile_files(
                 .as_ref()
                 .is_some_and(|paths| !paths.is_empty())
         });
-    let wrapped = added_resources
+    let transferred_resources = profile
+        .pages
+        .iter()
+        .flat_map(|p| &p.slots)
+        .flat_map(Slot::flatten)
+        .any(|s| {
+            s.asset_source.is_some()
+                && s.raw["Resources"]
+                    .as_object()
+                    .is_some_and(|r| !r.is_empty())
+        });
+    let wrapped = transferred_resources
+        || added_resources
         || added_audio
         || source
             .as_ref()
@@ -146,7 +156,18 @@ pub(super) fn build_profile_files(
             "{root}{}",
             page.manifest_path.trim_end_matches("manifest.json")
         );
-        if let (Some(source), Some(old_manifest)) = (&source, &page.source_manifest) {
+        let page_bundle = page
+            .asset_source
+            .as_ref()
+            .map(|o| profile::load_bundle(&o.source))
+            .transpose()?;
+        let page_source = page_bundle.as_ref().or(source.as_ref());
+        let page_manifest = page
+            .asset_source
+            .as_ref()
+            .map(|o| &o.manifest)
+            .or(page.source_manifest.as_ref());
+        if let (Some(source), Some(old_manifest)) = (page_source, page_manifest) {
             let old_root = old_manifest
                 .strip_suffix("manifest.json")
                 .context("Invalid source page manifest")?;
@@ -422,6 +443,14 @@ fn export_action_at(
     if native {
         raw = json!({});
     }
+    let origin = slot
+        .asset_source
+        .as_ref()
+        .map(|o| profile::load_bundle(&o.source))
+        .transpose()?;
+    if let Some(bundle) = &origin {
+        preserve_transferred_resources(slot, bundle, &mut raw, files, resource_ids)?;
+    }
     embed_audio_resource(slot, native, &mut raw, files)?;
     embed_plugin_resources(slot, &mut raw, files, resource_ids)?;
     raw["UUID"] = json!(slot.uuid);
@@ -442,6 +471,29 @@ fn export_action_at(
                 .unwrap_or_else(|_| uuid::Uuid::new_v4())
                 .to_string()
         );
+    }
+    if let Some((origin, bundle)) = slot.asset_source.as_ref().zip(origin.as_ref()) {
+        let prefix = origin
+            .manifest
+            .strip_suffix("manifest.json")
+            .context("Invalid asset source page")?;
+        for (name, bytes) in bundle.files() {
+            if let Some(relative) = name.strip_prefix(prefix).filter(|r| *r != "manifest.json") {
+                let direct = format!("{page_root}{relative}");
+                if files
+                    .get(&direct)
+                    .is_some_and(|old| old.as_slice() != bytes)
+                {
+                    insert_unique(
+                        files,
+                        format!("{page_root}Transferred/{}/{relative}", slot.context),
+                        bytes.to_vec(),
+                    )?;
+                } else if !files.contains_key(&direct) {
+                    insert_unique(files, direct, bytes.to_vec())?;
+                }
+            }
+        }
     }
     let mut states = slot.states.as_array().cloned().unwrap_or_default();
     let state = usize::try_from(slot.state).context("Action state index overflow")?;
@@ -465,6 +517,21 @@ fn export_action_at(
             } else {
                 metadata["Image"] = json!("");
             }
+        } else if let Some((origin, bundle)) = slot.asset_source.as_ref().zip(origin.as_ref())
+            && let Some(image) = metadata["Image"].as_str().filter(|s| !s.is_empty())
+            && let Some(page) = bundle
+                .pages
+                .iter()
+                .find(|p| p.manifest_path() == origin.manifest)
+            && let Ok(bytes) = page.asset(image)
+        {
+            let extension = Path::new(image)
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("bin");
+            let relative = format!("Images/transfer-{}-{index}.{extension}", slot.context);
+            insert_unique(files, format!("{page_root}{relative}"), bytes)?;
+            metadata["Image"] = json!(relative);
         } else if native
             && let Some(source) = metadata["Image"]
                 .as_str()
@@ -578,6 +645,76 @@ fn export_action_at(
         }
     }
     Ok(raw)
+}
+
+fn preserve_transferred_resources(
+    slot: &Slot,
+    bundle: &profile::ProfileBundle,
+    raw: &mut Value,
+    files: &mut BTreeMap<String, Vec<u8>>,
+    ids: &mut HashMap<String, String>,
+) -> Result<()> {
+    if slot.resources.is_some() && slot.uuid != crate::audio_output::PLAY {
+        return Ok(());
+    }
+    let Some(references) = raw["Resources"].as_object().cloned() else {
+        return Ok(());
+    };
+    if references.is_empty() {
+        return Ok(());
+    }
+    let mut registry: Value = files
+        .get("Resources/manifest.json")
+        .map(|b| serde_json::from_slice(b))
+        .transpose()?
+        .unwrap_or_else(|| json!({"resources":{}}));
+    let resources = registry["resources"]
+        .as_object_mut()
+        .context("Invalid resource registry")?;
+    for (key, id) in references {
+        let original = id.as_str().context("Resource ID must be text")?;
+        let origin = slot.asset_source.as_ref().unwrap();
+        let alias = format!("archive:{}#{original}", origin.source.display());
+        let id = if let Some(id) = ids.get(&alias) {
+            id.clone()
+        } else {
+            let (name, bytes) = bundle.resource(original)?;
+            let name = Path::new(&name)
+                .file_name()
+                .and_then(|s| s.to_str())
+                .context("Invalid resource name")?;
+            safe_export_path(name)?;
+            let existing = resources
+                .get(original)
+                .and_then(|r| r["file"].as_str())
+                .is_some_and(|relative| {
+                    let member = if relative.starts_with("Resources/") {
+                        relative.to_owned()
+                    } else {
+                        format!("Resources/{relative}")
+                    };
+                    Path::new(relative).file_name().and_then(|n| n.to_str()) == Some(name)
+                        && files.get(&member) == Some(&bytes)
+                });
+            let id = if existing {
+                original.to_owned()
+            } else {
+                let id = uuid::Uuid::new_v4().to_string();
+                let relative = format!("{id}/{name}");
+                insert_unique(files, format!("Resources/{relative}"), bytes)?;
+                resources.insert(id.clone(), json!({"file":relative}));
+                id
+            };
+            ids.insert(alias, id.clone());
+            id
+        };
+        raw["Resources"][key] = json!(id);
+    }
+    files.insert(
+        "Resources/manifest.json".into(),
+        serde_json::to_vec_pretty(&registry)?,
+    );
+    Ok(())
 }
 
 fn embed_plugin_resources(
@@ -936,6 +1073,7 @@ mod tests {
                     id: page.page.clone(),
                     name: page.page_raw["Name"].as_str().unwrap_or("").to_owned(),
                     raw: page.page_raw.clone(),
+                    asset_source: None,
                     source_manifest: Some(page.manifest_path()),
                     manifest_path: page
                         .manifest_path()
@@ -1424,6 +1562,7 @@ mod tests {
                 slots: vec![],
                 raw: json!({"Controllers":[]}),
                 source_manifest: None,
+                asset_source: None,
                 manifest_path: format!(
                     "Profiles/{}/manifest.json",
                     profile::encoded_uuid(&pin).unwrap()
@@ -1642,5 +1781,64 @@ mod tests {
         let before = fs::read(&source).unwrap();
         assert!(write_archive(&source, &BTreeMap::from([("invalid".into(), vec![1])])).is_err());
         assert_eq!(fs::read(source).unwrap(), before);
+    }
+    #[test]
+    fn transferred_archive_resources_and_animation_survive_without_profile_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let (source, current, _, animation) = source_fixture(dir.path());
+        let (wav, bytes) = local_wav(dir.path(), "portable.wav", 41);
+        let mut original = imported(&source);
+        let page = original.pages.iter_mut().find(|p| p.id == current).unwrap();
+        page.slots[0].resources = Some(BTreeMap::from([(
+            "media".into(),
+            wav.to_str().unwrap().to_owned(),
+        )]));
+        let with_resource = dir.path().join("original-resources.streamDeckProfile");
+        write_archive(
+            &with_resource,
+            &build_profile_files(&original, &current, &HashMap::new()).unwrap(),
+        )
+        .unwrap();
+        let mut copied = imported(&with_resource);
+        let page = copied.pages.iter_mut().find(|p| p.id == current).unwrap();
+        page.slots[0].asset_source = Some(transfer::AssetSource {
+            source: with_resource.clone(),
+            manifest: page.source_manifest.clone().unwrap(),
+            profile: copied.id.clone(),
+        });
+        let mut second = page.slots[0].clone();
+        second.context = library::new_id();
+        second.index = 1;
+        page.slots.push(second);
+        copied.pages.retain(|p| p.id == current);
+        copied.pin_page = current.clone();
+        copied.source = None;
+        for page in &mut copied.pages {
+            page.source_manifest = None;
+        }
+        let output = dir.path().join("transferred.streamDeckProfile");
+        write_archive(
+            &output,
+            &build_profile_files(&copied, &current, &HashMap::new()).unwrap(),
+        )
+        .unwrap();
+        let loaded = profile::load_bundle(&output).unwrap();
+        let page = loaded.page(&current).unwrap();
+        let a = &page.slots[0];
+        let b = &page.slots[1];
+        assert_eq!(a.raw["Resources"]["media"], b.raw["Resources"]["media"]);
+        assert_eq!(
+            loaded
+                .resource(a.raw["Resources"]["media"].as_str().unwrap())
+                .unwrap()
+                .1,
+            bytes
+        );
+        assert_eq!(
+            page.asset(a.states[0]["Image"].as_str().unwrap()).unwrap(),
+            animation
+        );
+        assert_eq!(a.settings, json!({"number":20}));
+        assert_eq!(a.raw["FutureAction"], 6);
     }
 }

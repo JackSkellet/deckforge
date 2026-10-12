@@ -12,7 +12,7 @@ Work in progress. **This is not feature complete yet.** Existing Elgato profiles
 
 Current working areas include:
 
-- An always-dark React/TypeScript editor embedded in a native desktop window, with searchable actions, drag assignment, tray/background operation, and Stream Deck+ controls.
+- An always-dark React/TypeScript editor embedded in a native desktop window, with searchable actions, copy/paste, drag rearrangement, tray/background operation, and Stream Deck+ controls.
 - Profiles, pages, folders, pinned actions, and original-format profile import/export.
 - Node, HTML and native Linux plugins, property inspectors, portable resources, feedback layouts, and a native Rust Discord plugin in development.
 - Multi Actions, Dial Stacks, Action Triggers, Linux desktop actions, and a native soundboard.

@@ -184,6 +184,9 @@ impl Slot {
                         // own settings or child records have just been edited.
                         children: previous.map(|s| s.children.clone()).unwrap_or_default(),
                         child_id: id,
+                        asset_source: previous
+                            .and_then(|s| s.asset_source.clone())
+                            .or_else(|| self.asset_source.clone()),
                         resources: previous
                             .filter(|s| s.raw.get("Resources") == raw.get("Resources"))
                             .and_then(|s| s.resources.clone()),

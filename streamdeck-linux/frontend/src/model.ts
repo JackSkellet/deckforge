@@ -46,7 +46,15 @@ export interface Profile {
   page_order: string[];
   pages: { id: string; name: string; folder: boolean }[];
 }
+export interface Clipboard {
+  name: string;
+  uuid: string;
+  controller: Controller;
+  mode: "copy" | "cut";
+  context: string;
+}
 export interface Snapshot {
+  clipboard?: Clipboard | null;
   running: boolean;
   device: string;
   firmware: string;

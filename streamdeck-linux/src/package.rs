@@ -6,33 +6,132 @@ use std::{
     ffi::CString,
     fs,
     io::{Read, Seek, SeekFrom},
-    os::unix::{ffi::OsStrExt, fs::PermissionsExt},
+    os::{
+        fd::{AsRawFd, FromRawFd},
+        unix::{
+            ffi::OsStrExt,
+            fs::{OpenOptionsExt, PermissionsExt},
+        },
+    },
     path::{Path, PathBuf},
 };
 
 /// Marketplace-protected manifests are binary envelopes, not malformed JSON.
-/// Keep original bytes intact until protected-package verification is supported.
+/// A protected manifest requires an explicit local original-application reference.
 pub(crate) fn read_manifest(bytes: &[u8]) -> Result<Value> {
     ensure!(
         !bytes.starts_with(b"ELGATO"),
-        "This plugin has an Elgato-protected manifest. Protected Marketplace package import is not supported yet."
+        "This plugin has an Elgato-protected manifest. Supply the original Stream Deck application with --reference-app to authenticate and verify it."
     );
     serde_json::from_slice(bytes).context("Invalid plugin manifest JSON")
 }
 
-pub(crate) fn read_manifest_with_reference(
-    bytes: &[u8],
-    reference: Option<&Path>,
-) -> Result<Value> {
+// Authentication alone is not file-integrity verification. Only the archive and
+// installed-folder readers below return a manifest after that additional gate.
+fn decode_manifest(bytes: &[u8], reference: Option<&Path>) -> Result<Value> {
     if bytes.starts_with(b"ELGATO")
         && let Some(reference) = reference
     {
-        let _manifest = crate::protected_manifest::read(bytes, reference)?;
-        bail!(
-            "Protected manifest authenticated, but package file-integrity verification is not implemented yet; installation remains blocked"
-        );
+        return crate::protected_manifest::read(bytes, reference);
     }
     read_manifest(bytes)
+}
+
+/// Revalidate protected required files on every load/restart. Directory-relative
+/// opens refuse symlinks and special files without blocking on FIFO endpoints.
+pub(crate) fn read_installed_manifest(root: &Path, reference: Option<&Path>) -> Result<Value> {
+    let directory = fs::File::options()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(root)
+        .context("Open plugin directory")?;
+    let mut manifest_file =
+        open_plugin_file(&directory, "manifest.json").context("Read plugin manifest.json")?;
+    let mut bytes = vec![];
+    (&mut manifest_file)
+        .take(MAX_FILE + 1)
+        .read_to_end(&mut bytes)?;
+    ensure!(
+        bytes.len() as u64 <= MAX_FILE,
+        "Plugin manifest exceeds 32 MiB"
+    );
+    let manifest = decode_manifest(&bytes, reference)?;
+    if bytes.starts_with(b"ELGATO") {
+        verify_installed_files(&directory, &manifest)?;
+    }
+    Ok(manifest)
+}
+fn open_plugin_file(root: &fs::File, path: &str) -> Result<fs::File> {
+    let mut directory = root.try_clone()?;
+    let parts = path.split('/').collect::<Vec<_>>();
+    ensure!(
+        !parts.is_empty()
+            && parts.iter().all(|s| !s.is_empty()
+                && *s != "."
+                && *s != ".."
+                && !s.contains(['\\', ':', '\0'])),
+        "Unsafe plugin file path"
+    );
+    for (index, part) in parts.iter().enumerate() {
+        let last = index + 1 == parts.len();
+        let name = CString::new(*part)?;
+        // SAFETY: The parent descriptor is owned/open, the relative component is
+        // validated, and the returned descriptor is immediately owned by File.
+        let fd = unsafe {
+            libc::openat(
+                directory.as_raw_fd(),
+                name.as_ptr(),
+                libc::O_RDONLY
+                    | libc::O_NOFOLLOW
+                    | libc::O_NONBLOCK
+                    | libc::O_CLOEXEC
+                    | if last { 0 } else { libc::O_DIRECTORY },
+            )
+        };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error())
+                .with_context(|| format!("Required plugin file unavailable or unsafe: {path}"));
+        }
+        directory = unsafe { fs::File::from_raw_fd(fd) };
+    }
+    let metadata = directory.metadata()?;
+    ensure!(
+        metadata.is_file(),
+        "Plugin file is not a regular file: {path}"
+    );
+    ensure!(
+        metadata.len() <= MAX_FILE,
+        "Plugin file exceeds 32 MiB: {path}"
+    );
+    Ok(directory)
+}
+fn verify_installed_files(root: &fs::File, manifest: &Value) -> Result<()> {
+    let mut total = 0usize;
+    for entry in crate::protected_manifest::required_files(manifest)? {
+        let mut file = open_plugin_file(root, &entry.path)?;
+        let mut hash = blake3::Hasher::new();
+        let mut read = 0u64;
+        let mut buffer = [0; 65536];
+        loop {
+            let count = file.read(&mut buffer)?;
+            if count == 0 {
+                break;
+            }
+            read += count as u64;
+            total = total.checked_add(count).context("Plugin size overflow")?;
+            ensure!(
+                read <= MAX_FILE && total <= MAX_TOTAL,
+                "Required plugin files exceed size limit"
+            );
+            hash.update(&buffer[..count]);
+        }
+        ensure!(
+            hash.finalize().as_bytes() == &entry.digest,
+            "Required plugin file integrity mismatch: {}",
+            entry.path
+        );
+    }
+    Ok(())
 }
 
 const MAX_ENTRIES: usize = 10_000;
@@ -193,7 +292,8 @@ fn validated_archive(
         .get(&format!("{folder}/manifest.json"))
         .and_then(|e| e.bytes.as_ref())
         .context("Plugin manifest.json missing")?;
-    let manifest = read_manifest_with_reference(manifest, reference)?;
+    let protected = manifest.starts_with(b"ELGATO");
+    let manifest = decode_manifest(manifest, reference)?;
     let uuid = manifest["UUID"]
         .as_str()
         .context("Plugin manifest UUID missing")?;
@@ -201,6 +301,15 @@ fn validated_archive(
         folder == format!("{uuid}.sdPlugin"),
         "Plugin manifest UUID does not match folder name"
     );
+    if protected {
+        for file in crate::protected_manifest::required_files(&manifest)? {
+            let bytes = entries
+                .get(&format!("{folder}/{}", file.path))
+                .and_then(|e| e.bytes.as_deref())
+                .with_context(|| format!("Required plugin file missing: {}", file.path))?;
+            file.verify(bytes)?;
+        }
+    }
     for name in entries.keys() {
         let mut parent = Path::new(name).parent();
         while let Some(path) = parent {
@@ -293,6 +402,53 @@ mod tests {
     }
 
     use super::*;
+    fn integrity_manifest(bytes: &[u8]) -> Value {
+        use base64::Engine as _;
+        serde_json::json!({"Files":[{"Path":"sub/file","Hash":base64::engine::general_purpose::STANDARD.encode(blake3::hash(bytes).as_bytes()),"Required":true},{"Path":"optional","Required":false}]})
+    }
+    #[test]
+    fn installed_required_files_recheck_contents_and_optional_absence() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir(tmp.path().join("sub")).unwrap();
+        fs::write(tmp.path().join("sub/file"), b"good").unwrap();
+        let root = fs::File::open(tmp.path()).unwrap();
+        let manifest = integrity_manifest(b"good");
+        verify_installed_files(&root, &manifest).unwrap();
+        fs::write(tmp.path().join("sub/file"), b"tampered").unwrap();
+        assert!(
+            verify_installed_files(&root, &manifest)
+                .unwrap_err()
+                .to_string()
+                .contains("integrity mismatch")
+        );
+        fs::remove_file(tmp.path().join("sub/file")).unwrap();
+        assert!(verify_installed_files(&root, &manifest).is_err());
+    }
+    #[test]
+    fn installed_integrity_refuses_symlinks_fifo_and_oversize() {
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(outside.path().join("file"), b"good").unwrap();
+        let root = fs::File::open(tmp.path()).unwrap();
+        let manifest = integrity_manifest(b"good");
+        std::os::unix::fs::symlink(outside.path(), tmp.path().join("sub")).unwrap();
+        assert!(verify_installed_files(&root, &manifest).is_err());
+        fs::remove_file(tmp.path().join("sub")).unwrap();
+        fs::create_dir(tmp.path().join("sub")).unwrap();
+        let path = tmp.path().join("sub/file");
+        std::os::unix::fs::symlink(outside.path().join("file"), &path).unwrap();
+        assert!(verify_installed_files(&root, &manifest).is_err());
+        fs::remove_file(&path).unwrap();
+        let name = CString::new(path.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        assert!(verify_installed_files(&root, &manifest).is_err());
+        fs::remove_file(&path).unwrap();
+        fs::File::create(&path)
+            .unwrap()
+            .set_len(MAX_FILE + 1)
+            .unwrap();
+        assert!(verify_installed_files(&root, &manifest).is_err());
+    }
     use std::io::Write;
 
     fn make_archive(path: &Path, files: &[(&str, &[u8])]) {

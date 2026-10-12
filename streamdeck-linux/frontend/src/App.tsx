@@ -19,6 +19,7 @@ import {
 import { Field, Check, SettingsFields } from "./Fields";
 import { Sequence } from "./Sequence";
 import { AudioMixer } from "./Mixer";
+import { ActionEdit, isEditingTarget } from "./ActionEdit";
 import { Modal, Plugins, Preferences } from "./Panels";
 import {
   exportTextDrafts,
@@ -78,6 +79,11 @@ export default function App() {
     operation: "create" | "rename" | "delete" | "duplicate";
   } | null>(null);
   const [saving, setSaving] = useState(false);
+  const [editBusy, setEditBusy] = useState(false);
+  const [editMenuRequest, setEditMenuRequest] = useState<{
+    id: number;
+    anchor?: { x: number; y: number };
+  }>({ id: 0 });
   const form = useRef<HTMLFormElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   const [booted, setBooted] = useState(false);
@@ -220,6 +226,7 @@ export default function App() {
       !draft.dirty ||
       readonly ||
       saving ||
+      editBusy ||
       !form.current?.reportValidity()
     )
       return;
@@ -262,11 +269,214 @@ export default function App() {
         event.preventDefault();
         void save();
       }
+      if (
+        event.defaultPrevented ||
+        event.repeat ||
+        event.altKey ||
+        event.shiftKey ||
+        isEditingTarget(event.target)
+      )
+        return;
+      if (
+        event.key === "Escape" &&
+        snapshot?.clipboard?.mode === "cut" &&
+        !document.querySelector(
+          ".control-edit-menu[open],.page-menu[open],.sidebar-bottom details[open]",
+        )
+      ) {
+        event.preventDefault();
+        void cancelCut();
+        return;
+      }
+      const shortcut = event.key.toLowerCase();
+      if (
+        (event.ctrlKey || event.metaKey) &&
+        ["c", "x", "v"].includes(shortcut)
+      ) {
+        event.preventDefault();
+        if (shortcut === "v") void pasteAction();
+        else void clipboardAction(shortcut === "x" ? "cut" : "copy");
+      } else if (event.key === "Delete" && !event.ctrlKey && !event.metaKey) {
+        event.preventDefault();
+        void removeAction();
+      }
     }
     document.addEventListener("keydown", key);
     return () => document.removeEventListener("keydown", key);
-  }, [slot, draft, saving]);
+  }, [
+    snapshot,
+    slot,
+    draft,
+    drafts,
+    saving,
+    editBusy,
+    selected,
+    readonly,
+    textRevision,
+  ]);
+  function openControlMenu(
+    target: typeof selected,
+    anchor?: { x: number; y: number },
+  ) {
+    if (document.querySelector("dialog[open]")) return false;
+    setSelected(target);
+    setEditMenuRequest((previous) => ({ id: previous.id + 1, anchor }));
+    return true;
+  }
+  function hasUnsaved(context: string | undefined) {
+    return !!context && (!!drafts[context]?.dirty || hasTextDrafts(context));
+  }
+  function savedOnly(context: string | undefined, operation: string) {
+    if (hasUnsaved(context)) {
+      onError(new Error(`Save or revert changes before ${operation}.`));
+      return false;
+    }
+    return true;
+  }
+  async function cancelCut() {
+    if (editBusy || saving) return;
+    if (await run({ command: "slot_clipboard_clear" }))
+      setNotice("Cut cancelled; the source action is unchanged.");
+  }
+  async function clipboardAction(mode: "copy" | "cut") {
+    if (!slot || editBusy || saving || (mode === "cut" && readonly)) return;
+    if (
+      !savedOnly(
+        slot.context,
+        `${mode === "copy" ? "copying" : "cutting"} this action`,
+      )
+    )
+      return;
+    setEditBusy(true);
+    try {
+      if (
+        await run({
+          command: mode === "copy" ? "slot_copy" : "slot_cut",
+          context: slot.context,
+        })
+      )
+        setNotice(
+          `${mode === "copy" ? "Copied" : "Cut"} ${slot.name}. Select a destination and paste.`,
+        );
+    } finally {
+      setEditBusy(false);
+    }
+  }
+  async function pasteAction(target = selected) {
+    const clipboard = snapshot?.clipboard;
+    if (!clipboard || readonly || editBusy || saving) return;
+    const destination = snapshot?.slots.find(
+      (s) => s.controller === target.controller && s.index === target.index,
+    );
+    if (
+      !savedOnly(destination?.context, "replacing this action") ||
+      (clipboard.mode === "cut" &&
+        !savedOnly(clipboard.context, "moving the cut action"))
+    )
+      return;
+    const metadata = snapshot?.actions.find((a) => a.uuid === clipboard.uuid);
+    if (metadata && !metadata.controllers.includes(target.controller)) {
+      onError(new Error("The copied action does not support that control."));
+      return;
+    }
+    setEditBusy(true);
+    try {
+      if (
+        await run({
+          command: "slot_paste",
+          controller: target.controller,
+          index: target.index,
+          expected_target: destination?.context ?? null,
+        })
+      ) {
+        setSelected(target);
+        setNotice(`Pasted ${clipboard.name}`);
+      }
+    } finally {
+      setEditBusy(false);
+    }
+  }
+  async function transferAction(
+    context: string,
+    target: typeof selected,
+    copy: boolean,
+  ) {
+    if (readonly || editBusy || saving) return;
+    const source = snapshot?.slots.find((s) => s.context === context);
+    const destination = snapshot?.slots.find(
+      (s) => s.controller === target.controller && s.index === target.index,
+    );
+    if (destination?.context === context) return;
+    if (
+      !savedOnly(
+        context,
+        copy ? "copying this action" : "moving this action",
+      ) ||
+      !savedOnly(destination?.context, "replacing this action")
+    )
+      return;
+    const metadata = snapshot?.actions.find((a) => a.uuid === source?.uuid);
+    if (metadata && !metadata.controllers.includes(target.controller)) {
+      onError(new Error("This action does not support that control."));
+      return;
+    }
+    const reverse = snapshot?.actions.find((a) => a.uuid === destination?.uuid);
+    if (
+      !copy &&
+      source &&
+      reverse &&
+      !reverse.controllers.includes(source.controller)
+    ) {
+      onError(
+        new Error(
+          "These actions cannot swap because their supported controls differ.",
+        ),
+      );
+      return;
+    }
+    setEditBusy(true);
+    try {
+      if (
+        await run({
+          command: "slot_transfer",
+          context,
+          controller: target.controller,
+          index: target.index,
+          copy,
+          expected_target: destination?.context ?? null,
+        })
+      ) {
+        setSelected(target);
+        setNotice(`${copy ? "Copied" : "Moved"} ${source?.name ?? "action"}`);
+      }
+    } finally {
+      setEditBusy(false);
+    }
+  }
+  async function removeAction() {
+    if (
+      !slot ||
+      readonly ||
+      saving ||
+      editBusy ||
+      !savedOnly(slot.context, "removing this action")
+    )
+      return;
+    setEditBusy(true);
+    try {
+      if (await run({ command: "remove", context: slot.context }))
+        setNotice("Action removed");
+    } finally {
+      setEditBusy(false);
+    }
+  }
   async function assign(uuid: string, target = selected) {
+    if (readonly || editBusy || saving) return;
+    const destination = snapshot?.slots.find(
+      (s) => s.controller === target.controller && s.index === target.index,
+    );
+    if (!savedOnly(destination?.context, "replacing this action")) return;
+
     const metadata = snapshot?.actions.find((a) => a.uuid === uuid);
     if (!metadata || !allowed(metadata, target.controller)) {
       onError(new Error("This action does not support that control."));
@@ -306,6 +516,15 @@ export default function App() {
     target: { controller: Controller; index: number },
   ) {
     event.preventDefault();
+    const context = event.dataTransfer.getData("application/x-deckforge-slot");
+    if (context) {
+      void transferAction(
+        context,
+        target,
+        Boolean(event.ctrlKey || event.metaKey),
+      );
+      return;
+    }
     const uuid = event.dataTransfer.getData("application/x-deckforge-action");
     if (uuid) void assign(uuid, target);
   }
@@ -344,14 +563,62 @@ export default function App() {
         className={
           (controller === "Keypad" ? "deck-key" : "deck-dial") +
           (active ? " selected" : "") +
-          (!item ? " unassigned" : "")
+          (!item ? " unassigned" : "") +
+          (item &&
+          snapshot.clipboard?.mode === "cut" &&
+          snapshot.clipboard.context === item.context
+            ? " cut-control"
+            : "")
         }
         aria-label={`${controller === "Keypad" ? "Key" : "Dial"} ${index + 1}: ${item?.name ?? "Unassigned"}`}
         aria-pressed={active}
         onClick={() => setSelected(target)}
+        onContextMenu={(event) => {
+          if (openControlMenu(target, { x: event.clientX, y: event.clientY }))
+            event.preventDefault();
+        }}
+        onKeyDown={(event) => {
+          if (
+            event.key === "ContextMenu" ||
+            (event.shiftKey && event.key === "F10")
+          ) {
+            const rect = event.currentTarget.getBoundingClientRect();
+            if (openControlMenu(target, { x: rect.left, y: rect.bottom })) {
+              event.preventDefault();
+              event.stopPropagation();
+            }
+          }
+        }}
+        draggable={!!item && !editBusy && !saving}
+        onDragStart={(event) => {
+          if (!item) return;
+          if (
+            (readonly && !event.ctrlKey && !event.metaKey) ||
+            !savedOnly(item.context, "moving or copying this action")
+          ) {
+            event.preventDefault();
+            return;
+          }
+          event.dataTransfer.setData(
+            "application/x-deckforge-slot",
+            item.context,
+          );
+          event.dataTransfer.effectAllowed = "copyMove";
+          setSelected(target);
+        }}
         onDragOver={(e) => {
-          if (e.dataTransfer.types.includes("application/x-deckforge-action"))
+          if (
+            e.dataTransfer.types.includes("application/x-deckforge-action") ||
+            e.dataTransfer.types.includes("application/x-deckforge-slot")
+          ) {
             e.preventDefault();
+            e.dataTransfer.dropEffect =
+              !e.dataTransfer.types.includes("application/x-deckforge-slot") ||
+              e.ctrlKey ||
+              e.metaKey
+                ? "copy"
+                : "move";
+          }
         }}
         onDrop={(e) => drop(e, target)}
       >
@@ -367,6 +634,11 @@ export default function App() {
         ) : (
           <span className="empty-control">+</span>
         )}
+        {item &&
+          snapshot.clipboard?.mode === "cut" &&
+          snapshot.clipboard.context === item.context && (
+            <span className="cut-badge">Cut</span>
+          )}
         {item?.pinned && (
           <span className="pin" title="Pinned">
             ◆
@@ -645,26 +917,40 @@ export default function App() {
                 </span>
                 <h2>{slot?.name ?? "Choose an action"}</h2>
               </div>
-              {slot && (
-                <div className="row">
-                  <button onClick={testPress}>
-                    Test {selected.controller === "Keypad" ? "press" : "push"}
-                  </button>
-                  {slot.has_inspector && (
-                    <button
-                      className="primary"
-                      onClick={() =>
-                        run({
-                          command: "open_inspector",
-                          context: slot.context,
-                        })
-                      }
-                    >
-                      Plugin settings ↗
+              <div className="row">
+                <ActionEdit
+                  openRequest={editMenuRequest}
+                  slot={slot}
+                  clipboard={snapshot.clipboard}
+                  readonly={readonly}
+                  busy={editBusy || saving}
+                  onCopy={() => void clipboardAction("copy")}
+                  onCut={() => void clipboardAction("cut")}
+                  onPaste={() => void pasteAction()}
+                  onRemove={() => void removeAction()}
+                  onCancelCut={() => void cancelCut()}
+                />
+                {slot && (
+                  <>
+                    <button onClick={testPress}>
+                      Test {selected.controller === "Keypad" ? "press" : "push"}
                     </button>
-                  )}
-                </div>
-              )}
+                    {slot.has_inspector && (
+                      <button
+                        className="primary"
+                        onClick={() =>
+                          run({
+                            command: "open_inspector",
+                            context: slot.context,
+                          })
+                        }
+                      >
+                        Plugin settings ↗
+                      </button>
+                    )}
+                  </>
+                )}
+              </div>
             </header>
             {!slot ? (
               <div className="empty-control-editor">
@@ -697,7 +983,7 @@ export default function App() {
                   }}
                 >
                   <fieldset
-                    disabled={readonly || saving}
+                    disabled={readonly || saving || editBusy}
                     className="inspector-fields"
                   >
                     <div className="appearance">
@@ -830,10 +1116,8 @@ export default function App() {
                     <button
                       type="button"
                       className="danger quiet"
-                      disabled={readonly || saving}
-                      onClick={() =>
-                        run({ command: "remove", context: slot.context })
-                      }
+                      disabled={readonly || saving || editBusy}
+                      onClick={() => void removeAction()}
                     >
                       Remove action
                     </button>

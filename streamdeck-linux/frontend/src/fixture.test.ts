@@ -70,3 +70,75 @@ it("applies independent mix gains, accepts reordered expected keys, and rejects 
     (await bridge.request<Snapshot>("snapshot")).mixer.config.routes[0].volume,
   ).toBe(36);
 });
+it("models saved-action copy, swap-on-move, cut cancellation and exact destinations", async () => {
+  const bridge = window.deckforge!;
+  const before = await bridge.request<Snapshot>("snapshot");
+  const source = before.slots.find(
+    (s) => s.controller === "Keypad" && s.index === 0,
+  )!;
+  const occupied = before.slots.find(
+    (s) => s.controller === "Keypad" && s.index === 1,
+  )!;
+  await bridge.request("command", {
+    command: "slot_transfer",
+    context: source.context,
+    controller: "Keypad",
+    index: 1,
+    copy: false,
+    expected_target: occupied.context,
+  });
+  let observed = await bridge.request<Snapshot>("snapshot");
+  expect(observed.slots.find((s) => s.context === source.context)?.index).toBe(
+    1,
+  );
+  expect(
+    observed.slots.find((s) => s.context === occupied.context)?.index,
+  ).toBe(0);
+  await bridge.request("command", {
+    command: "slot_copy",
+    context: source.context,
+  });
+  await bridge.request("command", {
+    command: "settings",
+    context: source.context,
+    settings: { count: 99, incrementBy: 10 },
+  });
+  await bridge.request("command", {
+    command: "slot_paste",
+    controller: "Keypad",
+    index: 0,
+    expected_target: occupied.context,
+  });
+  observed = await bridge.request<Snapshot>("snapshot");
+  const copied = observed.slots.find(
+    (s) => s.controller === "Keypad" && s.index === 0,
+  )!;
+  expect(copied.context).not.toBe(source.context);
+  expect(copied.settings).toEqual(source.settings);
+  expect(
+    observed.slots.find((s) => s.context === source.context)?.settings.count,
+  ).toBe(99);
+  await bridge.request("command", {
+    command: "slot_cut",
+    context: copied.context,
+  });
+  await bridge.request("command", { command: "slot_clipboard_clear" });
+  observed = await bridge.request<Snapshot>("snapshot");
+  expect(observed.clipboard).toBeNull();
+  expect(observed.slots.some((s) => s.context === copied.context)).toBe(true);
+  await bridge.request("command", {
+    command: "slot_copy",
+    context: source.context,
+  });
+  await expect(
+    bridge.request("command", {
+      command: "slot_paste",
+      controller: "Keypad",
+      index: 0,
+      expected_target: "stale",
+    }),
+  ).rejects.toThrow("destination changed");
+  expect((await bridge.request<Snapshot>("snapshot")).slots).toEqual(
+    observed.slots,
+  );
+});

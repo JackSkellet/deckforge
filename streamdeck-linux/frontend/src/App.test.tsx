@@ -90,6 +90,21 @@ beforeEach(() => {
   request = vi.fn(async (method, payload) => {
     if (method === "snapshot") return structuredClone(snapshot);
     if (method === "ui_state_get") return null;
+    if (
+      method === "command" &&
+      ["slot_copy", "slot_cut"].includes(payload.command)
+    ) {
+      const source = snapshot.slots.find((s) => s.context === payload.context)!;
+      snapshot.clipboard = {
+        context: source.context,
+        name: source.name,
+        uuid: source.uuid,
+        controller: source.controller,
+        mode: payload.command === "slot_cut" ? "cut" : "copy",
+      };
+    }
+    if (method === "command" && payload.command === "slot_clipboard_clear")
+      snapshot.clipboard = null;
     if (method === "command" && payload.command === "settings")
       snapshot.slots[0].settings = payload.settings;
     if (method === "command" && payload.command === "appearance")
@@ -115,6 +130,252 @@ afterEach(() => {
   delete window.deckforge;
 });
 describe("desktop interactions", () => {
+  it("opens the clicked control's edit menu with right-click and keyboard context keys", async () => {
+    snapshot.slots.push({
+      ...structuredClone(slot),
+      context: "second",
+      index: 1,
+      name: "Second counter",
+    });
+    render(<App />);
+    const target = await screen.findByRole("button", {
+      name: "Key 2: Second counter",
+    });
+    expect(fireEvent.contextMenu(target, { clientX: 250, clientY: 200 })).toBe(
+      false,
+    );
+    expect(
+      screen.getByRole("heading", { name: "Second counter" }),
+    ).toBeTruthy();
+    const summary = screen.getByText("Edit ▾");
+    expect((summary.closest("details") as HTMLDetailsElement).open).toBe(true);
+    const copy = screen.getByRole("button", { name: "Copy Ctrl C" });
+    expect(document.activeElement).toBe(copy);
+    fireEvent.click(copy);
+    await waitFor(() =>
+      expect(request).toHaveBeenCalledWith("command", {
+        command: "slot_copy",
+        context: "second",
+      }),
+    );
+    fireEvent.keyDown(target, { key: "F10", shiftKey: true });
+    expect((summary.closest("details") as HTMLDetailsElement).open).toBe(true);
+    fireEvent.keyDown(copy, { key: "Escape" });
+    expect((summary.closest("details") as HTMLDetailsElement).open).toBe(false);
+    fireEvent.keyDown(target, { key: "ContextMenu" });
+    expect((summary.closest("details") as HTMLDetailsElement).open).toBe(true);
+  });
+  it("preserves text context menus and does not open the control menu behind a dialog", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    const title = await screen.findByRole("textbox", { name: "Title" });
+    expect(fireEvent.contextMenu(title)).toBe(true);
+    const summary = screen.getByText("Edit ▾");
+    expect((summary.closest("details") as HTMLDetailsElement).open).toBe(false);
+    const target = screen.getByRole("button", { name: "Key 1: Counter" });
+    await user.click(screen.getByRole("button", { name: /^Preferences$/ }));
+    fireEvent.contextMenu(target);
+    fireEvent.keyDown(target, { key: "F10", shiftKey: true });
+    expect((summary.closest("details") as HTMLDetailsElement).open).toBe(false);
+  });
+
+  it("keeps a dirty cut source on another page instead of pasting it", async () => {
+    snapshot.clipboard = {
+      name: "Counter",
+      uuid: "counter",
+      controller: "Keypad",
+      mode: "cut",
+      context: "hidden-source",
+    };
+    const original = request.getMockImplementation()!;
+    request.mockImplementation(async (method, payload) =>
+      method === "ui_state_get"
+        ? {
+            drafts: {
+              "hidden-source": {
+                dirty: true,
+                settings: { count: 55 },
+                title: "Unsaved",
+                raw: {},
+                revision: 1,
+                source: "previous",
+              },
+            },
+          }
+        : original(method, payload),
+    );
+    render(<App />);
+    const target = await screen.findByRole("button", {
+      name: "Key 2: Unassigned",
+    });
+    fireEvent.click(target);
+    fireEvent.keyDown(target, { key: "v", ctrlKey: true });
+    expect(await screen.findByRole("alert")).toHaveProperty(
+      "textContent",
+      expect.stringContaining("Save or revert changes"),
+    );
+    expect(
+      request.mock.calls.some(
+        ([, payload]) => payload?.command === "slot_paste",
+      ),
+    ).toBe(false);
+  });
+  it("allows copying read-only actions but blocks cut and removal", async () => {
+    snapshot.library.profiles[0].readonly = true;
+    render(<App />);
+    const source = await screen.findByRole("button", {
+      name: "Key 1: Counter",
+    });
+    fireEvent.keyDown(source, { key: "x", ctrlKey: true });
+    fireEvent.keyDown(source, { key: "Delete" });
+    expect(
+      request.mock.calls.some(([, payload]) =>
+        ["slot_cut", "remove"].includes(payload?.command),
+      ),
+    ).toBe(false);
+    fireEvent.keyDown(source, { key: "c", ctrlKey: true });
+    await waitFor(() =>
+      expect(request).toHaveBeenCalledWith("command", {
+        command: "slot_copy",
+        context: "counter-1",
+      }),
+    );
+  });
+
+  it("copies saved actions and pastes to an exact empty destination with keyboard shortcuts", async () => {
+    render(<App />);
+    const source = await screen.findByRole("button", {
+      name: "Key 1: Counter",
+    });
+    fireEvent.keyDown(source, { key: "c", ctrlKey: true });
+    await waitFor(() =>
+      expect(request).toHaveBeenCalledWith("command", {
+        command: "slot_copy",
+        context: "counter-1",
+      }),
+    );
+    await waitFor(() =>
+      expect(screen.getByText("Copied: Counter · Key")).toBeTruthy(),
+    );
+    const target = screen.getByRole("button", { name: "Key 2: Unassigned" });
+    fireEvent.click(target);
+    fireEvent.keyDown(target, { key: "v", ctrlKey: true });
+    await waitFor(() =>
+      expect(request).toHaveBeenCalledWith("command", {
+        command: "slot_paste",
+        controller: "Keypad",
+        index: 1,
+        expected_target: null,
+      }),
+    );
+  });
+  it("keeps text-editing copy cut paste and Delete shortcuts native", async () => {
+    render(<App />);
+    const title = await screen.findByRole("textbox", { name: "Title" });
+    request.mockClear();
+    for (const key of ["c", "x", "v", "Delete"]) {
+      const event = new KeyboardEvent("keydown", {
+        key,
+        ctrlKey: key !== "Delete",
+        bubbles: true,
+        cancelable: true,
+      });
+      title.dispatchEvent(event);
+      expect(event.defaultPrevented).toBe(false);
+    }
+    expect(request.mock.calls.some(([method]) => method === "command")).toBe(
+      false,
+    );
+  });
+  it("blocks copy and removal of dirty action drafts", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    const title = await screen.findByRole("textbox", { name: "Title" });
+    await user.type(title, " changed");
+    const source = screen.getByRole("button", { name: "Key 1: Counter" });
+    request.mockClear();
+    fireEvent.keyDown(source, { key: "c", ctrlKey: true });
+    expect(await screen.findByRole("alert")).toHaveProperty(
+      "textContent",
+      expect.stringContaining("Save or revert changes"),
+    );
+    fireEvent.keyDown(source, { key: "Delete" });
+    expect(request.mock.calls.some(([method]) => method === "command")).toBe(
+      false,
+    );
+  });
+  it("marks the exact cut action and lets Escape cancel without removing it", async () => {
+    render(<App />);
+    const source = await screen.findByRole("button", {
+      name: "Key 1: Counter",
+    });
+    fireEvent.keyDown(source, { key: "x", ctrlKey: true });
+    await waitFor(() =>
+      expect(source.classList.contains("cut-control")).toBe(true),
+    );
+    fireEvent.keyDown(source, { key: "Escape" });
+    await waitFor(() =>
+      expect(request).toHaveBeenCalledWith("command", {
+        command: "slot_clipboard_clear",
+      }),
+    );
+    await waitFor(() =>
+      expect(source.classList.contains("cut-control")).toBe(false),
+    );
+    expect(
+      request.mock.calls.some(([, payload]) => payload?.command === "remove"),
+    ).toBe(false);
+  });
+  it("sends occupied drag targets explicitly and uses Ctrl-drop for copies", async () => {
+    snapshot.slots.push({
+      ...structuredClone(slot),
+      context: "second",
+      index: 1,
+    });
+    render(<App />);
+    const target = await screen.findByRole("button", {
+      name: "Key 2: Counter",
+    });
+    const transfer = {
+      getData: (type: string) =>
+        type === "application/x-deckforge-slot" ? "counter-1" : "",
+    };
+    fireEvent.drop(target, { dataTransfer: transfer, ctrlKey: false });
+    await waitFor(() =>
+      expect(request).toHaveBeenCalledWith("command", {
+        command: "slot_transfer",
+        context: "counter-1",
+        controller: "Keypad",
+        index: 1,
+        copy: false,
+        expected_target: "second",
+      }),
+    );
+    await waitFor(() =>
+      expect(
+        (screen.getByRole("textbox", { name: "Title" }) as HTMLInputElement)
+          .disabled,
+      ).toBe(false),
+    );
+    const dropEvent = new Event("drop", { bubbles: true, cancelable: true });
+    Object.assign(dropEvent, {
+      dataTransfer: transfer,
+      ctrlKey: true,
+      metaKey: false,
+    });
+    fireEvent(target, dropEvent);
+    await waitFor(() =>
+      expect(request).toHaveBeenCalledWith("command", {
+        command: "slot_transfer",
+        context: "counter-1",
+        controller: "Keypad",
+        index: 1,
+        copy: true,
+        expected_target: "second",
+      }),
+    );
+  });
+
   it("flushes the newest editor state before native Hide", async () => {
     const user = userEvent.setup();
     render(<App />);
@@ -266,7 +527,10 @@ describe("desktop interactions", () => {
       }),
     );
     fireEvent.drop(screen.getByRole("button", { name: "Key 2: Unassigned" }), {
-      dataTransfer: { getData: () => volume.uuid },
+      dataTransfer: {
+        getData: (type: string) =>
+          type === "application/x-deckforge-action" ? volume.uuid : "",
+      },
     });
     expect(await screen.findByRole("alert")).toHaveProperty(
       "textContent",

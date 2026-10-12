@@ -33,7 +33,7 @@ Desktop interaction requirements come from the official [plugin setup guide][plu
 | UI-01 | Standalone native desktop application; launch without a browser | **Verified subset, C/T/H/U.** Default launch opens a native Wry/WebKit window containing the React/TypeScript editor, connected to the in-process Rust controller. Native capture and owned-child shutdown are verified; user-confirmed real-device settings edits refer to the earlier egui editor. The latter remains a temporary explicit fallback. Desktop menu entry validates; separate menu-click acceptance remains unverified. | Launch installed application from Linux desktop menu. Configure and operate the device entirely within its own window. Capture window/process evidence and user acceptance. |
 | UI-02 | Device canvas, key/dial selection, live previews and action assignment | **Verified subset, C/T/H/U.** Native canvas displays eight keys/four dials and real previews. User confirmed native settings/save affects physical input. Replacement, deletion, all-slot geometry and broader keyboard workflows still need end-to-end acceptance. | Native canvas maps every Plus slot accurately; assignment, replacement, deletion, keyboard navigation and persisted state all work on hardware. |
 | UI-03 | Action library with categories, search, controller filtering and useful plugin metadata | **Partial, C/T.** Native Actions sidebar searches action/plugin names, UUIDs, categories and tooltips; groups actions by manifest category and filters by controller. Incompatible entries can be shown disabled; duplicate names retain distinct UUIDs. Search/filter drafts survive window recreation. Manifest SVG/raster icons now appear as bounded cached thumbnails; broader keyboard acceptance and exact reference appearance remain open. | Search/filter official manifests; key actions cannot be accidentally placed on dial-only slots; categories, icons and disabled/incompatible states are clear. |
-| UI-04 | Drag/drop, move/copy/paste, reorder, remove, context menus and reusable action editing | **Partial, C/T.** Multi Action steps support native add/remove/reorder and draft editing. Library-to-canvas drag assignment now checks key/dial compatibility; general canvas move/copy/paste and action-sharing files remain missing. | Exercise internal and file-manager drag/drop; copy across pages/profiles; verify nested data and settings survive. Test undo/recovery as a Linux usability requirement. |
+| UI-04 | Drag/drop, move/copy/paste, reorder, remove, context menus and reusable action editing | **Verified subset, C/T.** Native right-click/Edit menus, keyboard copy/cut/paste, canvas moves/swaps and Ctrl-drag copies preserve nested actions, settings and resource bindings. Cuts retain their source until paste; stale targets/read-only/incompatible destinations are rejected. Folder copies receive independent page trees; state assets survive cross-profile export/restart. System clipboard interoperability, action-sharing files and undo remain missing. | Exercise internal and file-manager drag/drop; copy across pages/profiles; verify nested data and settings survive. Test undo/recovery as a Linux usability requirement. |
 | UI-05 | Action-specific configuration with plugin property inspectors | **Verified subset, C/T.** Native Plugin settings opens a WebKit inspector. Unchanged Counter PI registers; instrumented original control saves into the real plugin. Broader forms/file controls remain unverified. | Open unchanged official property inspector; edit controls, file selectors and dynamic lists; verify visible plugin/hardware response and restart persistence. [PI guide][pi] |
 | UI-06 | Titles, typography, image selection, icon/background libraries, preview fidelity | **Partial, C.** Fontdue title rendering and raster backgrounds exist; full style controls and asset libraries do not. | Compare imported title size/style/alignment/color, custom icons and state changes with reference screenshots; verify scaled native UI and hardware rendering. [Key guide][keys], [layouts][layouts] |
 | UI-07 | Window/tray lifecycle, startup preference, diagnostics and update/about UI | **Partial, C/T.** Closing the editor preserves the host and unsaved drafts; launcher/tray reopening recreates the native window in the same process. Private state-scoped instance activation, explicit Quit, background startup, SIGINT/SIGTERM and owned-child cleanup are tested. Native window generations and plugin heartbeat continuity are checked. Native startup preference and About version/source are implemented; generated XDG entry is validated and launched through GIO with isolated state and reserved-character paths. Actual next-login startup and update UI remain open; compositor focus, real title-bar close input and visible tray painting remain unverified. | Close/reopen window without interrupting configured background actions; explicitly quit stops only this app's children; test login startup, version display and bounded logs. [Preferences][preferences], [7.6 fixes][release76] |
@@ -92,7 +92,7 @@ The shipped profiles contain real action identifiers and settings; their presenc
 
 | ID | Required behavior | Baseline status and evidence | Evidence needed to pass |
 | --- | --- | --- | --- |
-| IN-01 | Install `.streamDeckPlugin` archives as inert validated files | **Verified subset, T.** `package.rs` checks paths/UUID/size, stages privately and atomically refuses overwrite. Native file-picker import exists. Marketplace-protected binary manifests are recognized with an explicit unsupported error and no partial install; the user-provided Discord 2.4.0.123 package is a recorded failing compatibility target. | Native file-picker/drop integration, success/error feedback and newly installed action discovery. Retain malicious archive and collision tests. [Plugin guide][plugins] |
+| IN-01 | Install `.streamDeckPlugin` archives as inert validated files | **Verified subset, A/C/T.** Archive path/UUID/size checks, private staging and atomic no-overwrite installation remain. Supported protected manifests authenticate using an explicit pinned local original executable; required files are checked with the recovered BLAKE3 contract before staging and on every plugin load/restart. The downloaded Discord package passes inert install; its original native backend remains unsupported. Optional files follow the original Required policy. | Broaden protected-format/reference-version corpus; native file-picker/drop integration and discovery must preserve validation and runtime limitations. Retain malicious archive and collision tests. [Plugin guide][plugins] |
 | IN-02 | Plugin discovery, enable/disable, update, uninstall and dependency handling | **Partial, C/T.** Native installation and a plugin manager expose status, errors and explicit restart; failed and missing plugin paths persist for repair. Enable/disable, update and uninstall remain missing; existing install cannot be overwritten. | Manage plugins from native UI; preserve profile references/settings across removal/reinstall; handle versions and missing dependencies visibly. [Plugin guide][plugins], [backups][backups] |
 | IN-03 | Marketplace browse/account/install handoff and authorized entitlements | **Missing/Unresolved, C.** No account or service integration. | Use documented authorized service/browser workflows with the user's account; validate handoff, installation and failure states. An external link alone does not prove install/account parity. [Marketplace workflow][plugins] |
 | IN-04 | Icon/background/screensaver packs and file associations | **Missing, C.** Individual raster assets can be read; no pack catalog/import UI or desktop MIME associations. | Import actual official packs; select assets through native libraries; open supported package/profile files from Linux file manager. [Screensaver guide][screensaver], [7.6 backgrounds][release76] |
@@ -634,3 +634,35 @@ user's microphone, plays through physical speakers or moves a real application.
 Ownership evidence is recorded under `evidence/wave-link/`; local inventories are
 excluded from the public repository. Core tests pass 343 cases with 11 gated tests
 ignored; frontend tests pass 29 cases. Strict core Clippy passes.
+
+### Action transfers and protected package integrity, 2026-10-12
+
+`tests/action_transfer_interop.py` drives the actual host with the unchanged
+official Counter sample and an inert local lifecycle probe. It verifies copy
+independence, cut/paste between pages, occupied-slot swapping, stale-target
+rejection, held-input release before disappearance, retired-context replies,
+nested Multi copies, independent folder trees, and source-image portability.
+Two original SVG state assets survive cross-profile transfer, deletion of the
+source profile, export and restart. Unit coverage also preserves animation and
+shared resource bytes, explicit resource clears, pin ownership and persistence
+failure behavior. Runtime contexts renew on moves to refresh plugin coordinates.
+
+Native WebKit/React tests click Copy/Paste and verify separate Counter contexts
+and saved settings. CUA checks cover the Edit/right-click menus and Shift+F10.
+Normal system clipboard integration, action-sharing files and general undo remain
+open. Cross-profile folder moves preserve unused source pages conservatively.
+
+Static analysis identifies the original required-file checker as BLAKE3 with a
+32-byte result compared to Base64 Hash. All 179 listed Discord package members
+match, of which 54 are required. The production reader authenticates the manifest
+and verifies required members before staging and on installed-folder reload.
+Process tests cover missing/tampered required data, optional-member changes,
+symlink/FIFO rejection, unchanged protected-manifest bytes and a visible native
+runtime failure with no process launched. No vendor backend, Wine, account login
+or real Discord command is used. See [protected packages](PROTECTED_PACKAGES.md)
+for the supported reference and stricter parsing boundaries.
+
+Core checks pass 354 tests with 11 opt-in tests ignored; frontend checks pass 39.
+Existing official whole-profile, resource SDK/native inspector and portable Node
+entry suites pass after the provenance and file-reader changes. Physical editing
+acceptance and complete Windows application parity remain unverified.

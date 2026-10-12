@@ -94,3 +94,23 @@ settings. Those controls only edit the action; they cannot create or enable
 routes. Actions with `user_title_enabled: false` show a read-only live title and
 never send an appearance override during Save. Mixer tests use synthetic
 inventory and command stubs, without changing the user's audio graph.
+
+## Action editing
+
+The selected control's **Edit** menu exposes Copy, Cut, Paste and Remove.
+Right-click a canvas control to open that menu at the pointer, or focus the
+control and press Shift+F10 / Menu. Text inputs keep their native context menus.
+`Ctrl+C`, `Ctrl+X`, `Ctrl+V` and `Delete` do the same outside text editors and
+modal dialogs. Escape cancels a pending cut when no text editor or menu owns it.
+The cut source remains assigned until a successful paste, and is marked on the
+canvas. Copying uses the saved action state; unsaved source or destination drafts
+must be saved or reverted first.
+
+Drag an assigned key/dial to move it; hold Ctrl to copy. Moving onto an occupied
+control swaps the actions when both support their new control. Copy/paste-copy
+replaces the destination. The native host owns the process clipboard and all
+nested action/resource transfer. Every destination request includes its observed
+`expected_target` context (or null for an empty control), so a stale UI cannot
+silently replace a different action. Read-only actions can be copied; they cannot
+be cut or removed. The explicit development fixture models these interactions
+without touching real profiles.

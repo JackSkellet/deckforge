@@ -48,6 +48,7 @@ mod plugins;
 mod resources;
 mod screensaver;
 mod stack;
+mod transfer;
 mod trigger;
 mod volume;
 use inspectors::Inspector;
@@ -205,6 +206,8 @@ struct Slot {
     in_multi_action: bool,
     #[serde(default)]
     resources: Option<std::collections::BTreeMap<String, String>>,
+    #[serde(default)]
+    asset_source: Option<transfer::AssetSource>,
     context: String,
     controller: String,
     index: u8,
@@ -376,6 +379,7 @@ struct Host {
     system_actions: Option<crate::system_actions::Worker>,
     system_status: String,
     library: Library,
+    clipboard: Option<transfer::Clipboard>,
     profile_assets: HashMap<PathBuf, profile::ProfileBundle>,
     diagnostics: bool,
     running: bool,
@@ -677,6 +681,7 @@ impl Host {
             children: vec![],
             child_id: String::new(),
             resources: None,
+            asset_source: None,
             in_multi_action: false,
             context: uuid::Uuid::new_v4().to_string(),
             controller: controller.into(),
@@ -1327,7 +1332,7 @@ fn action_snapshot(host: &Host, action: &Action) -> Value {
     })
 }
 fn snapshot(host: &Host) -> Value {
-    json!({"mixer":host.mixer_snapshot(),"screensaver":{"active":host.saver.active,"reason":host.saver.reason,"generation":host.saver.generation,"preferences":host.saver_preferences(),"preview":host.saver.preview,"error":host.saver.error,"frames":host.saver.animation.as_ref().map(|animation|animation.len())},"session":host.session_state,"device_settings":{"desired":host.configured_controls(),"applied":host.controls_observed,"error":host.controls_error},"library":host.library.snapshot(),"running":host.running,"device":host.device,"firmware":host.firmware,"simulate":host.simulate,"connected":host.connected && !host.simulate,"device_online":host.connected,"connection_error":host.connection_error,
+    json!({"clipboard":host.clipboard_snapshot(),"mixer":host.mixer_snapshot(),"screensaver":{"active":host.saver.active,"reason":host.saver.reason,"generation":host.saver.generation,"preferences":host.saver_preferences(),"preview":host.saver.preview,"error":host.saver.error,"frames":host.saver.animation.as_ref().map(|animation|animation.len())},"session":host.session_state,"device_settings":{"desired":host.configured_controls(),"applied":host.controls_observed,"error":host.controls_error},"library":host.library.snapshot(),"running":host.running,"device":host.device,"firmware":host.firmware,"simulate":host.simulate,"connected":host.connected && !host.simulate,"device_online":host.connected,"connection_error":host.connection_error,
         "volume":host.volume_state,"volume_error":host.volume_error,"multi_runs":host.multi.snapshot(),"multi_pending":host.multi_pending.len(),"audio_outputs":host.audio_outputs,"audio_active":host.audio_active,"system_status":host.system_status,"slots":host.slots.iter().map(|s|slot_snapshot(host,s)).collect::<Vec<_>>(),
         "reference_app":host.reference_app,"inspectors":host.inspectors.values().map(|i|json!({"context":i.context,"plugin":host.plugins[i.plugin].id,"connected":i.sender.is_some()})).collect::<Vec<_>>(),
         "actions":host.actions.iter().map(|action|action_snapshot(host,action)).collect::<Vec<_>>(),
@@ -1368,6 +1373,12 @@ async fn control(
 }
 fn apply_control(host: &mut Host, r: Value) -> Result<()> {
     let command = r["command"].as_str().context("Missing command")?;
+    if matches!(
+        r["command"].as_str(),
+        Some("slot_copy" | "slot_cut" | "slot_paste" | "slot_transfer" | "slot_clipboard_clear")
+    ) {
+        return host.transfer_command(&r);
+    }
     if matches!(
         command,
         "profile_create"
@@ -2129,6 +2140,7 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
         system_actions: None,
         system_status: String::new(),
         library,
+        clipboard: None,
         profile_assets: HashMap::new(),
         diagnostics,
         running: true,
@@ -2538,6 +2550,7 @@ mod tests {
             system_actions: None,
             system_status: String::new(),
             library: Library::default(),
+            clipboard: None,
             profile_assets: HashMap::new(),
             diagnostics: false,
             running: true,
@@ -2564,6 +2577,7 @@ mod tests {
                 children: vec![],
                 child_id: String::new(),
                 resources: None,
+                asset_source: None,
                 in_multi_action: false,
                 context: "test.context".into(),
                 controller: "Keypad".into(),

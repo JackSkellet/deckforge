@@ -27,21 +27,14 @@ impl Host {
         Ok(())
     }
     fn soundboard_resource(&mut self, context: &str, resource: &str) -> Result<PathBuf> {
-        let owner = self
-            .library
-            .profiles
-            .iter()
-            .find(|p| {
-                p.pages
-                    .iter()
-                    .any(|page| page.slots.iter().any(|s| s.find(context).is_some()))
-            })
+        let slot = self
+            .slot_any(context)
             .context("Audio resource owner missing")?;
-        let source = owner
-            .source
-            .clone()
+        let origin = self
+            .asset_origin(slot)
             .context("Audio resource archive missing")?;
-        let id = uuid::Uuid::parse_str(&owner.id)
+        let source = origin.source;
+        let id = uuid::Uuid::parse_str(&origin.profile)
             .context("Invalid resource owner identity")?
             .to_string();
         let resource_id = uuid::Uuid::parse_str(resource)
