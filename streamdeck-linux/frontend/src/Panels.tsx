@@ -260,7 +260,9 @@ export function Preferences({
         <section className="preference-section">
           <h3>{deviceName(snapshot)}</h3>
           <p className="hint">
-            {snapshot.device} · Firmware {snapshot.firmware || "unavailable"}
+            {snapshot.device.startsWith("offline-streamdeck-plus-")
+              ? "Empty workspace. Connect a matching device to use these profiles."
+              : `${snapshot.device} · Firmware ${snapshot.firmware || "unavailable"}`}
           </p>
           <DeviceNameForm snapshot={snapshot} run={run} />
           {snapshot.device_capabilities?.brightness !== false ? (
@@ -307,6 +309,10 @@ export function Preferences({
           )}
           {snapshot.device_settings?.error && (
             <p className="error">{snapshot.device_settings.error}</p>
+          )}
+          {(!snapshot.device.startsWith("offline-streamdeck-plus-") ||
+            (snapshot.devices?.length ?? 1) > 1) && (
+            <ForgetDevice snapshot={snapshot} run={run} />
           )}
         </section>
       )}
@@ -502,5 +508,97 @@ export function DeviceNameForm({
       </div>
       {status && <p role="status">{status}</p>}
     </form>
+  );
+}
+
+export function ForgetDevice({
+  snapshot,
+  run,
+}: {
+  snapshot: Snapshot;
+  run: Run;
+}) {
+  const [confirming, setConfirming] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [failed, setFailed] = useState(false);
+  const launch = useRef<HTMLButtonElement>(null);
+  const wasConfirming = useRef(false);
+  useEffect(() => {
+    if (!confirming && wasConfirming.current) launch.current?.focus();
+    wasConfirming.current = confirming;
+  }, [confirming]);
+  const online = snapshot.device_online ?? snapshot.connected;
+  const profileCount = snapshot.library.profiles.length;
+  const reasonId = useId();
+  return (
+    <section className="forget-device" aria-label="Forget device">
+      <h3>Forget this device</h3>
+      <p id={reasonId} className="hint">
+        {online
+          ? "Disconnect this device before forgetting it."
+          : "Remove this remembered device and its saved profiles. A recovery copy of the session is kept locally."}
+      </p>
+      {confirming ? (
+        <>
+          <p role="alert">
+            Forget {deviceName(snapshot)} and remove {profileCount} saved{" "}
+            {profileCount === 1 ? "profile" : "profiles"}? Other devices keep
+            their profiles.
+          </p>
+          <div className="row">
+            <button
+              autoFocus
+              disabled={busy}
+              onClick={() => {
+                setConfirming(false);
+                setFailed(false);
+              }}
+            >
+              Cancel
+            </button>
+            <button
+              className="danger"
+              disabled={busy || online}
+              aria-describedby={reasonId}
+              onClick={async () => {
+                setBusy(true);
+                setFailed(false);
+                try {
+                  if (
+                    await run({
+                      command: "device_forget",
+                      device: snapshot.device,
+                      confirm: true,
+                    })
+                  )
+                    setConfirming(false);
+                  else setFailed(true);
+                } finally {
+                  setBusy(false);
+                }
+              }}
+            >
+              {busy ? "Forgetting…" : "Forget device and profiles"}
+            </button>
+          </div>
+          {failed && (
+            <p role="status" className="error">
+              Could not forget this device. Check that it is disconnected and
+              try again.
+            </p>
+          )}
+        </>
+      ) : (
+        <button
+          ref={launch}
+          className="danger"
+          disabled={online}
+          aria-describedby={reasonId}
+          onClick={() => setConfirming(true)}
+        >
+          Forget device…
+        </button>
+      )}
+    </section>
   );
 }

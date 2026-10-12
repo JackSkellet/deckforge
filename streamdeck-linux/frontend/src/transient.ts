@@ -43,3 +43,8 @@ export function importFormDrafts(value: unknown) {
   if (value && typeof value === "object" && !Array.isArray(value))
     formDrafts = value as Record<string, any>;
 }
+export function clearDeviceFormDrafts(device: string) {
+  delete formDrafts[`preferences:${device}`];
+  delete formDrafts[`device-name:${device}`];
+  window.dispatchEvent(new Event("deckforge-draft-change"));
+}

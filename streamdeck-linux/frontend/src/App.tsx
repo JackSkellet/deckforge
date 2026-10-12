@@ -46,6 +46,7 @@ import {
 } from "./ProfileCopy";
 import {
   exportTextDrafts,
+  clearDeviceFormDrafts,
   importTextDrafts,
   hasTextDrafts,
   exportFormDrafts,
@@ -231,7 +232,22 @@ export default function App() {
       try {
         setError("");
         await command(payload, capturedDevice);
+        if (payload.command === "device_forget") {
+          const device = payload.device ?? capturedDevice;
+          clearDeviceFormDrafts(device);
+          setSelections((previous) => {
+            const next = { ...previous };
+            delete next[device];
+            return next;
+          });
+        }
         accept(await request<Snapshot>("snapshot"));
+        if (payload.command === "device_forget")
+          document
+            .querySelector<HTMLButtonElement>(
+              '[aria-label="Close Preferences"]',
+            )
+            ?.focus();
         return true;
       } catch (e) {
         onError(e);

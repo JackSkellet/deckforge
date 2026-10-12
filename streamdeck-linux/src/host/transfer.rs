@@ -319,6 +319,15 @@ fn transferred(
     Ok(next)
 }
 impl Host {
+    pub(super) fn clear_device_clipboard(&mut self, device: &str) {
+        if self
+            .clipboard
+            .as_ref()
+            .is_some_and(|c| c.anchor.device == device)
+        {
+            self.clipboard = None;
+        }
+    }
     pub(super) fn asset_origin(&self, slot: &Slot) -> Option<AssetSource> {
         slot.asset_source.clone().or_else(|| {
             self.library.profiles.iter().find_map(|p| {

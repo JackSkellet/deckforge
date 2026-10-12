@@ -122,6 +122,8 @@ export function deviceOptionLabel(
   peers: DeviceRecord[],
   simulate = false,
 ) {
+  if (device.id.startsWith("offline-streamdeck-plus-") && !device.connected)
+    return `${device.name} · Empty workspace`;
   const duplicates =
     peers.filter((peer) => peer.name === device.name).length > 1;
   const identity =

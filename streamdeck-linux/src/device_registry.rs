@@ -37,6 +37,9 @@ pub struct Filter {
 }
 #[derive(Debug)]
 pub enum Event {
+    Forgotten {
+        key: Key,
+    },
     Added {
         handle: Handle,
     },
@@ -48,6 +51,10 @@ pub enum Event {
     Diagnostic {
         error: String,
     },
+}
+pub enum Command {
+    Forget(Key),
+    Stop,
 }
 impl Filter {
     fn accepts(&self, key: &Key) -> bool {
@@ -103,6 +110,11 @@ impl Registry {
     /// Run outside the Host lock. Losing a path never removes its worker or frames.
     pub fn refresh(&mut self) -> Result<()> {
         self.inner.refresh()
+    }
+    /// Retire outside the Host lock. Acknowledge only after the worker has joined;
+    /// any subsequently discovered device receives a fresh generation.
+    pub fn forget(&mut self, key: Key) -> Result<()> {
+        self.inner.forget(key)
     }
     /// Sends all Stop barriers before joining. Call outside the Host lock.
     pub fn shutdown(mut self) -> Result<()> {
@@ -519,15 +531,21 @@ impl<B: Backend> Core<B> {
         }
         Ok(())
     }
-    #[cfg(test)]
     fn remove(&mut self, key: &Key) -> Result<()> {
         if let Some(worker) = self.workers.remove(key) {
             let _ = worker.handle.draw.send(Draw::Stop);
             let result = worker.join.join();
-            self.shared.lock().unwrap().watched.remove(key);
+            let mut shared = self.shared.lock().unwrap();
+            shared.watched.remove(key);
+            shared.known.retain(|_, remembered| remembered != key);
             ensure!(result.is_ok(), "device worker panicked during shutdown");
         }
         Ok(())
+    }
+    fn forget(&mut self, key: Key) -> Result<()> {
+        let result = self.remove(&key);
+        let _ = self.events.send(Event::Forgotten { key });
+        result
     }
     fn stop_all(&mut self) -> Result<()> {
         for worker in self.workers.values() {
@@ -809,6 +827,7 @@ mod tests {
                         }
                     }
                     Event::Diagnostic { error } => panic!("{error}"),
+                    Event::Forgotten { .. } => panic!("Unexpected device retirement"),
                 }
             }
             inputs.len() == 2
@@ -985,6 +1004,46 @@ mod tests {
         assert!(generations.contains(&first.generation));
         assert!(generations.contains(&second.generation));
         core.stop_all().unwrap();
+    }
+    #[test]
+    fn forget_acknowledges_join_before_rediscovery_and_keeps_other_workers() {
+        let (mut core, fake, mut rx) = setup(
+            vec![device("A", "one", true), device("B", "two", true)],
+            Filter::default(),
+        );
+        core.refresh().unwrap();
+        let first = core.workers[&key("one")].handle.clone();
+        let second = core.workers[&key("two")].handle.clone();
+        core.forget(first.key.clone()).unwrap();
+        assert!(first.draw.send(Draw::SleepPolicy(false)).is_err());
+        assert_eq!(
+            core.workers[&key("two")].handle.generation,
+            second.generation
+        );
+        assert!(!core.shared.lock().unwrap().watched.contains(&first.key));
+        assert!(!fake.state.lock().unwrap().active.contains(b"A".as_slice()));
+        let events: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        let retired = events
+            .iter()
+            .position(|e| matches!(e, Event::Forgotten { key: k } if k == &first.key))
+            .unwrap();
+        assert!(
+            !events[retired + 1..]
+                .iter()
+                .any(|e| matches!(e, Event::Tagged { key: k, .. } if k == &first.key))
+        );
+        core.refresh().unwrap();
+        let next = core.workers[&key("one")].handle.clone();
+        assert!(next.generation > first.generation);
+        assert_eq!(
+            core.workers[&key("two")].handle.generation,
+            second.generation
+        );
+        assert!(
+            std::iter::from_fn(|| rx.try_recv().ok()).any(
+                |e| matches!(e, Event::Added { handle } if handle.generation == next.generation)
+            )
+        );
     }
     #[test]
     fn explicit_serial_identifies_first_use_and_reconnects_after_new_registry_restart() {

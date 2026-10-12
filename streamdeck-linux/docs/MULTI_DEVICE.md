@@ -25,6 +25,29 @@ event. Failed saves preserve the previous name and emit no change. Launch
 registration and reconnect events include the current name; an offline metadata
 refresh after plugin registration also covers renames during plugin startup.
 
+## Forgetting a device
+
+Disconnect the device, then choose **Preferences → Device → Forget device…**.
+The confirmation removes that device's profiles, name, brightness/sleep
+preferences and action clipboard. Other decks keep running. The host closes its
+property inspectors, sends action disappearances and cancels its pending Multi
+Actions and held controls. A device that reconnects while the confirmation is
+open cannot be forgotten until it disconnects again.
+
+Before removal, Deckforge writes a private recovery copy of the complete session
+under `forgotten-devices/` beside `session.json`. The Activity log records the
+exact path. If either this copy or the final save fails, the device stays in the
+session. Copies are retained without overwriting earlier ones, and imported
+asset archives are not deleted. To recover, quit Deckforge, keep a copy of the
+current `session.json`, then replace it with the chosen recovery JSON. This
+restores the entire session as it was at that point, including other devices.
+
+Forgetting the last device leaves an empty workspace for its model. Plugging a
+forgotten device in again discovers it afresh. Old USB events are ignored until
+its worker has stopped; subsequent discovery uses a new generation. No factory
+reset or firmware write occurs. This removal behavior is a Deckforge policy;
+recovery copies are not an Elgato profile-package format.
+
 ## Profiles and action editing
 
 Each device owns its profiles and navigation history. **Profile options → Copy
@@ -66,8 +89,7 @@ is confirmed, so an offline placeholder cannot send frames for the wrong model.
 On shutdown, every worker receives an ordered Stop before any worker is joined.
 No device reset or firmware update is part of discovery or shutdown.
 
-The current limits are 32 associated device runtimes and 32 USB workers. Device
-forgetting is unfinished. Unsupported transports remain
+The current limits are 32 associated device runtimes and 32 USB workers. Unsupported transports remain
 listed in [Device models](DEVICES.md); simulated devices do not establish physical
 USB acceptance.
 
@@ -102,6 +124,11 @@ bundled profiles, cross-device profile copy and restart after a background save.
 retained drafts and live settings through two concurrent Counter contexts.
 Both suites also check renaming: SDK notifications and restart metadata in the
 process test, plus save/reset, picker updates and retained names in the native UI.
+`tests/device_forget_interop.py` checks removal, cancellation, other-device
+isolation and restarting both the resulting session and its recovery copy.
+`tests/native_device_forget_interop.py` checks the actual confirmation, Cancel
+focus, picker removal and last-device workspace using an absent Mini serial and
+model filter. It never operates the attached Plus.
 
 Unit tests cover exclusive path reservations, metadata identity checks,
 generations, Stop ordering, device limits, inspector permissions, restart cleanup,

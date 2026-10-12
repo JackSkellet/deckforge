@@ -126,7 +126,7 @@ impl DeviceRuntime {
             navigation: self.navigation.clone(),
         }
     }
-    fn swap(&mut self, host: &mut Host) {
+    pub(super) fn swap(&mut self, host: &mut Host) {
         macro_rules! swap {($($field:ident),+)=>{$(std::mem::swap(&mut self.$field,&mut host.$field);)+};}
         swap!(
             scope,
@@ -216,7 +216,7 @@ impl Host {
         records.sort_by(|a, b| a.scope.cmp(&b.scope));
         records
     }
-    fn enter_scope(&mut self, scope: &str) -> Result<()> {
+    pub(super) fn enter_scope(&mut self, scope: &str) -> Result<()> {
         if self.scope == scope {
             return Ok(());
         }
@@ -549,6 +549,10 @@ impl Host {
             return Ok(());
         }
         match event {
+            Event::Forgotten { key } => {
+                self.forgetting_devices.remove(&key);
+                Ok(())
+            }
             Event::Diagnostic { error } => {
                 if !self.logs.contains(&error) {
                     self.log(error);
@@ -556,6 +560,10 @@ impl Host {
                 Ok(())
             }
             Event::Added { handle } => {
+                if self.forgetting_devices.contains(&handle.key) {
+                    let _ = handle.draw.send(Draw::Stop);
+                    return Ok(());
+                }
                 let scope = self.device_scope(&handle.key.serial).or_else(|| {
                     self.device_records()
                         .into_iter()

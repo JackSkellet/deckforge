@@ -37,6 +37,7 @@ mod audio;
 mod brightness;
 mod children;
 mod device;
+mod device_management;
 mod device_pool;
 mod display;
 mod export;
@@ -357,6 +358,8 @@ enum HeldControl {
 }
 struct Host {
     registry_routes: HashMap<crate::device_registry::Key, String>,
+    registry_commands: Option<std::sync::mpsc::Sender<crate::device_registry::Command>>,
+    forgetting_devices: HashSet<crate::device_registry::Key>,
     canonical_graph_update: bool,
     scope: String,
     selected_scope: String,
@@ -1616,6 +1619,13 @@ async fn control(
 }
 fn apply_control(host: &mut Host, r: Value) -> Result<()> {
     let command = r["command"].as_str().context("Command missing")?;
+    if command == "device_forget" {
+        anyhow::ensure!(
+            r["confirm"] == true,
+            "Confirm removal of this device and its profiles"
+        );
+        return host.forget_device(r["device"].as_str().context("Device missing")?);
+    }
     if command == "device_select" {
         return host.select_device(r["device"].as_str().context("Device missing")?);
     }
@@ -2513,6 +2523,8 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
     }
     let mut host = Host {
         registry_routes: HashMap::new(),
+        registry_commands: None,
+        forgetting_devices: HashSet::new(),
         canonical_graph_update: false,
         scope: saved_scope.clone(),
         selected_scope: saved_scope,
@@ -2654,7 +2666,9 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
     }
     // Validate and start plugins before writing any hardware image.
     launch_plugins(&mut host, port, &state_dir);
-    let (registry_stop, registry_wait) = std::sync::mpsc::channel::<()>();
+    let (registry_stop, registry_wait) =
+        std::sync::mpsc::channel::<crate::device_registry::Command>();
+    host.registry_commands = (!simulate).then(|| registry_stop.clone());
     let registry_records = host.device_records();
     let registry_worker = (!simulate).then(|| {
         std::thread::spawn(move || {
@@ -2690,7 +2704,15 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
                     });
                 }
                 match registry_wait.recv_timeout(Duration::from_secs(1)) {
-                    Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                    Ok(crate::device_registry::Command::Forget(key)) => {
+                        if let Err(error) = registry.forget(key) {
+                            let _ = events_tx.send(crate::device_registry::Event::Diagnostic {
+                                error: format!("Device retirement: {error:#}"),
+                            });
+                        }
+                    }
+                    Ok(crate::device_registry::Command::Stop)
+                    | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
                     Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
                 }
             }
@@ -2724,7 +2746,7 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
             .is_err()
         {
             stop_plugins(&mut shared.lock().unwrap());
-            let _ = registry_stop.send(());
+            let _ = registry_stop.send(crate::device_registry::Command::Stop);
             if let Some(worker) = registry_worker {
                 let _ = worker.join();
             }
@@ -2857,7 +2879,7 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
         stop_plugins(&mut host);
         host.persist()?;
     }
-    let _ = registry_stop.send(());
+    let _ = registry_stop.send(crate::device_registry::Command::Stop);
     if let Some(worker) = registry_worker {
         worker
             .join()
@@ -2995,6 +3017,8 @@ mod tests {
     pub(super) fn fixture(root: &Path) -> Host {
         let mut host = Host {
             registry_routes: HashMap::new(),
+            registry_commands: None,
+            forgetting_devices: HashSet::new(),
             canonical_graph_update: false,
             scope: "primary".into(),
             selected_scope: "primary".into(),

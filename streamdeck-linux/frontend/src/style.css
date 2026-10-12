@@ -898,6 +898,17 @@ dialog::backdrop {
   margin-bottom: 20px;
   border-bottom: 1px solid #39434b;
 }
+.forget-device {
+  border-top: 1px solid #39434b;
+  padding-top: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  overflow-wrap: anywhere;
+}
+.forget-device > button {
+  align-self: start;
+}
 .plugin-install {
   padding-bottom: 20px;
   border-bottom: 1px solid #455761;
