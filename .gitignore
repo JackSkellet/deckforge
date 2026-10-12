@@ -5,3 +5,6 @@
 /streamdeck-linux/state/
 *.log
 __pycache__/
+/streamdeck-linux/plugins/*/target/
+/streamdeck-linux/plugins/discord/com.elgato.discord.sdPlugin/bin/deckforge-discord
+/streamdeck-linux/plugins/discord/*.streamDeckPlugin

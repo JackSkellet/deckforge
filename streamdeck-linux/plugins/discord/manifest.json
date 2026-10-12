@@ -1,0 +1,430 @@
+{
+  "UUID": "com.elgato.discord",
+  "Name": "Discord for Deckforge",
+  "Author": "Deckforge",
+  "Description": "Independent native Rust Discord controls. Original profile action identities; requires user-owned Discord application authorization.",
+  "Version": "0.1.0",
+  "SDKVersion": 2,
+  "CodePath": "bin/deckforge-discord",
+  "Category": "Discord",
+  "CategoryIcon": "images/mute",
+  "Icon": "images/mute",
+  "Software": {
+    "MinimumVersion": "6.4"
+  },
+  "OS": [
+    {
+      "Platform": "linux",
+      "MinimumVersion": "0"
+    }
+  ],
+  "Actions": [
+    {
+      "UUID": "com.elgato.discord.soundboard",
+      "Name": "Soundboard",
+      "Icon": "images/soundboard",
+      "Tooltip": "Soundboard through the local Discord client. Requires an authorized Discord application.",
+      "Controllers": [
+        "Keypad"
+      ],
+      "PropertyInspectorPath": "ui/index.html",
+      "SupportedInMultiActions": true,
+      "States": [
+        {
+          "Image": "images/soundboard",
+          "TitleAlignment": "bottom",
+          "FontSize": 12
+        },
+        {
+          "Image": "images/soundboard-active",
+          "TitleAlignment": "bottom",
+          "FontSize": 12
+        }
+      ]
+    },
+    {
+      "UUID": "com.elgato.discord.mute",
+      "Name": "Mute",
+      "Icon": "images/mute",
+      "Tooltip": "Mute through the local Discord client. Requires an authorized Discord application.",
+      "Controllers": [
+        "Keypad"
+      ],
+      "PropertyInspectorPath": "ui/index.html",
+      "SupportedInMultiActions": true,
+      "States": [
+        {
+          "Image": "images/mute",
+          "TitleAlignment": "bottom",
+          "FontSize": 12
+        },
+        {
+          "Image": "images/mute-active",
+          "TitleAlignment": "bottom",
+          "FontSize": 12
+        }
+      ]
+    },
+    {
+      "UUID": "com.elgato.discord.deafen",
+      "Name": "Deafen",
+      "Icon": "images/deafen",
+      "Tooltip": "Deafen through the local Discord client. Requires an authorized Discord application.",
+      "Controllers": [
+        "Keypad"
+      ],
+      "PropertyInspectorPath": "ui/index.html",
+      "SupportedInMultiActions": true,
+      "States": [
+        {
+          "Image": "images/deafen",
+          "TitleAlignment": "bottom",
+          "FontSize": 12
+        },
+        {
+          "Image": "images/deafen-active",
+          "TitleAlignment": "bottom",
+          "FontSize": 12
+        }
+      ]
+    },
+    {
+      "UUID": "com.elgato.discord.channel.voice",
+      "Name": "Voice Channel",
+      "Icon": "images/channel.voice",
+      "Tooltip": "Voice Channel through the local Discord client. Requires an authorized Discord application.",
+      "Controllers": [
+        "Keypad"
+      ],
+      "PropertyInspectorPath": "ui/index.html",
+      "SupportedInMultiActions": true,
+      "States": [
+        {
+          "Image": "images/channel.voice",
+          "TitleAlignment": "bottom",
+          "FontSize": 12
+        },
+        {
+          "Image": "images/channel.voice-active",
+          "TitleAlignment": "bottom",
+          "FontSize": 12
+        }
+      ]
+    },
+    {
+      "UUID": "com.elgato.discord.channel.text",
+      "Name": "Text Channel",
+      "Icon": "images/channel.text",
+      "Tooltip": "Text Channel through the local Discord client. Requires an authorized Discord application.",
+      "Controllers": [
+        "Keypad"
+      ],
+      "PropertyInspectorPath": "ui/index.html",
+      "SupportedInMultiActions": true,
+      "States": [
+        {
+          "Image": "images/channel.text",
+          "TitleAlignment": "bottom",
+          "FontSize": 12
+        },
+        {
+          "Image": "images/channel.text-active",
+          "TitleAlignment": "bottom",
+          "FontSize": 12
+        }
+      ]
+    },
+    {
+      "UUID": "com.elgato.discord.pushto.talk",
+      "Name": "Push to Talk",
+      "Icon": "images/pushto.talk",
+      "Tooltip": "Push to Talk through the local Discord client. Requires an authorized Discord application.",
+      "Controllers": [
+        "Keypad"
+      ],
+      "PropertyInspectorPath": "ui/index.html",
+      "SupportedInMultiActions": true,
+      "States": [
+        {
+          "Image": "images/pushto.talk",
+          "TitleAlignment": "bottom",
+          "FontSize": 12
+        },
+        {
+          "Image": "images/pushto.talk-active",
+          "TitleAlignment": "bottom",
+          "FontSize": 12
+        }
+      ]
+    },
+    {
+      "UUID": "com.elgato.discord.pushto.mute",
+      "Name": "Push to Mute",
+      "Icon": "images/pushto.mute",
+      "Tooltip": "Push to Mute through the local Discord client. Requires an authorized Discord application.",
+      "Controllers": [
+        "Keypad"
+      ],
+      "PropertyInspectorPath": "ui/index.html",
+      "SupportedInMultiActions": true,
+      "States": [
+        {
+          "Image": "images/pushto.mute",
+          "TitleAlignment": "bottom",
+          "FontSize": 12
+        },
+        {
+          "Image": "images/pushto.mute-active",
+          "TitleAlignment": "bottom",
+          "FontSize": 12
+        }
+      ]
+    },
+    {
+      "UUID": "com.elgato.discord.setaudiodevice",
+      "Name": "Set Audio Device",
+      "Icon": "images/setaudiodevice",
+      "Tooltip": "Set Audio Device through the local Discord client. Requires an authorized Discord application.",
+      "Controllers": [
+        "Keypad"
+      ],
+      "PropertyInspectorPath": "ui/index.html",
+      "SupportedInMultiActions": true,
+      "States": [
+        {
+          "Image": "images/setaudiodevice",
+          "TitleAlignment": "bottom",
+          "FontSize": 12
+        },
+        {
+          "Image": "images/setaudiodevice-active",
+          "TitleAlignment": "bottom",
+          "FontSize": 12
+        }
+      ]
+    },
+    {
+      "UUID": "com.elgato.discord.serverstats",
+      "Name": "Server Stats",
+      "Icon": "images/serverstats",
+      "Tooltip": "Server Stats through the local Discord client. Requires an authorized Discord application.",
+      "Controllers": [
+        "Keypad"
+      ],
+      "PropertyInspectorPath": "ui/index.html",
+      "SupportedInMultiActions": true,
+      "States": [
+        {
+          "Image": "images/serverstats",
+          "TitleAlignment": "bottom",
+          "FontSize": 12
+        },
+        {
+          "Image": "images/serverstats-active",
+          "TitleAlignment": "bottom",
+          "FontSize": 12
+        }
+      ]
+    },
+    {
+      "UUID": "com.elgato.discord.pushtotalktoggle",
+      "Name": "Voice Input Mode Toggle",
+      "Icon": "images/pushtotalktoggle",
+      "Tooltip": "Voice Input Mode Toggle through the local Discord client. Requires an authorized Discord application.",
+      "Controllers": [
+        "Keypad"
+      ],
+      "PropertyInspectorPath": "ui/index.html",
+      "SupportedInMultiActions": true,
+      "States": [
+        {
+          "Image": "images/pushtotalktoggle",
+          "TitleAlignment": "bottom",
+          "FontSize": 12
+        },
+        {
+          "Image": "images/pushtotalktoggle-active",
+          "TitleAlignment": "bottom",
+          "FontSize": 12
+        }
+      ]
+    },
+    {
+      "UUID": "com.elgato.discord.notifications",
+      "Name": "Notifications",
+      "Icon": "images/notifications",
+      "Tooltip": "Notifications through the local Discord client. Requires an authorized Discord application.",
+      "Controllers": [
+        "Keypad"
+      ],
+      "PropertyInspectorPath": "ui/index.html",
+      "SupportedInMultiActions": true,
+      "States": [
+        {
+          "Image": "images/notifications",
+          "TitleAlignment": "bottom",
+          "FontSize": 12
+        },
+        {
+          "Image": "images/notifications-active",
+          "TitleAlignment": "bottom",
+          "FontSize": 12
+        }
+      ]
+    },
+    {
+      "UUID": "com.elgato.discord.videotoggle",
+      "Name": "Video Toggle",
+      "Icon": "images/videotoggle",
+      "Tooltip": "Video Toggle through the local Discord client. Requires an authorized Discord application.",
+      "Controllers": [
+        "Keypad"
+      ],
+      "PropertyInspectorPath": "ui/index.html",
+      "SupportedInMultiActions": true,
+      "States": [
+        {
+          "Image": "images/videotoggle",
+          "TitleAlignment": "bottom",
+          "FontSize": 12
+        },
+        {
+          "Image": "images/videotoggle-active",
+          "TitleAlignment": "bottom",
+          "FontSize": 12
+        }
+      ]
+    },
+    {
+      "UUID": "com.elgato.discord.streamtoggle",
+      "Name": "Stream Toggle",
+      "Icon": "images/streamtoggle",
+      "Tooltip": "Stream Toggle through the local Discord client. Requires an authorized Discord application.",
+      "Controllers": [
+        "Keypad"
+      ],
+      "PropertyInspectorPath": "ui/index.html",
+      "SupportedInMultiActions": true,
+      "States": [
+        {
+          "Image": "images/streamtoggle",
+          "TitleAlignment": "bottom",
+          "FontSize": 12
+        },
+        {
+          "Image": "images/streamtoggle-active",
+          "TitleAlignment": "bottom",
+          "FontSize": 12
+        }
+      ]
+    },
+    {
+      "UUID": "com.elgato.discord.uservolumecontrolbutton",
+      "Name": "User Volume Control",
+      "Icon": "images/uservolumecontrolbutton",
+      "Tooltip": "User Volume Control through the local Discord client. Requires an authorized Discord application.",
+      "Controllers": [
+        "Keypad"
+      ],
+      "PropertyInspectorPath": "ui/index.html",
+      "SupportedInMultiActions": true,
+      "States": [
+        {
+          "Image": "images/uservolumecontrolbutton",
+          "TitleAlignment": "bottom",
+          "FontSize": 12
+        },
+        {
+          "Image": "images/uservolumecontrolbutton-active",
+          "TitleAlignment": "bottom",
+          "FontSize": 12
+        }
+      ]
+    },
+    {
+      "UUID": "com.elgato.discord.uservolumecontroldial",
+      "Name": "User Volume Control Dial",
+      "Icon": "images/uservolumecontroldial",
+      "Tooltip": "User Volume Control Dial through the local Discord client. Requires an authorized Discord application.",
+      "Controllers": [
+        "Encoder"
+      ],
+      "PropertyInspectorPath": "ui/index.html",
+      "SupportedInMultiActions": false,
+      "States": [
+        {
+          "Image": "images/uservolumecontroldial",
+          "TitleAlignment": "bottom",
+          "FontSize": 12
+        },
+        {
+          "Image": "images/uservolumecontroldial-active",
+          "TitleAlignment": "bottom",
+          "FontSize": 12
+        }
+      ],
+      "Encoder": {
+        "layout": "$B1",
+        "TriggerDescription": {
+          "Rotate": "Adjust volume",
+          "Push": "Toggle mute",
+          "Touch": "Toggle mute"
+        }
+      }
+    },
+    {
+      "UUID": "com.elgato.discord.volumecontrolbutton",
+      "Name": "Volume Control",
+      "Icon": "images/volumecontrolbutton",
+      "Tooltip": "Volume Control through the local Discord client. Requires an authorized Discord application.",
+      "Controllers": [
+        "Keypad"
+      ],
+      "PropertyInspectorPath": "ui/index.html",
+      "SupportedInMultiActions": true,
+      "States": [
+        {
+          "Image": "images/volumecontrolbutton",
+          "TitleAlignment": "bottom",
+          "FontSize": 12
+        },
+        {
+          "Image": "images/volumecontrolbutton-active",
+          "TitleAlignment": "bottom",
+          "FontSize": 12
+        }
+      ]
+    },
+    {
+      "UUID": "com.elgato.discord.volumecontrol",
+      "Name": "Volume Control Dial",
+      "Icon": "images/volumecontrol",
+      "Tooltip": "Volume Control Dial through the local Discord client. Requires an authorized Discord application.",
+      "Controllers": [
+        "Encoder"
+      ],
+      "PropertyInspectorPath": "ui/index.html",
+      "SupportedInMultiActions": false,
+      "States": [
+        {
+          "Image": "images/volumecontrol",
+          "TitleAlignment": "bottom",
+          "FontSize": 12
+        },
+        {
+          "Image": "images/volumecontrol-active",
+          "TitleAlignment": "bottom",
+          "FontSize": 12
+        }
+      ],
+      "Encoder": {
+        "layout": "$B1",
+        "TriggerDescription": {
+          "Rotate": "Adjust volume",
+          "Push": "Toggle mute",
+          "Touch": "Toggle mute"
+        }
+      }
+    }
+  ]
+}

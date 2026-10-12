@@ -2,11 +2,7 @@
 //! plugin; retries are explicit and never replace saved action/global settings.
 use super::*;
 use sha2::{Digest, Sha256};
-use std::{
-    io::Read,
-    os::unix::{ffi::OsStrExt, io::AsRawFd},
-    time::Instant,
-};
+use std::{os::unix::ffi::OsStrExt, time::Instant};
 
 pub(super) struct Runtime {
     pub status: &'static str,
@@ -14,6 +10,9 @@ pub(super) struct Runtime {
     pub session: Option<String>,
     pub started: Option<Instant>,
     pub log_path: Option<PathBuf>,
+    pub entry_path: Option<PathBuf>,
+    pub entry_field: Option<&'static str>,
+    pub runtime_path: Option<PathBuf>,
     pub load_failed: bool,
 }
 impl Default for Runtime {
@@ -24,6 +23,9 @@ impl Default for Runtime {
             session: None,
             started: None,
             log_path: None,
+            entry_path: None,
+            entry_field: None,
+            runtime_path: None,
             load_failed: false,
         }
     }
@@ -47,17 +49,19 @@ impl Plugin {
         json!({"id":self.id,"name":self.name,"connected":self.sender.is_some(),
             "status":self.runtime.status,"error":self.runtime.error,"path":self.root,
             "version":self.manifest["Version"],"log_path":self.runtime.log_path,
+            "entry_path":self.runtime.entry_path,"entry_field":self.runtime.entry_field,"runtime_path":self.runtime.runtime_path,
             "pid":self.child.as_ref().map(Child::id),
             "started_seconds":self.runtime.started.map(|start|start.elapsed().as_secs())})
     }
 }
 
-fn parse(path: &Path) -> Result<(Plugin, Vec<Action>)> {
+fn parse(path: &Path, reference: Option<&Path>) -> Result<(Plugin, Vec<Action>)> {
     let root = path
         .canonicalize()
         .with_context(|| format!("Plugin directory unavailable: {}", path.display()))?;
-    let manifest = crate::package::read_manifest(
+    let manifest = crate::package::read_manifest_with_reference(
         &fs::read(root.join("manifest.json")).context("Read plugin manifest.json")?,
+        reference,
     )?;
     let id = manifest["UUID"]
         .as_str()
@@ -145,7 +149,10 @@ fn unavailable(path: &Path, error: anyhow::Error) -> Result<Plugin> {
     })
 }
 
-pub(super) fn load(paths: Vec<PathBuf>) -> Result<(Vec<Plugin>, Vec<Action>)> {
+pub(super) fn load(
+    paths: Vec<PathBuf>,
+    reference: Option<&Path>,
+) -> Result<(Vec<Plugin>, Vec<Action>)> {
     let mut plugins: Vec<Plugin> = Vec::new();
     let mut actions: Vec<Action> = Vec::new();
     for path in paths {
@@ -153,7 +160,7 @@ pub(super) fn load(paths: Vec<PathBuf>) -> Result<(Vec<Plugin>, Vec<Action>)> {
         if plugins.iter().any(|plugin| plugin.root == absolute) {
             continue;
         }
-        let parsed = parse(&absolute).and_then(|(plugin, incoming)| {
+        let parsed = parse(&absolute, reference).and_then(|(plugin, incoming)| {
             if plugins.iter().any(|p| p.id == plugin.id) {
                 bail!("Duplicate plugin UUID {}", plugin.id);
             }
@@ -239,7 +246,7 @@ impl Host {
         self.plugins[index].registration = uuid::Uuid::new_v4().to_string();
         stop_child(&mut self.plugins[index].child);
         let result = (|| {
-            let (mut plugin, incoming) = parse(&root)?;
+            let (mut plugin, incoming) = parse(&root, self.reference_app.as_deref())?;
             if self
                 .plugins
                 .iter()
@@ -346,46 +353,6 @@ impl Host {
     }
 }
 
-/// Runtime discovery must not let a broken executable hang host startup/restart.
-pub(super) fn node_version_matches(path: &Path, required: &str) -> bool {
-    let Ok(mut child) = Command::new(path)
-        .arg("--version")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-    else {
-        return false;
-    };
-    let deadline = Instant::now() + Duration::from_millis(250);
-    let success = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status.success(),
-            Err(_) => break false,
-            Ok(None) if Instant::now() >= deadline => {
-                let _ = child.kill();
-                let _ = child.wait();
-                break false;
-            }
-            Ok(None) => std::thread::sleep(Duration::from_millis(5)),
-        }
-    };
-    if !success {
-        let _ = child.kill();
-        let _ = child.wait();
-        return false;
-    }
-    let Some(stdout) = child.stdout.take() else {
-        return false;
-    };
-    // Avoid waiting for inherited stdout held by an incorrectly written wrapper.
-    unsafe {
-        libc::fcntl(stdout.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK);
-    }
-    let mut bytes = Vec::new();
-    let _ = stdout.take(128).read_to_end(&mut bytes);
-    String::from_utf8_lossy(&bytes).starts_with(&format!("v{required}."))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -404,7 +371,8 @@ mod tests {
                 .to_string(),
         )
         .unwrap();
-        let (plugins, actions) = load(vec![missing.clone(), malformed, claiming, missing]).unwrap();
+        let (plugins, actions) =
+            load(vec![missing.clone(), malformed, claiming, missing], None).unwrap();
         assert_eq!(plugins.len(), 3);
         assert!(actions.is_empty());
         assert!(

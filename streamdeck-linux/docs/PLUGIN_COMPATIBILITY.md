@@ -17,20 +17,27 @@ starts with an `ELGATO` binary header rather than JSON. Manifest SHA-256:
 `b12534e6177cd673e60d58652f29194a03acdd9d85b44c5d204554646b4b6583`.
 
 Elgato's [distribution documentation](https://docs.elgato.com/streamdeck/sdk/introduction/distribution/)
-describes Marketplace DRM, manifest encryption and integrity checking. Protected
-package verification/decryption is not implemented in Deckforge. The installer
-recognizes this header and reports that limitation before creating an installation
-directory. Original archive bytes remain unchanged. Tests use an independently
-constructed header fixture; the vendor package is not redistributed here.
+describes Marketplace DRM, manifest encryption and integrity checking. The new
+Rust reader authenticates and decrypts this manifest using a locally supplied,
+hash-pinned Stream Deck 7.6.0.23012 executable as its reference. It verifies the
+trusted signer, application identity, Ed25519 signature and AES-GCM tags. No vendor
+keys or decrypted manifest files are embedded in or written by Deckforge.
 
-The actual package import was attempted locally and failed at manifest decoding.
-No plugin process or Discord operation ran. Native executable support is a second
-unresolved requirement after protected-package import. Showing these errors is
-not a claim that the Discord plugin is supported.
+The unchanged package's authenticated manifest SHA-256 is
+`038c015493d11a665e7c561b993afc6f6933ad9db0ec926e1d0c6e50c33bae25`.
+It declares 17 actions and 179 file-integrity records. The latter hash algorithm
+remains unresolved, so the installer still refuses the protected package without
+creating partial files. Manifest authentication alone is not package validation.
+
+At the user's request, Discord execution uses a new [native Rust plugin](../plugins/discord/README.md).
+It preserves the original action/settings identities and supplies its own settings
+panel and artwork. No Wine or original Windows/macOS backend is used. The native
+replacement has host/process and mock-RPC evidence; actual Discord authorization
+and live controls remain unverified.
 
 ## Remaining runtime work
 
 - Protected Marketplace packages and their validation contract.
 - Windows/macOS executable plugins and OS-specific native dependencies.
-- Platform-specific entry paths, explicit Node runtime selection and updates.
+- Broader runtime/version selection and updates. Portable generic scripts and unambiguous Windows/macOS script entries now work, including `.cjs`; Node paths are searched deterministically.
 - Enable/disable, replacement/rollback and uninstall with retained profile data.

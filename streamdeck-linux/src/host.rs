@@ -278,6 +278,8 @@ struct Saved {
     #[serde(default)]
     library: Option<Library>,
     #[serde(default)]
+    reference_app: Option<PathBuf>,
+    #[serde(default)]
     plugins: Vec<PathBuf>,
     slots: Vec<Slot>,
     #[serde(default)]
@@ -289,6 +291,7 @@ enum HeldControl {
     Dial(u8),
 }
 struct Host {
+    reference_app: Option<PathBuf>,
     screensavers: HashMap<String, screensaver::Preferences>,
     saver: screensaver::Runtime,
     session_monitor: Option<crate::session_activity::Worker>,
@@ -373,6 +376,7 @@ impl Host {
         let pending = self.state_path.with_extension("tmp");
         #[derive(Serialize)]
         struct View<'a> {
+            reference_app: &'a Option<PathBuf>,
             screensavers: &'a HashMap<String, screensaver::Preferences>,
             device_controls: &'a HashMap<String, device_session::Controls>,
             device_config: &'a Option<device::Config>,
@@ -382,6 +386,7 @@ impl Host {
             globals: &'a HashMap<String, Value>,
         }
         let data = serde_json::to_vec_pretty(&View {
+            reference_app: &self.reference_app,
             screensavers: &self.screensavers,
             device_controls: &self.device_controls,
             device_config: &self.device_config,
@@ -1232,8 +1237,8 @@ fn slot_snapshot(host: &Host, s: &Slot) -> Value {
 fn snapshot(host: &Host) -> Value {
     json!({"screensaver":{"active":host.saver.active,"reason":host.saver.reason,"generation":host.saver.generation,"preferences":host.saver_preferences(),"preview":host.saver.preview,"error":host.saver.error,"frames":host.saver.animation.as_ref().map(|animation|animation.len())},"session":host.session_state,"device_settings":{"desired":host.configured_controls(),"applied":host.controls_observed,"error":host.controls_error},"library":host.library.snapshot(),"running":host.running,"device":host.device,"firmware":host.firmware,"simulate":host.simulate,"connected":host.connected && !host.simulate,"device_online":host.connected,"connection_error":host.connection_error,
         "volume":host.volume_state,"volume_error":host.volume_error,"multi_runs":host.multi.snapshot(),"multi_pending":host.multi_pending.len(),"audio_outputs":host.audio_outputs,"audio_active":host.audio_active,"system_status":host.system_status,"slots":host.slots.iter().map(|s|slot_snapshot(host,s)).collect::<Vec<_>>(),
-        "inspectors":host.inspectors.values().map(|i|json!({"context":i.context,"plugin":host.plugins[i.plugin].id,"connected":i.sender.is_some()})).collect::<Vec<_>>(),
-        "actions":host.actions.iter().map(|a|json!({"uuid":a.uuid,"name":a.name,"plugin":a.plugin,"plugin_name":host.plugins.iter().find(|p|p.id==a.plugin).map(|p|p.name.as_str()).unwrap_or("Deckforge"),"category":host.plugins.iter().find(|p|p.id==a.plugin).map(|p|p.manifest["Category"].as_str().unwrap_or(&p.name)).unwrap_or(if crate::system_actions::supported(&a.uuid){"System"}else if a.uuid.starts_with("com.elgato.streamdeck.soundboard"){"Soundboard"}else{"Navigation & sequences"}),"tooltip":a.raw["Tooltip"],"visible":a.raw["VisibleInActionsList"]!=false,"controllers":a.controllers,"states":a.raw["States"],"supported_in_multi":a.raw["SupportedInMultiActions"]!=false && !multiaction::container(&a.uuid),"multi_only":a.uuid==multiaction::DELAY,"defaults":if a.uuid=="com.elgato.streamdeck.page.goto"{json!({"PageIndex":1})}else if a.uuid==multiaction::DELAY{json!({"delay":1000})}else{crate::audio_output::defaults(&a.uuid).unwrap_or_else(||crate::system_actions::defaults(&a.uuid))}})).collect::<Vec<_>>(),
+        "reference_app":host.reference_app,"inspectors":host.inspectors.values().map(|i|json!({"context":i.context,"plugin":host.plugins[i.plugin].id,"connected":i.sender.is_some()})).collect::<Vec<_>>(),
+        "actions":host.actions.iter().map(|a|json!({"uuid":a.uuid,"name":a.name,"plugin":a.plugin,"plugin_name":host.plugins.iter().find(|p|p.id==a.plugin).map(|p|p.name.as_str()).unwrap_or("Deckforge"),"category":host.plugins.iter().find(|p|p.id==a.plugin).map(|p|p.manifest["Category"].as_str().unwrap_or(&p.name)).unwrap_or(if crate::system_actions::supported(&a.uuid){"System"}else if a.uuid.starts_with("com.elgato.streamdeck.soundboard"){"Soundboard"}else{"Navigation & sequences"}),"icon":a.raw["Icon"],"plugin_root":host.plugins.iter().find(|p|p.id==a.plugin).map(|p|p.root.as_path()),"icon_generation":host.plugins.iter().find(|p|p.id==a.plugin).and_then(|p|p.child.as_ref().map(Child::id)),"tooltip":a.raw["Tooltip"],"visible":a.raw["VisibleInActionsList"]!=false,"controllers":a.controllers,"states":a.raw["States"],"supported_in_multi":a.raw["SupportedInMultiActions"]!=false && !multiaction::container(&a.uuid),"multi_only":a.uuid==multiaction::DELAY,"defaults":if a.uuid=="com.elgato.streamdeck.page.goto"{json!({"PageIndex":1})}else if a.uuid==multiaction::DELAY{json!({"delay":1000})}else{crate::audio_output::defaults(&a.uuid).unwrap_or_else(||crate::system_actions::defaults(&a.uuid))}})).collect::<Vec<_>>(),
         "logs":host.logs,"plugins":host.plugins.iter().map(Plugin::snapshot).collect::<Vec<_>>()})
 }
 async fn dashboard(State(state): State<Shared>) -> Json<Value> {
@@ -1357,6 +1362,25 @@ fn apply_control(host: &mut Host, r: Value) -> Result<()> {
         "import_profile" => host.import_profile(Path::new(
             r["path"].as_str().context("Profile path missing")?,
         )),
+        "reference_app" => {
+            let reference = r["path"]
+                .as_str()
+                .filter(|p| !p.is_empty())
+                .map(PathBuf::from);
+            let reference = reference
+                .map(|path| -> Result<PathBuf> {
+                    let path = path.canonicalize()?;
+                    crate::protected_manifest::validate_reference(&path)?;
+                    Ok(path)
+                })
+                .transpose()?;
+            let previous = std::mem::replace(&mut host.reference_app, reference);
+            if let Err(error) = host.persist() {
+                host.reference_app = previous;
+                return Err(error);
+            }
+            Ok(())
+        }
         "restart_plugin" => host.restart_plugin(r["id"].as_str().context("Plugin id missing")?),
         "install_plugin" => {
             let state_dir = host
@@ -1372,9 +1396,14 @@ fn apply_control(host: &mut Host, r: Value) -> Result<()> {
             let installed = if source.is_dir() {
                 source.canonicalize()?
             } else {
-                crate::package::install(source, &state_dir.join("plugins"))?
+                crate::package::install_with_reference(
+                    source,
+                    &state_dir.join("plugins"),
+                    host.reference_app.as_deref(),
+                )?
             };
-            let (mut plugins, actions) = load_plugins(vec![installed.clone()])?;
+            let (mut plugins, actions) =
+                load_plugins(vec![installed.clone()], host.reference_app.as_deref())?;
             if host.plugins.iter().any(|p| p.id == plugins[0].id) {
                 bail!(
                     "Package installed at {}, but this plugin is already loaded",
@@ -1626,53 +1655,11 @@ async fn socket_session(socket: WebSocket, state: Shared) {
     }
 }
 
-fn load_plugins(paths: Vec<PathBuf>) -> Result<(Vec<Plugin>, Vec<Action>)> {
-    plugins::load(paths)
-}
-fn node_runtime(required: &str) -> Result<PathBuf> {
-    anyhow::ensure!(
-        !required.is_empty()
-            && required.len() <= 3
-            && required.bytes().all(|byte| byte.is_ascii_digit()),
-        "Invalid Node.js major version"
-    );
-    let mut candidates = Vec::new();
-    if let Some(path) = std::env::var_os(format!("DECKFORGE_NODE{required}")) {
-        candidates.push(PathBuf::from(path));
-    }
-    candidates.extend([PathBuf::from("node"), PathBuf::from("/usr/bin/node")]);
-    if let Some(home) = std::env::var_os("HOME") {
-        let home = PathBuf::from(home);
-        let data = std::env::var_os("XDG_DATA_HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| home.join(".local/share"));
-        let mut roots = vec![data.join("nvm"), home.join(".nvm/versions/node")];
-        if let Some(nvm) = std::env::var_os("NVM_DIR") {
-            roots.push(PathBuf::from(nvm).join("versions/node"));
-        }
-        for root in roots {
-            if let Ok(entries) = fs::read_dir(root) {
-                for entry in entries.flatten() {
-                    if entry
-                        .file_name()
-                        .to_string_lossy()
-                        .starts_with(&format!("v{required}."))
-                    {
-                        candidates.push(entry.path().join("bin/node"));
-                    }
-                }
-            }
-        }
-    }
-    candidates
-        .into_iter()
-        .take(8)
-        .find(|node| plugins::node_version_matches(node, required))
-        .with_context(|| {
-            format!(
-                "Node.js {required} is required; set DECKFORGE_NODE{required} to its executable"
-            )
-        })
+fn load_plugins(
+    paths: Vec<PathBuf>,
+    reference: Option<&Path>,
+) -> Result<(Vec<Plugin>, Vec<Action>)> {
+    plugins::load(paths, reference)
 }
 fn launch_plugins(host: &mut Host, port: u16, state_dir: &Path) {
     let mut failures = Vec::new();
@@ -1692,22 +1679,27 @@ fn launch_plugin(plugin: &mut Plugin, device: &str, port: u16, state_dir: &Path)
     plugin.registration = uuid::Uuid::new_v4().to_string();
     plugin.sender = None;
     plugin.runtime = plugins::Runtime::starting();
-    let html = plugin.manifest["CodePath"]
-        .as_str()
-        .is_some_and(|path| path.ends_with(".html") || path.ends_with(".htm"));
-    plugin.runtime.log_path = Some(std::path::absolute(state_dir)?.join(format!(
-        "{}-{}.log",
-        if html { "webview" } else { "plugin" },
-        plugin.registration
-    )));
-    match launch_plugin_process(plugin, device, port, state_dir) {
-        Ok(()) => Ok(()),
-        Err(error) => {
-            plugin.runtime.fail(format!("{error:#}"));
-            Err(error)
-        }
+    let result = (|| {
+        let entry = crate::plugin_entry::resolve(&plugin.root, &plugin.manifest)?;
+        plugin.runtime.entry_path = Some(entry.path.clone());
+        plugin.runtime.entry_field = Some(entry.field);
+        plugin.runtime.log_path = Some(std::path::absolute(state_dir)?.join(format!(
+            "{}-{}.log",
+            if entry.kind == crate::plugin_entry::Kind::Html {
+                "webview"
+            } else {
+                "plugin"
+            },
+            plugin.registration
+        )));
+        launch_plugin_process(plugin, device, port, state_dir, entry)
+    })();
+    if let Err(error) = &result {
+        plugin.runtime.fail(format!("{error:#}"));
     }
+    result
 }
+
 fn registration_info(plugin: &Plugin, device: &str) -> Value {
     json!({"application":{"font":"DejaVu Sans","language":"en","platform":"linux","platformVersion":std::env::consts::OS,"version":"7.6.0"},"plugin":{"uuid":plugin.id,"version":plugin.manifest["Version"]},"devicePixelRatio":1,"colors":{"buttonMouseOverBackgroundColor":"#303030","buttonPressedBackgroundColor":"#303030","buttonPressedBorderColor":"#505050","buttonPressedTextColor":"#ffffff","highlightColor":"#4bd3b0"},"devices":[{"id":device,"type":7,"name":"Stream Deck +","size":{"columns":4,"rows":2}}]})
 }
@@ -1756,16 +1748,14 @@ fn launch_plugin_process(
     device: &str,
     port: u16,
     state_dir: &Path,
+    entry: crate::plugin_entry::Entry,
 ) -> Result<()> {
-    let code = plugin.manifest["CodePath"].as_str().context(
-        "Plugin has no generic CodePath; platform-specific binary support is unfinished",
-    )?;
-    let file = safe_file(&plugin.root, code)?;
     let info = registration_info(plugin, device);
-    match file.extension().and_then(|s| s.to_str()) {
-        Some("html" | "htm") => {
+    match entry.kind {
+        crate::plugin_entry::Kind::Html => {
+            plugin.runtime.runtime_path = Some(std::env::current_exe()?);
             plugin.child = Some(spawn_webview(
-                &file,
+                &entry.path,
                 port,
                 &plugin.registration,
                 "registerPlugin",
@@ -1775,15 +1765,39 @@ fn launch_plugin_process(
                 state_dir,
             )?);
         }
-        Some("js" | "mjs") => {
-            let required = plugin.manifest["Nodejs"]["Version"]
-                .as_str()
-                .context("Nodejs.Version missing")?;
-            let node = node_runtime(required)?;
+        crate::plugin_entry::Kind::Node | crate::plugin_entry::Kind::Native => {
+            let mut command = if entry.kind == crate::plugin_entry::Kind::Node {
+                let required = plugin.manifest["Nodejs"]["Version"]
+                    .as_str()
+                    .context("Nodejs.Version missing")?;
+                let node = crate::plugin_entry::node_runtime(required)?;
+                plugin.runtime.runtime_path = Some(node.clone());
+                let mut command = Command::new(node);
+                command
+                    .args(crate::plugin_entry::NODE_FLAGS)
+                    .arg(&entry.path);
+                command
+            } else {
+                use sha2::{Digest, Sha256};
+                use std::os::unix::fs::PermissionsExt;
+                let parent = state_dir.join("plugin-data");
+                let data = parent.join(format!("{:x}", Sha256::digest(plugin.id.as_bytes())));
+                for path in [&parent, &data] {
+                    anyhow::ensure!(
+                        !fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()),
+                        "Plugin data directory is a symlink"
+                    );
+                    fs::create_dir_all(path)?;
+                    fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+                }
+                plugin.runtime.runtime_path = Some(entry.path.clone());
+                let mut command = Command::new(&entry.path);
+                command.env("DECKFORGE_PLUGIN_DATA", data.canonicalize()?);
+                command
+            };
             let log = File::create(state_dir.join(format!("plugin-{}.log", plugin.registration)))?;
             plugin.child = Some(
-                Command::new(node)
-                    .arg(file)
+                command
                     .args([
                         "-port",
                         &port.to_string(),
@@ -1801,10 +1815,6 @@ fn launch_plugin_process(
                     .spawn()?,
             );
         }
-        _ => bail!(
-            "Native Windows/macOS plugin binaries are not supported yet: {}",
-            plugin.id
-        ),
     }
     Ok(())
 }
@@ -1872,7 +1882,7 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
     } else {
         plugins
     };
-    let (plugins, mut actions) = load_plugins(plugin_paths)?;
+    let (plugins, mut actions) = load_plugins(plugin_paths, saved.reference_app.as_deref())?;
     actions.extend(library::navigation_actions());
     actions.extend(multiaction::definitions());
     actions.push(stack::action());
@@ -1967,6 +1977,7 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
         controls.insert(device.clone(), previous_controls);
     }
     let mut host = Host {
+        reference_app: saved.reference_app,
         screensavers: saver_preferences,
         saver: screensaver::Runtime::default(),
         session_monitor: if simulate {
@@ -2295,6 +2306,23 @@ fn stop_plugins(host: &mut Host) {
 mod tests {
     use super::*;
     #[test]
+    fn invalid_reference_cannot_replace_saved_compatibility_settings() {
+        let root = tempfile::tempdir().unwrap();
+        let mut host = fixture(root.path());
+        let original = root.path().join("previous-reference.exe");
+        host.reference_app = Some(original.clone());
+        let bad = root.path().join("bad.exe");
+        std::fs::write(&bad, b"invalid").unwrap();
+        assert!(apply_control(&mut host, json!({"command":"reference_app","path":bad})).is_err());
+        assert_eq!(host.reference_app, Some(original));
+        apply_control(&mut host, json!({"command":"reference_app","path":null})).unwrap();
+        let saved: Value =
+            serde_json::from_slice(&std::fs::read(&host.state_path).unwrap()).unwrap();
+        assert!(host.reference_app.is_none());
+        assert!(saved["reference_app"].is_null());
+    }
+
+    #[test]
     fn embedded_host_has_direct_controller_and_releases_its_session_on_close() {
         let temp = tempfile::tempdir().unwrap();
         let options = HostOptions {
@@ -2352,6 +2380,7 @@ mod tests {
     }
     pub(super) fn fixture(root: &Path) -> Host {
         let mut host = Host {
+            reference_app: None,
             screensavers: HashMap::new(),
             saver: screensaver::Runtime::default(),
             session_monitor: None,

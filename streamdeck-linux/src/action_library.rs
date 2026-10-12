@@ -1,7 +1,17 @@
 //! Native action discovery. Selection is a draft; assignment stays explicit.
 use eframe::egui::{self, RichText};
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
+
+type IconKey = (String, String, Option<u64>);
+fn icon_key(action: &Value) -> Option<IconKey> {
+    let root = action["plugin_root"].as_str()?;
+    let icon = action["icon"].as_str()?;
+    if root.is_empty() || icon.is_empty() {
+        return None;
+    }
+    Some((root.into(), icon.into(), action["icon_generation"].as_u64()))
+}
 
 #[derive(Clone)]
 pub struct DragAction {
@@ -12,6 +22,7 @@ pub struct DragAction {
 pub struct Library {
     pub query: String,
     pub show_all: bool,
+    icons: HashMap<IconKey, Option<egui::TextureHandle>>,
 }
 
 fn text<'a>(value: &'a Value, key: &str) -> &'a str {
@@ -68,6 +79,38 @@ fn groups<'a>(
 }
 
 impl Library {
+    pub fn clear_images(&mut self) {
+        self.icons.clear();
+    }
+
+    fn icon(
+        &mut self,
+        ui: &egui::Ui,
+        action: &Value,
+        loaded: &mut bool,
+    ) -> Option<egui::TextureId> {
+        let key = icon_key(action)?;
+        if !self.icons.contains_key(&key) {
+            // Spread decoding over frames; ordinary plugin input never waits on
+            // catalog thumbnails or the host mutex.
+            if *loaded {
+                ui.ctx().request_repaint();
+                return None;
+            }
+            *loaded = true;
+            let texture = crate::action_icons::load(std::path::Path::new(&key.0), &key.1)
+                .ok()
+                .map(|image| {
+                    ui.ctx().load_texture(
+                        format!("action-icon:{key:?}"),
+                        image,
+                        egui::TextureOptions::LINEAR,
+                    )
+                });
+            self.icons.insert(key.clone(), texture);
+        }
+        self.icons.get(&key)?.as_ref().map(egui::TextureHandle::id)
+    }
     pub fn show(
         &mut self,
         ui: &mut egui::Ui,
@@ -107,6 +150,9 @@ impl Library {
             "{count} actions · drag to a control or select below"
         ));
         let mut chosen = None;
+        let live: HashSet<_> = actions.iter().filter_map(icon_key).collect();
+        self.icons.retain(|key, _| live.contains(key));
+        let mut loaded = false;
         egui::ScrollArea::vertical()
             .id_salt("action_library")
             .auto_shrink([false, false])
@@ -124,7 +170,16 @@ impl Library {
                                 let enabled = compatible(action, controller);
                                 let uuid = text(action, "uuid");
                                 let name = text(action, "name");
-                                let button = egui::Button::new(name)
+                                let button = if let Some(icon) = self.icon(ui, action, &mut loaded)
+                                {
+                                    egui::Button::image_and_text(
+                                        egui::Image::new((icon, egui::vec2(24.0, 24.0))),
+                                        name,
+                                    )
+                                } else {
+                                    egui::Button::new(name)
+                                };
+                                let button = button
                                     .min_size(egui::vec2(ui.available_width(), 30.0))
                                     .selected(uuid == selected)
                                     .sense(egui::Sense::click_and_drag());

@@ -1,3 +1,4 @@
+mod action_icons;
 mod action_library;
 mod action_trigger;
 mod audio_output;
@@ -13,8 +14,10 @@ mod layout;
 mod multi;
 mod multi_editor;
 mod package;
+mod plugin_entry;
 mod preferences;
 mod profile;
+mod protected_manifest;
 mod render;
 mod resources;
 mod screensaver;
@@ -100,6 +103,9 @@ enum Command {
         path: PathBuf,
         #[arg(long, default_value = "state/plugins")]
         destination: PathBuf,
+        /// Local official executable used to verify protected plugin manifests.
+        #[arg(long)]
+        reference_app: Option<PathBuf>,
     },
     /// Run the hardware and plugin host with a local browser editor.
     Serve {
@@ -267,11 +273,17 @@ fn main() -> Result<()> {
                 )?
             );
         }
-        Command::Install { path, destination } => {
-            println!(
-                "Installed {}",
-                package::install(&path, &destination)?.display()
-            );
+        Command::Install {
+            path,
+            destination,
+            reference_app,
+        } => {
+            let installed = if let Some(reference) = reference_app {
+                package::install_with_reference(&path, &destination, Some(&reference))?
+            } else {
+                package::install(&path, &destination)?
+            };
+            println!("Installed {}", installed.display());
         }
         Command::Serve {
             serial,

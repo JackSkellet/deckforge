@@ -15,6 +15,13 @@ application**. Its first targets are the unchanged official Counter and Layouts
 feedback sample plugins. Elgato's Windows executable is an analysis input, not a
 runtime dependency.
 
+## Native Discord plugin
+
+[Discord for Deckforge](plugins/discord/README.md) is a from-scratch Rust plugin
+with the original 17 Discord action identities. It runs as a Linux executable,
+with its own settings panel and artwork. No Wine is used. Live authorization,
+notifications, server statistics and dynamic icon rendering remain open.
+
 ## Run the native application
 
 Open **Deckforge** from the Linux application menu, or run:
@@ -31,7 +38,7 @@ the repository.
 
 Select a key or dial, search the **Actions** sidebar by action or plugin name,
 and choose **Assign to key/dial**. You can also drag an action onto a compatible
-control. Categories come from plugin manifests; the list filters for the selected
+control. Categories and action icons come from plugin manifests; the list filters for the selected
 key or dial. **Show key and dial actions** exposes incompatible choices with
 disabled controls. Edit simple settings with text, numeric and checkbox controls,
 then Save changes.

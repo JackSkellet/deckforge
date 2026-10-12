@@ -15,9 +15,24 @@ use std::{
 pub(crate) fn read_manifest(bytes: &[u8]) -> Result<Value> {
     ensure!(
         !bytes.starts_with(b"ELGATO"),
-        "This plugin has an Elgato-protected manifest. Marketplace-protected plugin import is not supported yet."
+        "This plugin has an Elgato-protected manifest. Protected Marketplace package import is not supported yet."
     );
     serde_json::from_slice(bytes).context("Invalid plugin manifest JSON")
+}
+
+pub(crate) fn read_manifest_with_reference(
+    bytes: &[u8],
+    reference: Option<&Path>,
+) -> Result<Value> {
+    if bytes.starts_with(b"ELGATO")
+        && let Some(reference) = reference
+    {
+        let _manifest = crate::protected_manifest::read(bytes, reference)?;
+        bail!(
+            "Protected manifest authenticated, but package file-integrity verification is not implemented yet; installation remains blocked"
+        );
+    }
+    read_manifest(bytes)
 }
 
 const MAX_ENTRIES: usize = 10_000;
@@ -32,7 +47,15 @@ struct Entry {
 /// Validate, stage and atomically install a .streamDeckPlugin ZIP. Existing plugins
 /// are never replaced. The caller decides whether and when to launch the result.
 pub fn install(archive: &Path, destination: &Path) -> Result<PathBuf> {
-    let (folder, entries) = validated_archive(archive)?;
+    install_with_reference(archive, destination, None)
+}
+
+pub fn install_with_reference(
+    archive: &Path,
+    destination: &Path,
+    reference: Option<&Path>,
+) -> Result<PathBuf> {
+    let (folder, entries) = validated_archive(archive, reference)?;
     reject_symlinks(destination)?;
     fs::create_dir_all(destination).context("Create plugin collection directory")?;
     let destination = destination.canonicalize()?;
@@ -86,7 +109,10 @@ fn reject_symlinks(destination: &Path) -> Result<()> {
     Ok(())
 }
 
-fn validated_archive(path: &Path) -> Result<(String, BTreeMap<String, Entry>)> {
+fn validated_archive(
+    path: &Path,
+    reference: Option<&Path>,
+) -> Result<(String, BTreeMap<String, Entry>)> {
     let mut zip = zip::ZipArchive::new(
         fs::File::open(path).with_context(|| format!("Open {}", path.display()))?,
     )?;
@@ -167,7 +193,7 @@ fn validated_archive(path: &Path) -> Result<(String, BTreeMap<String, Entry>)> {
         .get(&format!("{folder}/manifest.json"))
         .and_then(|e| e.bytes.as_ref())
         .context("Plugin manifest.json missing")?;
-    let manifest = read_manifest(manifest)?;
+    let manifest = read_manifest_with_reference(manifest, reference)?;
     let uuid = manifest["UUID"]
         .as_str()
         .context("Plugin manifest UUID missing")?;
@@ -442,7 +468,7 @@ mod tests {
         .unwrap();
         zip.finish().unwrap();
         assert!(
-            validated_archive(&archive)
+            validated_archive(&archive, None)
                 .err()
                 .unwrap()
                 .to_string()

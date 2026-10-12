@@ -498,6 +498,7 @@ impl Desktop {
     }
     fn attach(&mut self, context: egui::Context) {
         self.previews.clear();
+        self.action_library.clear_images();
         self.last_poll = None;
         self.closing = false;
         self.focused = false;
@@ -1494,6 +1495,12 @@ impl Desktop {
         }
     }
     fn library(&mut self, ui: &mut egui::Ui) {
+        if !self.error.is_empty() {
+            ui.colored_label(Color32::LIGHT_RED, &self.error);
+        }
+        if !self.notice.is_empty() {
+            ui.colored_label(ACCENT, &self.notice);
+        }
         ui.add_space(16.0);
         self.profile_management(ui);
         ui.add_space(8.0);
@@ -1537,6 +1544,15 @@ impl Desktop {
                         ui.label(format!("Folder: {}", string(&plugin, "path")));
                         if let Some(path) = plugin["log_path"].as_str() {
                             ui.label(format!("Log: {path}"));
+                        }
+                        for (label, key) in [
+                            ("Entry", "entry_path"),
+                            ("Manifest field", "entry_field"),
+                            ("Runtime", "runtime_path"),
+                        ] {
+                            if let Some(value) = plugin[key].as_str() {
+                                ui.label(format!("{label}: {value}"));
+                            }
                         }
                     });
                     ui.add_space(6.0);
@@ -1622,6 +1638,7 @@ impl Drop for EditorWindow {
     fn drop(&mut self) {
         if let Some(mut app) = self.app.take() {
             app.previews.clear();
+            app.action_library.clear_images();
             app.window.detach();
             *self.saved.lock().unwrap() = Some(app);
         }
@@ -1635,7 +1652,9 @@ impl eframe::App for EditorWindow {
         self.app.as_mut().unwrap().ui(ui, frame);
     }
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-        self.app.as_mut().unwrap().previews.clear();
+        let app = self.app.as_mut().unwrap();
+        app.previews.clear();
+        app.action_library.clear_images();
     }
 }
 impl eframe::App for Desktop {
