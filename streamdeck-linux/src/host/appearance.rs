@@ -403,6 +403,10 @@ impl Controller {
                     )
                     .context("Action is not visible")?
                     .clone();
+                ensure!(
+                    slot.controller != "Encoder" || slot.model.capabilities().strip,
+                    "This encoder has no display to edit"
+                );
                 migrate(&mut slot, &host.actions);
                 check(request, &slot, &host.actions)?;
                 if let Some(target) = request["state"].as_u64().filter(|s| *s != slot.state) {
@@ -462,7 +466,12 @@ impl Controller {
         let mut picture = if matches!(slot.controller.as_str(), "Encoder" | "Neo") {
             display::dial_image(&renderer, &mut slot, root.as_deref(), &actions)?
         } else {
-            renderer.key_styled(&slot.title, slot.background.as_ref(), &style)
+            let size = if slot.model.key_width() != slot.model.key_height() {
+                (slot.model.key_width(), slot.model.key_height())
+            } else {
+                (120, 120)
+            };
+            renderer.key_styled_size(&slot.title, slot.background.as_ref(), &style, size)
         };
         if slot.controller == "Keypad" && slot.model.capabilities().key_images {
             picture = picture.resize_exact(

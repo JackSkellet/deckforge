@@ -602,6 +602,12 @@ impl Host {
         let mut warnings = Vec::new();
         for slot in &mut self.slots {
             appearance::apply_user_titles(slot, &self.actions);
+            if slot.controller == "Encoder" && !self.model.capabilities().strip {
+                // Studio encoders have no LCD. Keep SDK metadata/settings, but
+                // neither load a Plus layout nor manufacture a hardware image.
+                slot.preview.clear();
+                continue;
+            }
             let mut picture = if slot.controller == "Neo" {
                 let root = self
                     .actions
@@ -663,10 +669,16 @@ impl Host {
                 }
                 picture
             } else {
-                let mut picture = self.renderer.key_styled(
+                let size = if self.model.key_width() != self.model.key_height() {
+                    (self.model.key_width(), self.model.key_height())
+                } else {
+                    (120, 120)
+                };
+                let mut picture = self.renderer.key_styled_size(
                     &slot.title,
                     slot.background.as_ref(),
                     &appearance::style(slot, &self.actions),
+                    size,
                 );
                 feedback::paint_key(&self.badges, &mut picture, slot, self.multi_clock.elapsed());
                 picture
@@ -685,7 +697,7 @@ impl Host {
             picture.write_to(&mut png, image::ImageFormat::Png)?;
             slot.preview = STANDARD.encode(png.into_inner());
             warnings.append(&mut slot.display_warnings);
-            if slot.controller == "Encoder" {
+            if slot.controller == "Encoder" && self.model.capabilities().strip {
                 strip.copy_from(
                     &picture,
                     slot.index as u32
@@ -738,7 +750,7 @@ impl Host {
                     let _ = hardware.send(Draw::Key(index, image));
                 }
             }
-            if self.model.dial_count() > 0 {
+            if self.model.capabilities().strip && self.model.dial_count() > 0 {
                 let _ = hardware.send(Draw::Strip(strip));
             }
             if self.model == Model::Neo && !self.slots.iter().any(|s| s.controller == "Neo") {
@@ -779,7 +791,7 @@ impl Host {
             .find(|a| a.uuid == uuid && a.controllers.iter().any(|c| c == controller))
             .cloned()
             .context("Action is not installed or does not support this controller")?;
-        if controller == "Encoder" || controller == "Neo" {
+        if (controller == "Encoder" && self.model.capabilities().strip) || controller == "Neo" {
             let root = self
                 .plugins
                 .iter()
@@ -1448,16 +1460,23 @@ impl Host {
             }
             "setFeedbackLayout" => {
                 let layout = payload["layout"].as_str().context("Missing layout")?;
-                let definition = display::load_layout(Some(&root), layout)?;
+                let definition = if slot.controller == "Encoder" && !slot.model.capabilities().strip
+                {
+                    None
+                } else {
+                    Some(display::load_layout(Some(&root), layout)?)
+                };
                 slot.layout = layout.into();
-                slot.layout_cache = Some(definition);
+                slot.layout_cache = definition;
                 slot.image_cache.clear();
             }
             _ => {
                 bail!("Unsupported plugin command: {event}");
             }
         }
-        if matches!(replacement.controller.as_str(), "Encoder" | "Neo") {
+        if replacement.controller == "Neo"
+            || (replacement.controller == "Encoder" && replacement.model.capabilities().strip)
+        {
             display::dial_image(&self.renderer, &mut replacement, Some(&root), &self.actions)?;
         }
         self.store_slot(replacement);

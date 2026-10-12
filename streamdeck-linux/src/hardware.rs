@@ -514,6 +514,12 @@ fn decode_firmware(model: Model, report: &[u8]) -> Result<String> {
         ascii_string(&report[6..14])
     }
 }
+/// Native Studio factory sets min1/max100; the common mapper truncates the
+/// interpolated value. Keep this separate from the raw HID setter.
+pub(crate) fn studio_brightness_value(percent: u8) -> Result<u8> {
+    ensure!(percent <= 100, "brightness must be between 0 and 100");
+    Ok((1 + u16::from(percent) * 99 / 100) as u8)
+}
 fn model_brightness_report(model: Model, brightness: u8) -> Result<[u8; 32]> {
     ensure!(
         model.capabilities().brightness,
@@ -575,7 +581,7 @@ fn encode_model_jpeg(
     let image = match model {
         Model::Classic | Model::Xl | Model::Neo => image.rotate180(),
         Model::PlusXl => image.rotate270(),
-        Model::Plus => image,
+        Model::Plus | Model::Studio => image,
         _ => bail!("model does not use JPEG images"),
     };
     encode_jpeg(&image, image.width(), image.height())
@@ -780,14 +786,17 @@ impl InputState {
                 );
                 match data[0] {
                     0x00 => {
+                        // Studio's recovered polling handler explicitly converts
+                        // each byte with bool(nonzero); public Plus protocols
+                        // instead specify0/1 and keep their stricter validation.
                         ensure!(
-                            data[1..].iter().all(|&v| v <= 1),
+                            self.model == Model::Studio || data[1..].iter().all(|&v| v <= 1),
                             "invalid dial button state"
                         );
                         for (index, (&value, old)) in
                             data[1..].iter().zip(&mut self.dials).enumerate()
                         {
-                            let pressed = value == 1;
+                            let pressed = value != 0;
                             if pressed != *old {
                                 events.push(InputEvent::DialPress {
                                     index: index as u8,
@@ -861,6 +870,137 @@ fn touch_position(model: Model, data: &[u8], offset: usize) -> Result<(u16, u16)
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn studio_rectangle_identity_jpeg_and_modern_chunks_preserve_the_key_payload() {
+        let source = DynamicImage::ImageRgb8(image::RgbImage::from_fn(144, 112, |x, y| {
+            if x < 24 && y < 24 {
+                image::Rgb([255, 0, 0])
+            } else if x >= 120 && y >= 88 {
+                image::Rgb([0, 0, 255])
+            } else {
+                image::Rgb([
+                    (x * 17 + y * 5) as u8,
+                    (x * 3 + y * 19) as u8,
+                    (x * 7 + y * 11) as u8,
+                ])
+            }
+        }));
+        let jpeg = encode_model_jpeg(
+            Model::Studio,
+            &source,
+            Model::Studio.key_width(),
+            Model::Studio.key_height(),
+        )
+        .unwrap();
+        let decoded = image::load_from_memory(&jpeg).unwrap().to_rgb8();
+        assert_eq!(decoded.dimensions(), (144, 112));
+        let first = decoded.get_pixel(10, 10).0;
+        let last = decoded.get_pixel(133, 101).0;
+        assert!(first[0] > 240 && first[1] < 10 && first[2] < 10);
+        assert!(last[2] > 240 && last[0] < 10 && last[1] < 10);
+        let reports = model_image_reports(Model::Studio, 7, 31, &jpeg).unwrap();
+        assert!(reports.len() > 1);
+        let mut rebuilt = Vec::new();
+        for (index, report) in reports.iter().enumerate() {
+            assert_eq!(&report[..3], &[2, 7, 31]);
+            assert_eq!(report[3], u8::from(index + 1 == reports.len()));
+            assert_eq!(u16::from_le_bytes([report[6], report[7]]) as usize, index);
+            let len = u16::from_le_bytes([report[4], report[5]]) as usize;
+            assert!((1..=1016).contains(&len));
+            rebuilt.extend_from_slice(&report[8..8 + len]);
+            assert!(report[8 + len..].iter().all(|&b| b == 0));
+        }
+        assert_eq!(rebuilt, jpeg);
+        assert!(model_image_reports(Model::Studio, 7, 32, &jpeg).is_err());
+        for cmd in [8, 0x0b, 0x0c] {
+            assert!(model_image_reports(Model::Studio, cmd, 0, &jpeg).is_err());
+        }
+    }
+    #[test]
+    fn studio_two_encoder_states_and_32_keys_reject_wrong_counts_without_mutation() {
+        let mut state = InputState::new(Model::Studio);
+        let mut keys = [0; 32];
+        keys[0] = 1;
+        keys[31] = 1;
+        assert_eq!(
+            state.decode(&input(0, &keys)).unwrap(),
+            vec![
+                InputEvent::Key {
+                    index: 0,
+                    pressed: true
+                },
+                InputEvent::Key {
+                    index: 31,
+                    pressed: true
+                }
+            ]
+        );
+        assert_eq!(
+            state.decode(&input(3, &[0, 0, 1])).unwrap(),
+            vec![InputEvent::DialPress {
+                index: 1,
+                pressed: true
+            }]
+        );
+        assert!(state.decode(&input(3, &[0, 0, 1])).unwrap().is_empty());
+        // Native Studio interprets any nonzero push byte as pressed.
+        assert!(state.decode(&input(3, &[0, 0, 255])).unwrap().is_empty());
+        assert_eq!(
+            state.decode(&input(3, &[1, 128, 127])).unwrap(),
+            vec![
+                InputEvent::DialRotate {
+                    index: 0,
+                    ticks: -128
+                },
+                InputEvent::DialRotate {
+                    index: 1,
+                    ticks: 127
+                }
+            ]
+        );
+        for report in [
+            input(0, &keys[..31]),
+            input(3, &[0, 1]),
+            input(3, &[1, 0, 0, 0]),
+            input(3, &[2, 0, 0]),
+            input(2, &[1, 0, 1, 0, 1, 0, 0, 0, 0, 0]),
+        ] {
+            let before = (state.keys.clone(), state.dials.clone());
+            assert!(state.decode(&report).is_err());
+            assert_eq!((state.keys.clone(), state.dials.clone()), before);
+        }
+        assert_eq!(
+            state.decode(&input(3, &[0, 0, 0])).unwrap(),
+            vec![InputEvent::DialPress {
+                index: 1,
+                pressed: false
+            }]
+        );
+    }
+    #[test]
+    fn studio_metadata_and_brightness_are_supported_but_sleep_readback_is_not() {
+        let mut serial = [0; 32];
+        serial[0] = 6;
+        serial[1] = 14;
+        serial[2..16].copy_from_slice(b"STUDIO12345678");
+        assert_eq!(
+            decode_serial(Model::Studio, &serial).unwrap(),
+            "STUDIO12345678"
+        );
+        let mut fw = [0; 32];
+        fw[0] = 5;
+        fw[1] = 12;
+        fw[6..14].copy_from_slice(b"1.2.3.4\0");
+        assert_eq!(decode_firmware(Model::Studio, &fw).unwrap(), "1.2.3.4");
+        for (logical, raw) in [(0, 1), (1, 1), (50, 50), (99, 99), (100, 100)] {
+            assert_eq!(studio_brightness_value(logical).unwrap(), raw);
+            let report = model_brightness_report(Model::Studio, raw).unwrap();
+            assert_eq!(&report[..3], &[3, 8, raw]);
+            assert!(report[3..].iter().all(|&b| b == 0));
+        }
+        assert!(studio_brightness_value(101).is_err());
+        assert!(model_sleep_report(Model::Studio, 60).is_err());
+    }
     #[test]
     fn pedal_shared_metadata_and_three_inputs_but_no_display_or_controls() {
         // Native7.6 Pedal vtable uses the same serial/fw/input functions as2019.

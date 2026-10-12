@@ -34,9 +34,11 @@ export function Sequence({
   run,
   mixer,
   device,
+  encoderDisplay = true,
 }: {
   scope?: string;
   device?: string;
+  encoderDisplay?: boolean;
   mixer?: MixerConfig;
   runtime?: Slot;
   run?: (p: RecordValue) => Promise<boolean>;
@@ -123,19 +125,21 @@ export function Sequence({
           {[
             ["ShowStackIcon", "Show stack icon", true],
             ["FastNavigation", "Hold and turn to choose", false],
-          ].map(([field, label, fallback]) => (
-            <Check
-              key={String(field)}
-              label={String(label)}
-              checked={raw.Settings?.[String(field)] ?? fallback}
-              onChange={(value) =>
-                onChange({
-                  ...raw,
-                  Settings: { ...raw.Settings, [String(field)]: value },
-                })
-              }
-            />
-          ))}
+          ]
+            .filter(([field]) => encoderDisplay || field !== "ShowStackIcon")
+            .map(([field, label, fallback]) => (
+              <Check
+                key={String(field)}
+                label={String(label)}
+                checked={raw.Settings?.[String(field)] ?? fallback}
+                onChange={(value) =>
+                  onChange({
+                    ...raw,
+                    Settings: { ...raw.Settings, [String(field)]: value },
+                  })
+                }
+              />
+            ))}
         </div>
       )}
       <div className="sequence-list">
@@ -289,6 +293,7 @@ export function Sequence({
           )}
           {isContainer(selectedEntry.UUID) && depth < 8 && (
             <Sequence
+              encoderDisplay={encoderDisplay}
               device={device}
               mixer={mixer}
               key={selectedEntry.ActionID ?? selected}

@@ -33,7 +33,8 @@ always use ordinary left-to-right coordinates.
 
 Sleep, full-panel output, firmware updating and user-configurable device rotation
 are not implemented for this model. Software screensaver work remains deferred.
-The transport has no physical acceptance test yet.
+The transport has no physical acceptance test yet. A follow-up recovered the
+[firmware-gated sleep setter and software rotation contracts](DEVICE_CONTRACTS.md#original-2017-controls-awaiting-implementation); they are still pending implementation.
 
 ## Evidence and reproducibility
 

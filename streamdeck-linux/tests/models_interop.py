@@ -21,6 +21,7 @@ MODELS = {
     'plus-xl': (9, 4, 6, 13, '20GBX9901'),
     'neo': (4, 2, 0, 9, '20GBJ9901'),
     'pedal': (3, 1, 0, 5, '20GBF9901'),
+    'studio': (16, 2, 2, 10, '20GBO9901'),
 }
 PLUGIN = 'com.deckforge.model-probe'
 ACTION = PLUGIN + '.action'
@@ -56,6 +57,10 @@ appendFileSync(proof,JSON.stringify({event:'launch',info:JSON.parse(args['-info'
 const ws=new WebSocket(`ws://127.0.0.1:${args['-port']}`);
 ws.on('open',()=>ws.send(JSON.stringify({event:args['-registerEvent'],uuid:args['-pluginUUID']})));
 ws.on('message',bytes=>{const m=JSON.parse(bytes);appendFileSync(proof,JSON.stringify(m)+'\n');
+if(m.event==='willAppear'&&m.payload.controller==='Encoder'&&JSON.parse(args['-info']).devices.some(d=>d.id===m.device&&d.type===10)){
+ws.send(JSON.stringify({event:'setFeedbackLayout',context:m.context,payload:{layout:'no-studio-display.json'}}));
+ws.send(JSON.stringify({event:'setFeedback',context:m.context,payload:{value:42,title:'Studio dial'}}));
+}
 if(m.event==='willAppear'&&m.payload.controller==='Neo'){
 ws.send(JSON.stringify({event:'setFeedbackLayout',context:m.context,payload:{layout:'neo.json'}}));
 ws.send(JSON.stringify({event:'setFeedback',context:m.context,payload:{title:'Neo probe'}}));
@@ -100,6 +105,18 @@ def main():
                     host.post({'command':'input','event':'dialRotate','index':dials-1,'ticks':1})
                     event=wait(host,lambda:next((e for e in reversed(rows(proof)) if e['event']=='dialRotate' and e.get('context')==dial['context']),None))
                     assert event['payload']['coordinates']=={'column':dials-1,'row':0}
+                    if model=='studio':
+                        snap=host.wait(lambda s:any(x['controller']=='Encoder' and x['feedback'].get('value')==42 for x in s['slots']),'Studio feedback metadata retained without LCD layout')
+                        encoder=next(x for x in snap['slots'] if x['controller']=='Encoder')
+                        assert encoder['preview']=='' and encoder['layout']=='no-studio-display.json'
+                        assert not snap['device_capabilities']['strip'] and not snap['device_capabilities']['touchscreen']
+                        assert Image.open(io.BytesIO(base64.b64decode(key['preview']))).size==(144,112)
+                        for event in ('touchTap','touchLongTap','swipe'):
+                            host.post({'command':'input','event':event,'index':0},expected=400)
+                        for event in ('dialDown','dialUp'):
+                            host.post({'command':'input','event':event,'index':1})
+                            message=wait(host,lambda:next((e for e in reversed(rows(proof)) if e['event']==event and e.get('context')==dial['context']),None))
+                            assert message['payload']['coordinates']=={'column':1,'row':0}
                 if model=='neo':
                     host.post({'command':'assign','controller':'Neo','index':1,'uuid':ACTION})
                     snap=host.wait(lambda s:any(x['controller']=='Neo' and x['feedback'].get('title')=='Neo probe' for x in s['slots']),'Neo feedback rendering')
@@ -111,6 +128,8 @@ def main():
                     manifests=[json.loads(archive.read(n)) for n in archive.namelist() if n.endswith('manifest.json')]
                 assert any(m.get('Device',{}).get('Model')==profile_model for m in manifests),manifests
                 assert any(f'{columns-1},{rows_count-1}' in c.get('Actions',{}) for m in manifests for c in m.get('Controllers',[]) if c['Type']=='Keypad')
+                if dials:
+                    assert any(f'{dials-1},0' in c.get('Actions',{}) for m in manifests for c in m.get('Controllers',[]) if c['Type']=='Encoder')
                 host.post({'command':'import_profile','path':str(export)})
                 assert any(s['controller']=='Keypad' and s['index']==index for s in host.state()['slots'])
             finally:
@@ -135,6 +154,6 @@ def main():
                 assert any(s['controller']=='Keypad' and s['index']==14 for s in snap['slots'])
             finally:host.stop()
     if args.report:args.report.write_text(json.dumps(report,indent=2)+'\n')
-    print('PASS: all eight model layouts, final key coordinates, dial limits, Neo feedback, export/import and persisted-model restart and 15-key cross-generation profiles; no USB.')
+    print('PASS: all nine model layouts, final key coordinates, dial limits, Neo feedback, screenless Studio encoders, export/import and persisted-model restart and 15-key cross-generation profiles; no USB.')
 
 if __name__=='__main__':main()

@@ -144,6 +144,8 @@ impl Transport for Deck {
     fn set_brightness(&mut self, brightness: u8) -> Result<()> {
         let value = if self.model() == Model::Plus {
             crate::brightness::hid_value(brightness)?
+        } else if self.model() == Model::Studio {
+            crate::hardware::studio_brightness_value(brightness)?
         } else if self.model() == Model::Classic2017 {
             self.legacy_brightness_value(brightness)?
         } else {
@@ -348,7 +350,9 @@ impl<T: Transport> Session<T> {
             {
                 (usize::from(index), image)
             }
-            Draw::Strip(image) if self.model.dial_count() > 0 => {
+            Draw::Strip(image)
+                if self.model.capabilities().strip && self.model.capabilities().touchscreen =>
+            {
                 (usize::from(self.model.key_count()), image)
             }
             Draw::Infobar(image) if self.model == Model::Neo => {
@@ -958,6 +962,78 @@ mod tests {
         panic!("unexpected reconnect")
     }
 
+    #[test]
+    fn studio_encoders_reconnect_with_latest_keys_without_strip_or_sleep_io() {
+        let (mut deck, first) = fake("studio");
+        deck.model = Model::Studio;
+        deck.inputs = vec![InputEvent::DialRotate {
+            index: 1,
+            ticks: -2,
+        }];
+        let mut session = Session::new_model(
+            Some((deck, "1".into())),
+            Some("studio".into()),
+            Some(Model::Studio),
+        );
+        session.cache(Draw::Key(31, frame(10)));
+        session.cache(Draw::Strip(frame(99)));
+        assert_eq!(session.desired.len(), 32);
+        let events = session.tick(Duration::ZERO, &mut never);
+        assert!(matches!(
+            events.first(),
+            Some(Event::Connected {
+                model: Model::Studio,
+                ..
+            })
+        ));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            Event::Input(InputEvent::DialRotate {
+                index: 1,
+                ticks: -2
+            })
+        )));
+        assert_eq!(first.lock().unwrap().writes, vec![(31, 10)]);
+        assert_eq!(first.lock().unwrap().sleep_queries, 0);
+        session.device.as_mut().unwrap().0.read_error = true;
+        let events = session.tick(Duration::from_millis(1), &mut never);
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, Event::Disconnected { .. }))
+        );
+        session.cache(Draw::Key(31, frame(20)));
+        session.cache(Draw::Strip(frame(77)));
+        let (mut next, second) = fake("studio");
+        next.model = Model::Studio;
+        next.inputs = vec![InputEvent::DialPress {
+            index: 0,
+            pressed: true,
+        }];
+        let mut next = Some(next);
+        let events = session.tick(Duration::from_secs(2), &mut |serial| {
+            assert_eq!(serial, Some("studio"));
+            Ok((next.take().unwrap(), "2".into()))
+        });
+        assert!(matches!(
+            events.first(),
+            Some(Event::Connected {
+                model: Model::Studio,
+                ..
+            })
+        ));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            Event::Input(InputEvent::DialPress {
+                index: 0,
+                pressed: true
+            })
+        )));
+        assert_eq!(second.lock().unwrap().writes, vec![(31, 20)]);
+        assert_eq!(second.lock().unwrap().sleep_queries, 0);
+        session.stop(Duration::from_secs(2));
+        assert_eq!(second.lock().unwrap().writes, vec![(31, 20)]);
+    }
     #[test]
     fn model_caches_cover_all_keys_and_only_supported_extra_displays() {
         for &model in Model::all() {

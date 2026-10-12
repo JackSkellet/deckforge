@@ -10,6 +10,7 @@ import {
 import userEvent from "@testing-library/user-event";
 import App from "./App";
 import { DeviceCanvas } from "./DeviceCanvas";
+import { Sequence } from "./Sequence";
 import { installFixture } from "./fixture";
 import { fixtureDevice } from "./fixtureDevices";
 import {
@@ -18,6 +19,8 @@ import {
   acceptsInput,
   outsideControls,
   associatedDevices,
+  hasEncoderDisplay,
+  hasTouchscreen,
   deviceOptionLabel,
 } from "./device";
 import { importFormDrafts, importTextDrafts } from "./transient";
@@ -51,6 +54,7 @@ it("uses exact supported geometry for every descriptor, including display-only N
     ["xl", 32, 0],
     ["plus", 8, 4],
     ["plus-xl", 36, 6],
+    ["studio", 32, 2],
     ["neo", 8, 0],
     ["pedal", 3, 0],
   ] as const) {
@@ -383,4 +387,146 @@ it("disambiguates same-name devices even when their shortened ID suffixes collid
   expect(deviceOptionLabel(a, peers)).toContain(a.id);
   expect(deviceOptionLabel(b, peers)).toContain(b.id);
   expect(deviceOptionLabel(a, peers)).not.toBe(deviceOptionLabel(b, peers));
+});
+
+it("renders Studio rectangular keys and screenless dials with keyboard assignment, copy and input", async () => {
+  const request = setup("studio");
+  const user = userEvent.setup();
+  const model = fixtureDevice("studio");
+  expect(model.geometry).toEqual({
+    columns: 16,
+    rows: 2,
+    keys: 32,
+    dials: 2,
+    key_width: 144,
+    key_height: 112,
+    strip_width: 0,
+    strip_height: 0,
+  });
+  const snapshot = await window.deckforge!.request<Snapshot>("snapshot");
+  expect(hasEncoderDisplay(snapshot)).toBe(false);
+  expect(hasTouchscreen(snapshot)).toBe(false);
+  render(<App />);
+  const lastKey = await screen.findByRole("button", {
+    name: "Key 32: Counter",
+  });
+  expect(screen.getAllByRole("button", { name: /^Key \d+:/ })).toHaveLength(32);
+  const dials = screen.getAllByRole("button", { name: /^Dial \d+:/ });
+  expect(dials).toHaveLength(2);
+  expect(dials.every((dial) => !dial.querySelector("img"))).toBe(true);
+  expect(lastKey.title).toBe("Key 32: Counter\nKey 32");
+  expect(dials[1].title).toBe("Dial 2: Unassigned");
+  lastKey.focus();
+  await user.keyboard("{Enter}");
+  expect(lastKey.getAttribute("aria-pressed")).toBe("true");
+  dials[1].focus();
+  await user.keyboard("{Enter}");
+  await user.click(
+    screen.getByRole("button", { name: "Assign System volume" }),
+  );
+  await waitFor(() =>
+    expect(request).toHaveBeenCalledWith("command", {
+      command: "assign",
+      device: "simulated-streamdeck-studio",
+      controller: "Encoder",
+      index: 1,
+      uuid: "com.elgato.streamdeck.system.multimedia",
+    }),
+  );
+  const dial = screen.getByRole("button", { name: "Dial 2: System volume" });
+  expect(dial.querySelector("img")).toBeNull();
+  expect(dial.textContent).toContain("System volume");
+  expect(
+    screen.getByText("Studio LED and ring feedback is not supported."),
+  ).toBeTruthy();
+  expect(screen.queryByText("Appearance")).toBeNull();
+  expect(screen.queryByRole("button", { name: "Tap screen" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Hold screen" })).toBeNull();
+  expect(screen.queryByAltText("Selected control preview")).toBeNull();
+  fireEvent.keyDown(dial, { key: "c", ctrlKey: true });
+  await waitFor(() =>
+    expect(request).toHaveBeenCalledWith("command", {
+      command: "slot_copy",
+      device: "simulated-streamdeck-studio",
+      context: "fixture-1-Encoder",
+    }),
+  );
+  await user.click(screen.getByRole("button", { name: "Test push" }));
+  expect(request).toHaveBeenCalledWith("command", {
+    command: "input",
+    device: "simulated-streamdeck-studio",
+    event: "dialDown",
+    index: 1,
+  });
+  await user.click(screen.getByRole("button", { name: "Turn right ↷" }));
+  expect(request).toHaveBeenCalledWith("command", {
+    command: "input",
+    device: "simulated-streamdeck-studio",
+    event: "dialRotate",
+    index: 1,
+    ticks: 1,
+  });
+  expect(
+    request.mock.calls.some(([method]) => method === "appearance_preview"),
+  ).toBe(false);
+});
+it("requires positive encoder image geometry and respects absent touchscreen capability", () => {
+  const model = fixtureDevice("plus");
+  const snapshot = {
+    device_geometry: model.geometry,
+    device_capabilities: model.capabilities,
+  } as Snapshot;
+  expect(hasEncoderDisplay(snapshot)).toBe(true);
+  expect(hasTouchscreen(snapshot)).toBe(true);
+  snapshot.device_capabilities = { ...model.capabilities, touchscreen: false };
+  expect(hasEncoderDisplay(snapshot)).toBe(true);
+  expect(hasTouchscreen(snapshot)).toBe(false);
+  snapshot.device_geometry = { ...model.geometry, strip_height: 0 };
+  expect(hasEncoderDisplay(snapshot)).toBe(false);
+  snapshot.device_geometry = {
+    ...model.geometry,
+    strip_width: -1,
+    strip_height: -1,
+  };
+  expect(hasEncoderDisplay(snapshot)).toBe(false);
+});
+
+it("hides screenless stack appearance without dropping its stored value when behavior changes", async () => {
+  const onChange = vi.fn();
+  const raw = {
+    Settings: {
+      ShowStackIcon: false,
+      FastNavigation: false,
+      FutureSetting: "keep",
+    },
+    Actions: [],
+  };
+  const props = {
+    uuid: "com.elgato.streamdeck.dial.stack",
+    raw,
+    actions: [],
+    outputs: [] as [string, string][],
+    onChange,
+    onError: vi.fn(),
+  };
+  const user = userEvent.setup();
+  const view = render(<Sequence {...props} encoderDisplay={false} />);
+  expect(
+    screen.queryByRole("checkbox", { name: "Show stack icon" }),
+  ).toBeNull();
+  await user.click(
+    screen.getByRole("checkbox", { name: "Hold and turn to choose" }),
+  );
+  expect(onChange).toHaveBeenCalledWith({
+    ...raw,
+    Settings: { ...raw.Settings, FastNavigation: true },
+  });
+  view.rerender(<Sequence {...props} encoderDisplay={true} />);
+  expect(
+    (
+      screen.getByRole("checkbox", {
+        name: "Show stack icon",
+      }) as HTMLInputElement
+    ).checked,
+  ).toBe(false);
 });

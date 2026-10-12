@@ -345,6 +345,73 @@ impl Host {
 mod tests {
     use super::*;
     #[test]
+    fn studio_encoders_keep_sdk_metadata_without_loading_or_drawing_lcd_layouts() {
+        let root = tempfile::tempdir().unwrap();
+        let mut host = super::super::tests::fixture(root.path());
+        host.model = Model::Studio;
+        host.slots[0].model = Model::Studio;
+        host.library = Library::for_model(host.slots.clone(), &host.device, host.model);
+        host.dial_pressed = vec![false; 2];
+        host.actions[0].controllers.push("Encoder".into());
+        host.actions[0].raw["Encoder"] = json!({"layout":"absent-lcd-layout.json"});
+        host.assign("Encoder", 1, "test.action").unwrap();
+        let context = host
+            .slots
+            .iter()
+            .find(|s| s.controller == "Encoder")
+            .unwrap()
+            .context
+            .clone();
+        host.plugin_message(0, json!({"event":"setFeedbackLayout","context":context,"payload":{"layout":"still-no-lcd.json"}})).unwrap();
+        host.plugin_message(0, json!({"event":"setFeedback","context":context,"payload":{"value":42,"title":"Software metadata"}})).unwrap();
+        let dial = host
+            .slots
+            .iter()
+            .find(|s| s.controller == "Encoder")
+            .unwrap();
+        assert_eq!(dial.feedback["value"], 42);
+        assert_eq!(dial.layout, "still-no-lcd.json");
+        assert!(dial.layout_cache.is_none() && dial.preview.is_empty());
+
+        let (draw, frames) = std::sync::mpsc::channel();
+        host.hardware = Some(draw);
+        host.render().unwrap();
+        let frames: Vec<_> = frames.try_iter().collect();
+        assert_eq!(frames.len(), 32);
+        assert!(frames.iter().all(|frame| matches!(frame, Draw::Key(_, image) if image.width() == 144 && image.height() == 112)));
+        let (send, mut events) = mpsc::unbounded_channel();
+        host.plugins[0].sender = Some(send);
+        for command in [
+            json!({"command":"input","event":"dialDown","index":1}),
+            json!({"command":"input","event":"dialRotate","index":1,"ticks":-3}),
+            json!({"command":"input","event":"dialUp","index":1}),
+        ] {
+            super::super::apply_control(&mut host, command).unwrap();
+        }
+        let events: Vec<_> = std::iter::from_fn(|| events.try_recv().ok()).collect();
+        assert_eq!(
+            events
+                .iter()
+                .map(|e| e["event"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["dialDown", "dialRotate", "dialUp"]
+        );
+        assert!(
+            events
+                .iter()
+                .all(|e| e["payload"]["coordinates"] == json!({"column":1,"row":0}))
+        );
+        assert_eq!(events[1]["payload"]["ticks"], -3);
+        assert_eq!(events[1]["payload"]["pressed"], true);
+        assert!(
+            super::super::apply_control(
+                &mut host,
+                json!({"command":"input","event":"touchTap","index":1})
+            )
+            .is_err()
+        );
+    }
+    #[test]
     fn unidentified_offline_overrides_wait_for_serial_specific_selection() {
         let root = tempfile::tempdir().unwrap();
         let mut host = crate::host::tests::fixture(root.path());

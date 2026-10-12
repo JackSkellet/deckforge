@@ -236,10 +236,23 @@ impl Renderer {
         background: Option<&DynamicImage>,
         style: &TitleStyle,
     ) -> DynamicImage {
-        let mut canvas = RgbaImage::from_pixel(120, 120, Rgba([0, 0, 0, 255]));
+        self.key_styled_size(title, background, style, (120, 120))
+    }
+    /// Rectangular keys need a rectangular text canvas, not a stretched square.
+    /// Keep title sizes relative to key height, matching the existing square policy.
+    pub fn key_styled_size(
+        &self,
+        title: &str,
+        background: Option<&DynamicImage>,
+        style: &TitleStyle,
+        size: (u32, u32),
+    ) -> DynamicImage {
+        let (width, height) = size;
+        let scale = height as f32 / 120.0;
+        let mut canvas = RgbaImage::from_pixel(width, height, Rgba([0, 0, 0, 255]));
         if let Some(background) = background {
             let image = background
-                .resize_exact(120, 120, image::imageops::FilterType::Triangle)
+                .resize_exact(width, height, image::imageops::FilterType::Triangle)
                 .to_rgba8();
             image::imageops::overlay(&mut canvas, &image, 0, 0);
         }
@@ -256,8 +269,8 @@ impl Renderer {
                 title,
                 style,
                 &font,
-                style.font_size * TITLE_SCALE,
-                4.,
+                style.font_size * TITLE_SCALE * scale,
+                4. * scale,
             );
         }
         DynamicImage::ImageRgb8(DynamicImage::ImageRgba8(canvas).to_rgb8())
@@ -829,6 +842,28 @@ mod tests {
             .key_styled("Hidden", Some(&alpha), &style)
             .to_rgb8();
         assert!(image.pixels().all(|p| p.0 == [100, 50, 0]));
+    }
+    #[test]
+    fn rectangular_key_titles_keep_glyph_proportions() {
+        let renderer = Renderer::new().unwrap();
+        let style = TitleStyle {
+            title_alignment: "middle".into(),
+            ..Default::default()
+        };
+        let square = renderer
+            .key_styled_size("TEST", None, &style, (112, 112))
+            .to_rgb8();
+        let rectangle = renderer
+            .key_styled_size("TEST", None, &style, (144, 112))
+            .to_rgb8();
+        // Added width only changes centering; it must not stretch glyphs as a
+        // square render followed by nonuniform resizing would.
+        for y in 0..112 {
+            for x in 0..112 {
+                assert_eq!(square.get_pixel(x, y), rectangle.get_pixel(x + 16, y));
+            }
+        }
+        assert!(square.pixels().any(|pixel| pixel.0 != [0, 0, 0]));
     }
 
     #[test]

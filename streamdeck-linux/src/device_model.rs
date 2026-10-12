@@ -15,6 +15,7 @@ pub enum Model {
     Plus,
     PlusXl,
     Neo,
+    Studio,
     Pedal,
 }
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -39,6 +40,7 @@ impl Model {
             Self::Plus,
             Self::PlusXl,
             Self::Neo,
+            Self::Studio,
             Self::Pedal,
         ]
     }
@@ -51,6 +53,7 @@ impl Model {
             0x0084 => Some(Self::Plus),
             0x00c6 => Some(Self::PlusXl),
             0x009a => Some(Self::Neo),
+            0x00aa => Some(Self::Studio),
             // Original Windows7.6 registry0x140135a65 and Pedal factory/vtable.
             0x0086 => Some(Self::Pedal),
             _ => None,
@@ -65,6 +68,7 @@ impl Model {
             "20GBD9901" | "plus" => Some(Self::Plus),
             "20GBX9901" | "plus-xl" => Some(Self::PlusXl),
             "20GBJ9901" | "neo" => Some(Self::Neo),
+            "20GBO9901" | "studio" => Some(Self::Studio),
             "20GBF9901" | "deckforge-pedal" | "pedal" => Some(Self::Pedal),
             _ => None,
         }
@@ -78,6 +82,7 @@ impl Model {
             Self::Plus => "plus",
             Self::PlusXl => "plus-xl",
             Self::Neo => "neo",
+            Self::Studio => "studio",
             Self::Pedal => "pedal",
         }
     }
@@ -105,6 +110,7 @@ impl Model {
             Self::Plus => "Stream Deck +",
             Self::PlusXl => "Stream Deck + XL",
             Self::Neo => "Stream Deck Neo",
+            Self::Studio => "Stream Deck Studio",
             Self::Pedal => "Stream Deck Pedal",
         }
     }
@@ -116,6 +122,7 @@ impl Model {
             Self::Xl => "20GAT9901",
             Self::Plus => "20GBD9901",
             Self::Neo => "20GBJ9901",
+            Self::Studio => "20GBO9901",
             // Plus XL identity recovered from the shipped 7.6 profile; its HID
             // page currently repeats Plus's identifier. Pedal is from native RTTI
             // and its registry/factory binding in the same shipped executable.
@@ -131,6 +138,7 @@ impl Model {
             Self::Plus => 7,
             Self::PlusXl => 13,
             Self::Neo => 9,
+            Self::Studio => 10,
             Self::Pedal => 5,
         }
     }
@@ -141,11 +149,12 @@ impl Model {
             Self::Xl => 8,
             Self::Plus | Self::Neo => 4,
             Self::PlusXl => 9,
+            Self::Studio => 16,
         }
     }
     pub const fn rows(self) -> u8 {
         match self {
-            Self::Mini | Self::Plus | Self::Neo => 2,
+            Self::Mini | Self::Plus | Self::Neo | Self::Studio => 2,
             Self::Classic | Self::Classic2017 => 3,
             Self::Xl | Self::PlusXl => 4,
             Self::Pedal => 1,
@@ -158,6 +167,7 @@ impl Model {
         match self {
             Self::Plus => 4,
             Self::PlusXl => 6,
+            Self::Studio => 2,
             _ => 0,
         }
     }
@@ -168,11 +178,16 @@ impl Model {
             Self::Xl | Self::Neo => 96,
             Self::Plus => 120,
             Self::PlusXl => 112,
+            Self::Studio => 144,
             Self::Pedal => 0,
         }
     }
     pub const fn key_height(self) -> u32 {
-        self.key_width()
+        if matches!(self, Self::Studio) {
+            112
+        } else {
+            self.key_width()
+        }
     }
     pub const fn strip_width(self) -> u32 {
         match self {
@@ -196,7 +211,7 @@ impl Model {
             Self::Xl => 1024,
             Self::Plus => 800,
             Self::PlusXl => 1280,
-            Self::Pedal => 0,
+            Self::Pedal | Self::Studio => 0,
         }
     }
     pub const fn lcd_height(self) -> u32 {
@@ -207,7 +222,7 @@ impl Model {
             Self::Xl => 600,
             Self::Plus => 480,
             Self::PlusXl => 800,
-            Self::Pedal => 0,
+            Self::Pedal | Self::Studio => 0,
         }
     }
     pub const fn capabilities(self) -> Capabilities {
@@ -216,10 +231,15 @@ impl Model {
             has_lcd: self.has_lcd(),
             key_images: !matches!(self, Self::Pedal),
             brightness: !matches!(self, Self::Pedal),
-            sleep: !matches!(self, Self::Pedal | Self::Classic2017),
-            full_lcd: !matches!(self, Self::Mini | Self::Pedal | Self::Classic2017),
+            // Studio's native setter exists, but readback is unproven. This
+            // capability currently promises getter-verified timer control.
+            sleep: !matches!(self, Self::Pedal | Self::Classic2017 | Self::Studio),
+            full_lcd: !matches!(
+                self,
+                Self::Mini | Self::Pedal | Self::Classic2017 | Self::Studio
+            ),
             strip: self.strip_width() > 0,
-            touchscreen: self.dial_count() > 0,
+            touchscreen: matches!(self, Self::Plus | Self::PlusXl),
             sensors: if matches!(self, Self::Neo) { 2 } else { 0 },
         }
     }
@@ -227,6 +247,34 @@ impl Model {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn studio_rectangular_keys_and_displayless_encoders_are_distinct_capabilities() {
+        let m = Model::Studio;
+        assert_eq!(Model::from_product(0xaa), Some(m));
+        assert_eq!(Model::from_profile_model("20GBO9901"), Some(m));
+        assert_eq!(
+            (m.columns(), m.rows(), m.key_count(), m.dial_count()),
+            (16, 2, 32, 2)
+        );
+        assert_eq!((m.key_width(), m.key_height()), (144, 112));
+        assert_eq!(m.sdk_type(), 10);
+        assert!(m.capabilities().key_images && m.capabilities().brightness);
+        assert!(
+            !m.capabilities().strip
+                && !m.capabilities().touchscreen
+                && !m.capabilities().full_lcd
+                && !m.capabilities().sleep
+        );
+        assert_eq!(
+            (
+                m.strip_width(),
+                m.strip_height(),
+                m.lcd_width(),
+                m.lcd_height()
+            ),
+            (0, 0, 0, 0)
+        );
+    }
     #[test]
     fn documented_aliases_and_explicit_unknown_protocols() {
         for (pids, model) in [

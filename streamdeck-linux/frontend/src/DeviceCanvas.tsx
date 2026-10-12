@@ -1,6 +1,11 @@
 import type { CSSProperties, ReactNode } from "react";
 import type { Controller, Snapshot } from "./model";
-import { deviceName, geometry, hasKeyImages } from "./device";
+import {
+  deviceName,
+  geometry,
+  hasKeyImages,
+  hasEncoderDisplay,
+} from "./device";
 export function canvasStyle(snapshot: Snapshot): CSSProperties {
   const value = geometry(snapshot);
   return {
@@ -29,6 +34,7 @@ export function DeviceCanvas({
       data-model={snapshot.device_model ?? "plus"}
       data-key-images={hasKeyImages(snapshot)}
       data-dials={value.dials > 0}
+      data-encoder-display={hasEncoderDisplay(snapshot)}
       data-infobar={neo}
     >
       <div

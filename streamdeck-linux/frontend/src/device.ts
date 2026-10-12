@@ -47,6 +47,21 @@ export function hasKeyImages(snapshot: Snapshot) {
     snapshot.device_capabilities?.key_images ?? geometry(snapshot).key_width > 0
   );
 }
+export function hasEncoderDisplay(snapshot: Snapshot) {
+  const value = geometry(snapshot);
+  return (
+    value.dials > 0 &&
+    value.strip_width > 0 &&
+    value.strip_height > 0 &&
+    snapshot.device_capabilities?.strip !== false
+  );
+}
+export function hasTouchscreen(snapshot: Snapshot) {
+  return (
+    hasEncoderDisplay(snapshot) &&
+    snapshot.device_capabilities?.touchscreen !== false
+  );
+}
 export function supportedControllers(snapshot: Snapshot): Controller[] {
   const value = geometry(snapshot);
   return [

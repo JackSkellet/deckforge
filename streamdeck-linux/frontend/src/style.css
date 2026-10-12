@@ -2381,3 +2381,42 @@ dialog.mixer-dialog {
   flex-direction: column;
   gap: 16px;
 }
+
+/* Studio's encoder assignments are software labels, not touch displays. */
+.model-stage[data-model="studio"] {
+  --grid-column-gap: 4px;
+  --grid-row-gap: 6px;
+  --canvas-horizontal-padding: 24px;
+}
+.model-canvas[data-model="studio"] .deck-key {
+  border-radius: 4px;
+  padding: 1px;
+}
+.model-canvas[data-encoder-display="false"] .dial-grid {
+  max-width: 340px;
+  margin-left: auto;
+  margin-right: auto;
+  gap: 12px;
+}
+.model-canvas[data-encoder-display="false"] .deck-dial {
+  height: 70px;
+  padding: 5px 8px 31px;
+  border-radius: 9px;
+}
+.dial-assignment {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+.dial-assignment > span {
+  font-size: 9px;
+  color: #9eb4c0;
+}
+.dial-assignment > strong {
+  font-size: 11px;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

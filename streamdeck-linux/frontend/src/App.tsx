@@ -29,6 +29,8 @@ import {
   deviceName,
   geometry,
   hasKeyImages,
+  hasEncoderDisplay,
+  hasTouchscreen,
   supportedControllers,
   validControl,
   isAssignableSlot,
@@ -767,6 +769,7 @@ export default function App() {
             : "")
         }
         aria-label={`${controlName(controller, snapshot)}${controller === "Neo" ? "" : ` ${index + 1}`}: ${item?.name ?? "Unassigned"}`}
+        title={`${controlName(controller, snapshot)}${controller === "Neo" ? "" : ` ${index + 1}`}: ${item?.name ?? "Unassigned"}${item?.title ? `\n${item.title}` : ""}`}
         aria-pressed={active}
         onClick={() => setSelected(target)}
         onContextMenu={(event) => {
@@ -818,7 +821,12 @@ export default function App() {
         }}
         onDrop={(e) => drop(e, target)}
       >
-        {!hasKeyImages(snapshot) && controller === "Keypad" ? (
+        {controller === "Encoder" && !hasEncoderDisplay(snapshot) ? (
+          <span className="dial-assignment">
+            <span>Dial {index + 1}</span>
+            <strong>{item?.name ?? "Unassigned"}</strong>
+          </span>
+        ) : !hasKeyImages(snapshot) && controller === "Keypad" ? (
           <span className="pedal-assignment">
             <span>Pedal {index + 1}</span>
             <strong>{item?.name ?? "Unassigned"}</strong>
@@ -1164,6 +1172,8 @@ export default function App() {
             data-infobar={snapshot.device_model === "neo"}
             data-key-images={hasKeyImages(snapshot)}
             data-rows={geometry(snapshot).rows}
+            data-model={snapshot.device_model}
+            data-encoder-display={hasEncoderDisplay(snapshot)}
           >
             {snapshot.library.folder_depth > 0 && (
               <button
@@ -1290,59 +1300,85 @@ export default function App() {
                     disabled={readonly || saving || editBusy}
                     className="inspector-fields"
                   >
-                    <AppearanceEditor
-                      key={`appearance:${snapshot.device}:${snapshot.device_model}:${slot.context}`}
-                      slot={slot}
-                      device={currentDevice}
-                      draft={draft}
-                      userTitleEnabled={action?.user_title_enabled !== false}
-                      fallback={<ActionIcon action={action} />}
-                      onError={onError}
-                      onEdit={(state, patch, base) =>
-                        setDrafts((previous) => ({
-                          ...previous,
-                          [slot.context]: editAppearance(
-                            previous[slot.context] ??
-                              reconcileDraft(undefined, slot),
-                            slot,
-                            state,
-                            patch,
-                            base,
-                          ),
-                        }))
-                      }
-                      onSelectState={(state) =>
-                        setDrafts((previous) => ({
-                          ...previous,
-                          [slot.context]: {
-                            ...previous[slot.context],
-                            appearanceState: state,
-                          },
-                        }))
-                      }
-                      onRefreshState={() =>
-                        setDrafts((previous) => ({
-                          ...previous,
-                          [slot.context]: {
-                            ...previous[slot.context],
-                            appearanceExpectedState: slot.state,
-                            revision: previous[slot.context].revision + 1,
-                          },
-                        }))
-                      }
-                    >
-                      <Check
-                        label="Pin on every page"
-                        checked={slot.pinned}
-                        onChange={(pinned) =>
-                          run({
-                            command: "slot_pin",
-                            context: slot.context,
-                            pinned,
-                          })
+                    {slot.controller === "Encoder" &&
+                    !hasEncoderDisplay(snapshot) ? (
+                      <>
+                        <p className="hint">
+                          This dial has no display. Its action settings remain
+                          editable.
+                        </p>
+                        {snapshot.device_model === "studio" && (
+                          <p className="hint">
+                            Studio LED and ring feedback is not supported.
+                          </p>
+                        )}
+                        <Check
+                          label="Pin on every page"
+                          checked={slot.pinned}
+                          onChange={(pinned) =>
+                            run({
+                              command: "slot_pin",
+                              context: slot.context,
+                              pinned,
+                            })
+                          }
+                        />
+                      </>
+                    ) : (
+                      <AppearanceEditor
+                        key={`appearance:${snapshot.device}:${snapshot.device_model}:${slot.context}`}
+                        slot={slot}
+                        device={currentDevice}
+                        draft={draft}
+                        userTitleEnabled={action?.user_title_enabled !== false}
+                        fallback={<ActionIcon action={action} />}
+                        onError={onError}
+                        onEdit={(state, patch, base) =>
+                          setDrafts((previous) => ({
+                            ...previous,
+                            [slot.context]: editAppearance(
+                              previous[slot.context] ??
+                                reconcileDraft(undefined, slot),
+                              slot,
+                              state,
+                              patch,
+                              base,
+                            ),
+                          }))
                         }
-                      />
-                    </AppearanceEditor>
+                        onSelectState={(state) =>
+                          setDrafts((previous) => ({
+                            ...previous,
+                            [slot.context]: {
+                              ...previous[slot.context],
+                              appearanceState: state,
+                            },
+                          }))
+                        }
+                        onRefreshState={() =>
+                          setDrafts((previous) => ({
+                            ...previous,
+                            [slot.context]: {
+                              ...previous[slot.context],
+                              appearanceExpectedState: slot.state,
+                              revision: previous[slot.context].revision + 1,
+                            },
+                          }))
+                        }
+                      >
+                        <Check
+                          label="Pin on every page"
+                          checked={slot.pinned}
+                          onChange={(pinned) =>
+                            run({
+                              command: "slot_pin",
+                              context: slot.context,
+                              pinned,
+                            })
+                          }
+                        />
+                      </AppearanceEditor>
+                    )}
                     {slot.available === false && (
                       <p className="warning">
                         This action's plugin is unavailable. Its settings are
@@ -1357,6 +1393,7 @@ export default function App() {
                     )}
                     {isContainer(slot.uuid) ? (
                       <Sequence
+                        encoderDisplay={hasEncoderDisplay(snapshot)}
                         device={currentDevice}
                         mixer={snapshot.mixer?.config}
                         scope={slot.context}
@@ -1451,29 +1488,33 @@ export default function App() {
                     {ticks < 0 ? "↶ Turn left" : "Turn right ↷"}
                   </button>
                 ))}
-                <button
-                  onClick={() =>
-                    run({
-                      command: "input",
-                      event: "touchTap",
-                      index: slot.index,
-                    })
-                  }
-                >
-                  Tap screen
-                </button>
-                <button
-                  onClick={() =>
-                    run({
-                      command: "input",
-                      event: "touchTap",
-                      index: slot.index,
-                      hold: true,
-                    })
-                  }
-                >
-                  Hold screen
-                </button>
+                {hasTouchscreen(snapshot) && (
+                  <button
+                    onClick={() =>
+                      run({
+                        command: "input",
+                        event: "touchTap",
+                        index: slot.index,
+                      })
+                    }
+                  >
+                    Tap screen
+                  </button>
+                )}
+                {hasTouchscreen(snapshot) && (
+                  <button
+                    onClick={() =>
+                      run({
+                        command: "input",
+                        event: "touchTap",
+                        index: slot.index,
+                        hold: true,
+                      })
+                    }
+                  >
+                    Hold screen
+                  </button>
+                )}
                 {slot.uuid === STACK &&
                   slot.stack_children?.map((child, i) => (
                     <button
