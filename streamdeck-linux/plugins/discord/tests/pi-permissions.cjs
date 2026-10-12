@@ -1,0 +1,26 @@
+// Runs only the original inspector logic against an in-memory DOM/socket fixture.
+const {readFileSync}=require('node:fs');
+const vm=require('node:vm');
+const assert=require('node:assert/strict');
+const elements=new Map();
+const element=id=>{if(!elements.has(id))elements.set(id,{textContent:'',hidden:false,disabled:false,value:''});return elements.get(id);};
+const sent=[];
+const context=vm.createContext({document:{getElementById:element},window:{confirm:()=>true},WebSocket:{OPEN:1},capture:value=>sent.push(JSON.parse(value))});
+vm.runInContext(readFileSync(require('node:path').join(__dirname,'../ui/app.js'),'utf8'),context);
+vm.runInContext(`socket={readyState:1,send:capture};uuid='inspector-token';action='com.elgato.discord.serverstats';settings={server:'123',future:true};auth={configured:true,authenticated:true,message:'Connected'};state={missing_scopes:['messages.read'],required_scopes:['rpc','messages.read']};renderState();`,context);
+assert.equal(sent.length,0,'Rendering missing access must never initiate consent');
+assert.equal(element('permissions').hidden,false);
+assert.equal(element('authorize-required').disabled,false);
+assert.match(element('missing-access').textContent,/message/);
+element('authorize-required').onclick();
+assert.deepEqual(sent.pop(),{event:'sendToPlugin',context:'inspector-token',action:'com.elgato.discord.serverstats',payload:{command:'connect',permissions_for_actions:true,reauthorize:true}});
+element('connect-saved').onclick();
+assert.deepEqual(sent.pop().payload,{command:'connect'},'Ordinary reconnect must not force consent');
+element('client-id').value='123';element('client-secret').value='private-fixture';element('redirect').value='';element('scopes').value='rpc identify';
+element('connect-new').onclick();
+assert.equal(sent.length,1);assert.equal(sent[0].event,'sendToPlugin');assert.equal(sent[0].payload.permissions_for_actions,true);assert.equal(sent[0].payload.client_secret,'private-fixture');
+assert.equal(element('client-secret').value,'');
+assert.equal(vm.runInContext('JSON.stringify(settings)',context),'{"server":"123","future":true}','Credentials must never enter action settings');
+vm.runInContext(`state={missing_scopes:[],required_scopes:['rpc']};renderState()`,context);
+assert.equal(element('permissions').hidden,true);
+console.log('PI permission consent, reconnect and credential separation checks passed.');

@@ -1,6 +1,6 @@
 # Deckforge
 
-A native Linux desktop app for Stream Deck+, written from scratch in Rust.
+A Linux desktop app for Stream Deck+, written from scratch with a Rust engine and a TypeScript editor.
 
 **Made with AI.** Elgato wasn't making a Linux port of the Stream Deck app, and I didn't want an expensive paperweight on my table. This project is the result.
 
@@ -12,7 +12,7 @@ Work in progress. **This is not feature complete yet.** Existing Elgato profiles
 
 Current working areas include:
 
-- An always-dark native Rust editor with searchable actions, drag assignment, tray/background operation, offline editing, and Stream Deck+ controls.
+- An always-dark React/TypeScript editor embedded in a native desktop window, with searchable actions, drag assignment, tray/background operation, and Stream Deck+ controls.
 - Profiles, pages, folders, pinned actions, and original-format profile import/export.
 - Node, HTML and native Linux plugins, property inspectors, portable resources, feedback layouts, and a native Rust Discord plugin in development.
 - Multi Actions, Dial Stacks, Action Triggers, Linux desktop actions, and a native soundboard.
@@ -20,7 +20,7 @@ Current working areas include:
 
 See the [feature-parity ledger](streamdeck-linux/docs/FEATURE_PARITY.md) for the remaining work and the boundaries of the tests. Passing simulation tests is not a claim of complete hardware or Windows compatibility.
 
-![Native Deckforge editor with searchable actions](streamdeck-linux/assets/screenshots/native-actions.png)
+![Embedded TypeScript editor with searchable actions](streamdeck-linux/assets/screenshots/native-actions.png)
 
 The native editor above is running in simulation with Elgato's official Counter sample.
 
@@ -31,12 +31,14 @@ The application source is in [`streamdeck-linux/`](streamdeck-linux/).
 ```sh
 git clone https://github.com/JackSkellet/deckforge.git
 cd deckforge/streamdeck-linux
+npm --prefix frontend ci
+npm --prefix frontend run build
 cargo build --release --locked
 python scripts/install-desktop.py
 ~/.local/bin/deckforge
 ```
 
-A current Rust toolchain and native development libraries are required, including GTK3, WebKitGTK 4.1, libudev and libpulse. Development currently takes place on CachyOS/Arch. The installer is per-user; it does not install system packages or change device permissions.
+A current Rust toolchain, Node.js 20.19+ and native development libraries are required, including GTK3, WebKitGTK 4.1, libudev and libpulse. The compiled editor is embedded in the executable; it needs no development server. Development currently takes place on CachyOS/Arch. The installer is per-user; it does not install system packages or change device permissions.
 
 For a preview without opening USB hardware:
 

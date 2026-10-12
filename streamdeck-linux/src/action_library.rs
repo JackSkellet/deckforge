@@ -1,4 +1,5 @@
 //! Native action discovery. Selection is a draft; assignment stays explicit.
+use base64::Engine;
 use eframe::egui::{self, RichText};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -88,6 +89,7 @@ impl Library {
         ui: &egui::Ui,
         action: &Value,
         loaded: &mut bool,
+        load_icon: &dyn Fn(&str) -> Option<String>,
     ) -> Option<egui::TextureId> {
         let key = icon_key(action)?;
         if !self.icons.contains_key(&key) {
@@ -98,9 +100,19 @@ impl Library {
                 return None;
             }
             *loaded = true;
-            let texture = crate::action_icons::load(std::path::Path::new(&key.0), &key.1)
-                .ok()
+            let texture = load_icon(text(action, "uuid"))
+                .and_then(|uri| {
+                    uri.strip_prefix("data:image/png;base64,").and_then(|data| {
+                        base64::engine::general_purpose::STANDARD.decode(data).ok()
+                    })
+                })
+                .and_then(|bytes| image::load_from_memory(&bytes).ok())
                 .map(|image| {
+                    let rgba = image.to_rgba8();
+                    let image = egui::ColorImage::from_rgba_unmultiplied(
+                        [rgba.width() as usize, rgba.height() as usize],
+                        rgba.as_raw(),
+                    );
                     ui.ctx().load_texture(
                         format!("action-icon:{key:?}"),
                         image,
@@ -117,6 +129,7 @@ impl Library {
         actions: &[Value],
         controller: &str,
         selected: &str,
+        load_icon: &dyn Fn(&str) -> Option<String>,
     ) -> Option<String> {
         let search = ui.add(
             egui::TextEdit::singleline(&mut self.query)
@@ -170,7 +183,8 @@ impl Library {
                                 let enabled = compatible(action, controller);
                                 let uuid = text(action, "uuid");
                                 let name = text(action, "name");
-                                let button = if let Some(icon) = self.icon(ui, action, &mut loaded)
+                                let button = if let Some(icon) =
+                                    self.icon(ui, action, &mut loaded, load_icon)
                                 {
                                     egui::Button::image_and_text(
                                         egui::Image::new((icon, egui::vec2(24.0, 24.0))),
@@ -228,7 +242,7 @@ mod tests {
                     ..Default::default()
                 },
                 |ui| {
-                    library.show(ui, &[], "Keypad", "");
+                    library.show(ui, &[], "Keypad", "", &|_| None);
                 },
             );
             output.drop_without_applying_deltas();

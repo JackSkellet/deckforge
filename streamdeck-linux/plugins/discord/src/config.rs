@@ -9,6 +9,8 @@ use std::{
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Config {
+    #[serde(default)]
+    pub enabled: bool,
     pub client_id: String,
     pub client_secret: String,
     #[serde(default)]
@@ -172,6 +174,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("private/auth.json");
         let config = Config {
+            enabled: false,
             client_id: "123456789012345678".into(),
             client_secret: "fixture-secret".into(),
             redirect_uri: String::new(),
@@ -196,6 +199,7 @@ mod tests {
         fs::write(&target, "original").unwrap();
         std::os::unix::fs::symlink(&target, &path).unwrap();
         let config = Config {
+            enabled: false,
             client_id: "123456789012345678".into(),
             client_secret: "fixture-secret".into(),
             redirect_uri: String::new(),

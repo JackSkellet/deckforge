@@ -3,8 +3,9 @@
 **Made with AI.** Elgato wasn't making a Linux port, and I didn't want an expensive paperweight on my table.
 
 An independent Linux Stream Deck+ desktop application written from scratch in
-Rust. The native editor uses egui/eframe and calls the Rust host directly in the
-same process. Plugin HTML runs in isolated native WebKit windows. A separate headless diagnostic mode retains
+Rust, with a React/TypeScript editor embedded in a native Wry/WebKit window. A
+small in-process bridge calls the same Rust host. Plugin HTML runs in separate
+native WebKit windows. A separate headless diagnostic mode retains
 the earlier local web editor. No existing Stream Deck host, driver implementation,
 or application template is used.
 Generic USB, image, font, HTTP, WebSocket, archive and native browser libraries
@@ -19,8 +20,9 @@ runtime dependency.
 
 [Discord for Deckforge](plugins/discord/README.md) is a from-scratch Rust plugin
 with the original 17 Discord action identities. It runs as a Linux executable,
-with its own settings panel and artwork. No Wine is used. Live authorization,
-notifications, server statistics and dynamic icon rendering remain open.
+with its own settings panel and artwork. No Wine is used. Notifications, server
+statistics and volume graphics have mock integration coverage. Live authorization
+and real Discord control behavior remain unverified.
 
 ## Run the native application
 
@@ -36,16 +38,16 @@ in `$XDG_DATA_HOME/deckforge`, or `~/.local/share/deckforge` when unset.
 Local development sessions and external reference fixtures are not included in
 the repository.
 
-Select a key or dial, search the **Actions** sidebar by action or plugin name,
-and choose **Assign to key/dial**. You can also drag an action onto a compatible
-control. Categories and action icons come from plugin manifests; the list filters for the selected
-key or dial. **Show key and dial actions** exposes incompatible choices with
-disabled controls. Edit simple settings with text, numeric and checkbox controls,
+Select a key or dial, search the **Action library** by action or plugin name,
+and use its **+** button to assign. You can also drag an action onto a compatible
+control. Categories and action icons come from plugin manifests; **All**, **Keys**
+and **Dials** filter the library. Incompatible assignments are disabled.
+Edit simple settings with text, numeric and checkbox controls,
 then Save changes.
 Use **Plugin settings…** to open an action's original HTML property inspector
 when its manifest provides one. Advanced JSON editing remains available. Draft changes survive periodic refresh
-and switching between controls. **Plugins & profiles** contains installation,
-profile import and profile/page management. Title editing, removal and input
+and switching between controls. **Plugins** contains installation and runtime
+status; the left sidebar manages profiles and imports. Title editing, removal and input
 testing stay with the selected control. Closing or hiding the editor
 keeps the device and plugins running. Open Deckforge again from the launcher or
 tray to restore the editor, including unsaved drafts. **Quit** in the editor or
@@ -89,9 +91,16 @@ Build and install an updated native executable:
 
 ```sh
 cd streamdeck-linux
+npm --prefix frontend ci
+npm --prefix frontend run build
 cargo build --release --locked
 python scripts/install-desktop.py
 ```
+
+Node.js 20.19+ is needed to build the editor. The generated bundle is embedded in
+the Rust executable, with no server needed at runtime. Rebuild the frontend before
+compiling Rust after editor changes. `desktop --legacy-editor` temporarily retains
+the earlier egui editor as a migration fallback.
 
 The per-user installer changes only its executable, icon and launcher; it keeps
 replaced files as `.previous`. It does not install system packages, a startup
@@ -425,7 +434,7 @@ Importing a built-in Windows action does not implement that action on Linux.
 | Feedback | All six published built-ins and four official custom layouts exercised through the unchanged Layouts plugin; text, bars, gradients, images, SVG, clipping and incremental properties |
 | Profiles | Full library, pages/folders/pins, original-format export/reimport; two shipped Plus trees retain all source fields/assets. Unchanged Lights Out bundled profile runs and changes SVG-backed images. |
 | Persistence | Real sample settings survive host restart; imported background images tested for round-trip persistence |
-| Native desktop editor | Installed optimized Rust window; action assignment, input testing, live previews, typed settings, JSON, title/removal, native file pickers and status. User confirmed native setting edits affect physical presses. |
+| Native desktop editor | Installed React/TypeScript editor inside a native WebKit window, backed by Rust. Action assignment, live previews, typed settings, structured sequences, JSON, native file pickers and persistent drafts. Prior physical acceptance used the earlier egui editor. |
 
 Touch and swipe packet decoding have tests. A touch routes `touchTap` to the
 corresponding dial. The official feedback sample does not visibly react to touch;

@@ -120,6 +120,7 @@ mod tests {
             socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",body.len(),body).as_bytes()).await.unwrap();
         });
         let config = Config {
+            enabled: false,
             client_id: "123456789012345678".into(),
             client_secret: "fixture-secret".into(),
             redirect_uri: String::new(),

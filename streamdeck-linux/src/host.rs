@@ -68,6 +68,37 @@ impl Controller {
     pub fn snapshot(&self) -> Value {
         snapshot(&self.shared.lock().unwrap())
     }
+    /// Resolve only an installed action's declared icon, with file work outside
+    /// the engine lock. The desktop bridge never accepts an arbitrary file URL.
+    pub fn action_icon(&self, uuid: &str, generation: Option<u64>) -> Result<Option<String>> {
+        let source = {
+            let host = self.shared.lock().unwrap();
+            host.actions
+                .iter()
+                .find(|action| action.uuid == uuid)
+                .and_then(|action| {
+                    let icon = action.raw["Icon"].as_str()?;
+                    let plugin = host
+                        .plugins
+                        .iter()
+                        .find(|plugin| plugin.id == action.plugin)?;
+                    if generation.is_some_and(|expected| {
+                        plugin.child.as_ref().map(|child| u64::from(child.id())) != Some(expected)
+                    }) {
+                        return None;
+                    }
+                    Some((plugin.root.clone(), icon.to_owned()))
+                })
+        };
+        let Some((root, icon)) = source else {
+            return Ok(None);
+        };
+        let image = crate::action_icons::png(&root, &icon)?;
+        Ok(Some(format!(
+            "data:image/png;base64,{}",
+            STANDARD.encode(image)
+        )))
+    }
     pub fn command(&self, request: Value) -> Result<()> {
         if request["command"] == "screensaver" {
             let (device, previous, path) = {
@@ -225,7 +256,19 @@ struct Plugin {
 fn stop_child(child: &mut Option<Child>) {
     if let Some(mut child) = child.take() {
         if child.try_wait().ok().flatten().is_none() {
-            let _ = child.kill();
+            // Give owned plugins a bounded chance to release held controls and
+            // flush remote commands. A non-cooperating child is still reaped.
+            unsafe {
+                libc::kill(child.id() as libc::pid_t, libc::SIGTERM);
+            }
+            let deadline = std::time::Instant::now() + Duration::from_millis(750);
+            while child.try_wait().ok().flatten().is_none() && std::time::Instant::now() < deadline
+            {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            if child.try_wait().ok().flatten().is_none() {
+                let _ = child.kill();
+            }
         }
         let _ = child.wait();
     }

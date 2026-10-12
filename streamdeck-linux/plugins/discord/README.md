@@ -14,7 +14,7 @@ python scripts/build-discord-plugin.py
 ```
 
 Import `target/release/discord-for-deckforge.streamDeckPlugin` through
-**Plugins & profiles**. The package contains a native Linux ELF executable;
+**Plugins**. The package contains a native Linux ELF executable;
 it is separate from the downloaded Elgato Marketplace package.
 
 Select a Discord action and open **Plugin settings…**. Under **Application
@@ -24,7 +24,9 @@ for the application. The [official RPC guide](https://docs.discord.com/developer
 describes authorization and restrictions. Elgato's private authorization service
 and signing credentials are not reused.
 
-The plugin stays disconnected until Connect is pressed, including after restart.
+The plugin stays disconnected until Connect is pressed. Once enabled, it resumes
+its saved session after restart without opening a new consent prompt. Disconnect
+persists until Connect is pressed again.
 Credentials and tokens are saved in an owned mode-0600 file inside the host's
 mode-0700 plugin data directory. They are excluded from action/global settings
 and profile exports. **Disconnect** releases owned held controls before closing
@@ -39,9 +41,16 @@ video, screen-share and soundboard extensions were recovered from the supplied
 original plugin. Permission errors remain visible rather than being treated as
 success.
 
-Notifications and server statistics are still being implemented. Imported dynamic
-icon settings are retained, but the current artwork is static. These limitations
-are not exclusions from the project goal.
+Notifications support unread counts, opening and cycling notifications, and
+clearing the local queue. Server statistics track messages and recent authors;
+online counts require the server's public widget. Additional permissions require
+an explicit **Authorize required access** action in settings. Missing permissions
+and failed subscriptions stay visible.
+
+Local and user volume actions render live horizontal or vertical meters.
+Voice-channel avatar layouts and long-press notification actions remain unfinished;
+their imported settings are retained. These limitations are not exclusions from
+the project goal.
 
 Unit and mock integration tests exercise IPC framing, ping/reconnect, OAuth against
 a local test server, command routing, held-control cleanup and private storage.

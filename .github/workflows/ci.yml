@@ -21,6 +21,16 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: streamdeck-linux/frontend/package-lock.json
+      - name: Build and test embedded editor
+        run: |
+          npm --prefix frontend ci
+          npm --prefix frontend test
+          npm --prefix frontend run build
       - name: Formatting
         run: cargo fmt --check
       - name: Lints

@@ -1261,6 +1261,7 @@ dependencies = [
  "anyhow",
  "axum",
  "base64 0.22.1",
+ "cairo-rs",
  "clap",
  "csscolorparser",
  "ed25519-dalek",

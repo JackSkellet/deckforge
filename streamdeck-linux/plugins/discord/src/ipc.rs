@@ -106,7 +106,7 @@ async fn session(
         }
     }
 }
-// No task is spawned until an explicit Connect request. Aborting this task drops
+// Tasks start only after an explicit Connect or a previously enabled session. Aborting this task drops
 // its socket, pending frame and retry sleep; reconnect cannot outlive Disconnect.
 pub async fn supervise(
     paths: Vec<PathBuf>,
@@ -124,8 +124,16 @@ pub async fn supervise(
             if let Ok(Ok(stream)) =
                 tokio::time::timeout(Duration::from_secs(2), UnixStream::connect(path)).await
             {
-                connected = Some(stream);
-                break;
+                // Never send authorization to another user's socket in a shared
+                // runtime directory such as /tmp. Check the connected peer,
+                // not a path that could have been replaced after inspection.
+                if stream
+                    .peer_cred()
+                    .is_ok_and(|peer| peer.uid() == unsafe { libc::geteuid() })
+                {
+                    connected = Some(stream);
+                    break;
+                }
             }
         }
         let message = if let Some(stream) = connected {

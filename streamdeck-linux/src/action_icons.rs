@@ -53,6 +53,21 @@ pub fn load(root: &Path, icon: &str) -> Result<egui::ColorImage> {
     Err(last.unwrap_or_else(|| anyhow::anyhow!("Action icon was not found")))
 }
 
+pub fn png(root: &Path, icon: &str) -> Result<Vec<u8>> {
+    let thumbnail = load(root, icon)?;
+    let bytes: Vec<u8> = thumbnail
+        .pixels
+        .iter()
+        .flat_map(|pixel| pixel.to_srgba_unmultiplied())
+        .collect();
+    let image =
+        image::RgbaImage::from_raw(thumbnail.size[0] as u32, thumbnail.size[1] as u32, bytes)
+            .context("Invalid action icon dimensions")?;
+    let mut encoded = Cursor::new(Vec::new());
+    DynamicImage::ImageRgba8(image).write_to(&mut encoded, image::ImageFormat::Png)?;
+    Ok(encoded.into_inner())
+}
+
 fn raster(bytes: &[u8]) -> Result<DynamicImage> {
     let mut reader = image::ImageReader::new(Cursor::new(bytes)).with_guessed_format()?;
     let mut limits = image::Limits::default();

@@ -1481,10 +1481,14 @@ impl Desktop {
             self.drafts.remove(&self.selected);
             self.notice = format!("Action assigned to {}", self.selected.label().to_lowercase());
         }
-        if let Some(action) =
-            self.action_library
-                .show(ui, &actions, self.selected.controller(), &selected)
-        {
+        let controller = self.controller.clone();
+        if let Some(action) = self.action_library.show(
+            ui,
+            &actions,
+            self.selected.controller(),
+            &selected,
+            &|uuid| controller.action_icon(uuid, None).ok().flatten(),
+        ) {
             let slot = self.slot(self.selected).cloned();
             let draft = self
                 .drafts

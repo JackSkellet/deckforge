@@ -1,6 +1,6 @@
 # Stream Deck desktop feature parity
 
-Target: a native Linux desktop application written in Rust, with the behavior of Elgato Stream Deck **7.6.0.23012**. Existing Elgato profiles and plugins remain first-class compatibility requirements. A browser editor, a successful sample plugin, or a working USB display does not satisfy the whole target.
+Target: a Linux desktop application with a Rust engine and embedded TypeScript editor, with the behavior of Elgato Stream Deck **7.6.0.23012**. Existing Elgato profiles and plugins remain first-class compatibility requirements. A browser editor, a successful sample plugin, or a working USB display does not satisfy the whole target.
 
 This ledger began as the **2026-10-11 baseline** and now includes the first native desktop implementation. Status describes inspected code and recorded evidence, not planned work. Update each row when its acceptance evidence exists. The acceptance tests below are proposed project tests; they are not claims that Elgato publishes those tests.
 
@@ -30,7 +30,7 @@ Desktop interaction requirements come from the official [plugin setup guide][plu
 
 | ID | Required behavior | Baseline status and evidence | Evidence needed to pass |
 | --- | --- | --- | --- |
-| UI-01 | Standalone native desktop application; launch without a browser | **Verified subset, C/T/H/U.** Default launch opens an installed native egui window with an in-process Rust controller. Native capture, owned-child shutdown, and real-device settings edits are verified. Desktop menu entry validates; separate menu-click acceptance remains unverified. | Launch installed application from Linux desktop menu. Configure and operate the device entirely within its own window. Capture window/process evidence and user acceptance. |
+| UI-01 | Standalone native desktop application; launch without a browser | **Verified subset, C/T/H/U.** Default launch opens a native Wry/WebKit window containing the React/TypeScript editor, connected to the in-process Rust controller. Native capture and owned-child shutdown are verified; user-confirmed real-device settings edits refer to the earlier egui editor. The latter remains a temporary explicit fallback. Desktop menu entry validates; separate menu-click acceptance remains unverified. | Launch installed application from Linux desktop menu. Configure and operate the device entirely within its own window. Capture window/process evidence and user acceptance. |
 | UI-02 | Device canvas, key/dial selection, live previews and action assignment | **Verified subset, C/T/H/U.** Native canvas displays eight keys/four dials and real previews. User confirmed native settings/save affects physical input. Replacement, deletion, all-slot geometry and broader keyboard workflows still need end-to-end acceptance. | Native canvas maps every Plus slot accurately; assignment, replacement, deletion, keyboard navigation and persisted state all work on hardware. |
 | UI-03 | Action library with categories, search, controller filtering and useful plugin metadata | **Partial, C/T.** Native Actions sidebar searches action/plugin names, UUIDs, categories and tooltips; groups actions by manifest category and filters by controller. Incompatible entries can be shown disabled; duplicate names retain distinct UUIDs. Search/filter drafts survive window recreation. Manifest SVG/raster icons now appear as bounded cached thumbnails; broader keyboard acceptance and exact reference appearance remain open. | Search/filter official manifests; key actions cannot be accidentally placed on dial-only slots; categories, icons and disabled/incompatible states are clear. |
 | UI-04 | Drag/drop, move/copy/paste, reorder, remove, context menus and reusable action editing | **Partial, C/T.** Multi Action steps support native add/remove/reorder and draft editing. Library-to-canvas drag assignment now checks key/dial compatibility; general canvas move/copy/paste and action-sharing files remain missing. | Exercise internal and file-manager drag/drop; copy across pages/profiles; verify nested data and settings survive. Test undo/recovery as a Linux usability requirement. |
@@ -76,7 +76,7 @@ The shipped profiles contain real action identifiers and settings; their presenc
 | --- | --- | --- | --- |
 | PL-01 | Node plugins, manifest/runtime version selection and lifecycle | **Verified subset, T.** Unchanged Counter and Layouts register using installed Node 20. Generic entries plus unambiguous portable Windows/macOS script entries are supported, including `.cjs`; installed runtime lookup is deterministic. Original-SDK process fixtures verify both portable fallback forms and documented Node flags. | Test Node 20/24, version mismatch, startup failure, shutdown/restart and plugin supervision; respect manifest versions and platform-specific paths. [Manifest][manifest], [environment][environment] |
 | PL-02 | Legacy HTML plugin runtime | **Verified subset, A/C/T.** Native hidden HTML runtime registers unchanged shipped tutorial; generated HTML backend/PI fixture exchanges real SDK messages. Full tutorial navigation and background-media behavior remain open. | Run untouched tutorial HTML with the expected injected connection callback; verify browser networking, local resources, lifecycle and actual responses. [Artifact findings](../../evidence/elgato-7.6/findings.md) |
-| PL-03 | Native plugins and OS-dependent modules | **Partial/Unresolved, C/T.** Native Linux ELF plugins launch directly with private data directories and existing supervision. An independent Rust Discord plugin preserves 17 action identities; 15 routes and mock IPC/auth are implemented, while live authorization, notifications/server statistics and dynamic icons remain open. Unchanged Image Resizer runs in place with its Linux Sharp native dependency. Windows/macOS executable plugins and platform-only dependencies remain unresolved. | Inventory Windows/macOS-dependent plugins, provide a supported runtime/porting path, and test real native binaries or Linux ports against the same contract. Explicit per-plugin limitations remain until resolved. [WebSocket API][ws], [manifest][manifest] |
+| PL-03 | Native plugins and OS-dependent modules | **Partial/Unresolved, C/T.** Native Linux ELF plugins launch directly with private data directories and existing supervision. An independent Rust Discord plugin preserves 17 action identities and implements their request routes with mock IPC/auth coverage, notification counts, server statistics and dynamic volume graphics. Live authorization, avatar layouts and long-press notification actions remain open. Unchanged Image Resizer runs in place with its Linux Sharp native dependency. Windows/macOS executable plugins and platform-only dependencies remain unresolved. | Inventory Windows/macOS-dependent plugins, provide a supported runtime/porting path, and test real native binaries or Linux ports against the same contract. Explicit per-plugin limitations remain until resolved. [WebSocket API][ws], [manifest][manifest] |
 | PL-04 | Property-inspector browser, registration and bidirectional messaging | **Verified subset, C/T.** Native inspector windows register, route messages/settings, enforce per-action context binding and send appearance/disappearance. Original Counter PI registers; its unchanged control code saves via explicit instrumentation. | Unchanged official inspector registers, receives action/settings metadata, exchanges `sendToPlugin`/`sendToPropertyInspector`, and gets appearance/disappearance events. [PI guide][pi] |
 | PL-05 | Device/action lifecycle and physical input events | **Verified subset, D/C/T/H.** Registration, offline device state, connect/disconnect and key/dial events work. SDK stores retain visible actions during same-device recovery; new identity is announced before appearance. Broader physical lifecycle acceptance remains open. | Contract fixtures cover disconnect/reconnect, page/folder transitions, simultaneous instances, title changes and touch coordinates; then repeat physical paths. [WebSocket API][ws] |
 | PL-06 | Action/global settings, correlation IDs and persistent isolation | **Verified subset, T.** Sample settings survive restart; global storage and correlated replies exist in code. | Test SDK v1/v2/v3 clients, PI-origin updates, concurrent gets, multi-plugin isolation, malformed settings and crash-safe persistence. [Settings][settings], [SDK 3 changes][sdk3] |
@@ -587,3 +587,28 @@ ignored; the actual original protected manifest test also passes when explicitly
 provided the local reference and package. Strict Clippy passes for both crates.
 These are software/process tests, not evidence of Discord account authorization
 or physical control effects. Screensaver completion remains deferred.
+
+### Embedded TypeScript editor and Discord follow-up, 2026-10-12
+
+The default desktop shell now embeds the React/TypeScript production bundle using
+Wry/WebKit. Rust still owns profiles, settings, devices, plugins and lifetime. The
+editor has a persistent profile sidebar, searchable action library, compact Plus
+canvas, independently scrolling inspector and pinned Save/Revert controls. No
+editor HTTP service or development server is required. Plugin inspectors remain
+in separate windows. `desktop --legacy-editor` retains the earlier UI temporarily.
+
+Frontend checks cover draft preservation, stale-context rejection, unknown settings,
+structured child actions, startup and form errors. CUA checks confirm draft edits
+survive selection changes, explicit Save works, and dial-volume step controls are
+visible. Native WebKit evidence confirms bridge dispatch and real window
+destruction/recreation with unsaved drafts retained. The unchanged official SDK
+plugin keeps its PID and heartbeat across close/reopen, including without a session
+bus. These are software checks; physical acceptance of the new editor remains open.
+
+Core tests pass 322 cases, with ten gated tests ignored. Frontend tests pass 15
+cases, and the native Discord crate passes 36. Strict Rust Clippy passes for both
+crates. The real-host Discord process fixture verifies rendered volume PNGs, live
+updates, notifications, guild counts, stored-session resume without new consent,
+and release of held mute controls during host shutdown. All Discord service
+responses in these tests are local mocks. Avatar layouts, live authorization and
+actual Discord control behavior remain unverified. GitHub CI remains manual-only.

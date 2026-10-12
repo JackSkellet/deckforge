@@ -4,6 +4,7 @@ mod action_trigger;
 mod audio_output;
 mod brightness;
 mod desktop;
+mod desktop_web;
 mod device_session;
 mod dial_stack;
 mod feedback;
@@ -130,6 +131,9 @@ enum Command {
 
 #[derive(clap::Args, Default)]
 struct DesktopArgs {
+    /// Use the previous egui editor while the TypeScript migration is validated.
+    #[arg(long)]
+    legacy_editor: bool,
     /// Start with the editor hidden; reopen it from the launcher or tray.
     #[arg(long)]
     background: bool,
@@ -237,7 +241,16 @@ fn main() -> Result<()> {
                     return Err(error);
                 }
             };
-            desktop::run(running.controller.clone(), &state, options.background)?;
+            if options.legacy_editor {
+                desktop::run(running.controller.clone(), &state, options.background)?;
+            } else {
+                desktop_web::run(
+                    running.controller.clone(),
+                    &state,
+                    options.background,
+                    include_str!("../frontend/dist/index.html"),
+                )?;
+            }
             drop(running);
         }
         Command::Devices => {
