@@ -702,7 +702,7 @@ it("excludes installed aliases already assigned through a playing identity in an
   ).toBeNull();
 });
 
-it("switches the default catch-all group atomically as a routing draft", async () => {
+it("allows multiple groups to share the catch-all source in a routing draft", async () => {
   const user = userEvent.setup(),
     snapshot = inventory(),
     run = vi.fn(async (_payload: Record<string, any>) => true);
@@ -728,7 +728,7 @@ it("switches the default catch-all group atomically as a routing draft", async (
         name: "Default for other apps · Music",
       }) as HTMLInputElement
     ).checked,
-  ).toBe(false);
+  ).toBe(true);
   expect(
     (
       screen.getByRole("checkbox", {
@@ -736,7 +736,7 @@ it("switches the default catch-all group atomically as a routing draft", async (
       }) as HTMLInputElement
     ).checked,
   ).toBe(true);
-  expect(screen.getAllByText("Default", { selector: "small" })).toHaveLength(1);
+  expect(screen.getAllByText("Default", { selector: "small" })).toHaveLength(2);
   expect(run).toHaveBeenCalledTimes(1);
   await user.click(screen.getByRole("button", { name: "Apply routes" }));
   const applied = run.mock.calls.find(
@@ -744,7 +744,7 @@ it("switches the default catch-all group atomically as a routing draft", async (
   )?.[0];
   expect(
     applied?.settings.channels.map((c: any) => !!c.capture_unassigned),
-  ).toEqual([false, true]);
+  ).toEqual([true, true]);
   expect(applied?.settings.channels[0].apps).toEqual(
     snapshot.config.channels[0].apps,
   );
@@ -1001,7 +1001,7 @@ it("keeps unavailable monitoring output explicit and uses applied monitoring to 
   expect(screen.getByText("Listening to Monitor")).toBeTruthy();
   expect(screen.queryByText("Switching listening output…")).toBeNull();
 });
-it("disables listening to draft mixes and selecting fixed outputs", async () => {
+it("disables listening to draft mixes but allows a shared fixed output", async () => {
   const user = userEvent.setup(),
     snapshot = { ...inventory(), revision: 1 };
   snapshot.config.mixes[0].outputs.push("physical.output");
@@ -1012,7 +1012,7 @@ it("disables listening to draft mixes and selecting fixed outputs", async () => 
         name: "Desktop speakers · fixed output of Monitor",
       }) as HTMLOptionElement
     ).disabled,
-  ).toBe(true);
+  ).toBe(false);
   setupView();
   await user.click(screen.getByRole("button", { name: "＋ Add mix" }));
   dailyView();

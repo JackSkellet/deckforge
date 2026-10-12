@@ -7,6 +7,8 @@ mod backend;
 pub mod control;
 #[path = "mixer/discovery.rs"]
 mod discovery;
+#[path = "mixer/patchbay.rs"]
+pub mod patchbay;
 use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -23,6 +25,7 @@ use std::{
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct Config {
+    pub connections: Vec<patchbay::Connection>,
     pub monitoring: Monitoring,
     pub fade_ms: u32,
     pub enabled: bool,
@@ -33,6 +36,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            connections: vec![],
             monitoring: Monitoring::default(),
             fade_ms: 0,
             enabled: false,
@@ -142,6 +146,7 @@ impl Default for Route {
 }
 #[derive(Clone, Debug, Default, Serialize, PartialEq)]
 pub struct Device {
+    pub channels: Vec<String>,
     pub muted: bool,
     pub name: String,
     pub description: String,
@@ -185,26 +190,19 @@ impl Config {
             "Fade duration must be 0–10000 milliseconds"
         );
         ensure!(
-            self.channels.len() <= 12,
-            "At most 12 mixer channels are supported"
+            self.channels.len() <= 128,
+            "At most 128 mixer channels are supported"
         );
-        ensure!(self.mixes.len() <= 5, "At most five mixes are supported");
-        ensure!(
-            self.channels
-                .iter()
-                .filter(|c| c.capture_unassigned)
-                .count()
-                <= 1,
-            "Only one input group can capture unassigned apps"
-        );
+        ensure!(self.mixes.len() <= 64, "At most 64 mixes are supported");
         let mut channels = BTreeSet::new();
         let mut mixes = BTreeSet::new();
-        let mut selectors = BTreeSet::new();
-        let mut sources = BTreeSet::new();
+
         for c in &self.channels {
             valid_id(&c.id)?;
             valid_label(&c.name)?;
             ensure!(channels.insert(&c.id), "Duplicate channel ID");
+            let mut selectors = BTreeSet::new();
+            let mut sources = BTreeSet::new();
             for a in &c.apps {
                 let v = match a {
                     AppSelector::ApplicationId(v)
@@ -212,10 +210,7 @@ impl Config {
                     | AppSelector::DesktopApplication(v) => v,
                 };
                 valid_external(v)?;
-                ensure!(
-                    selectors.insert(a),
-                    "An app selector belongs to more than one channel"
-                );
+                ensure!(selectors.insert(a), "Duplicate app selector in one channel");
             }
             for source in &c.sources {
                 valid_external(source)?;
@@ -227,10 +222,7 @@ impl Config {
                     !source.starts_with("deckforge."),
                     "Mixer outputs cannot feed mixer inputs"
                 );
-                ensure!(
-                    sources.insert(source),
-                    "A source belongs to more than one channel"
-                );
+                ensure!(sources.insert(source), "Duplicate source in one channel");
             }
         }
         for m in &self.mixes {
@@ -270,16 +262,12 @@ impl Config {
                 !output.starts_with('@') && !output.starts_with("deckforge."),
                 "Listening requires an exact external output"
             );
-            ensure!(
-                !self.mixes.iter().any(|mix| mix.outputs.contains(output)),
-                "The listening output is already assigned as a fixed mix output"
-            );
         }
         if let Some(mix) = &self.monitoring.mix {
             ensure!(mixes.contains(mix), "Listening refers to an unknown mix");
         }
         let mut routes = BTreeSet::new();
-        ensure!(self.routes.len() <= 60, "Too many mixer routes");
+        ensure!(self.routes.len() <= 4096, "Too many mixer routes");
         for r in &self.routes {
             ensure!(
                 channels.contains(&r.channel) && mixes.contains(&r.mix),
@@ -288,6 +276,7 @@ impl Config {
             ensure!(routes.insert((&r.channel, &r.mix)), "Duplicate mixer route");
             valid_volume(r.volume)?;
         }
+        patchbay::validate(self)?;
         Ok(())
     }
 }
@@ -589,10 +578,7 @@ mod tests {
         config.monitoring.mix = None;
         config.validate().unwrap();
         config.mixes[1].outputs.push("Headphones".into());
-        assert!(
-            config.validate().is_err(),
-            "Duplicate listening/fixed output rejected even while inactive"
-        );
+        config.validate().unwrap(); // Multiple mixes may feed the listening device too.
     }
     #[test]
     fn pending_controls_preserve_metadata_ramps_but_clear_overridden_levels() {
@@ -684,7 +670,7 @@ mod tests {
         c.routes[0].mix = "missing".into();
         assert!(c.validate().is_err());
         c.routes.clear();
-        for i in 0..6 {
+        for i in 0..64 {
             c.mixes.push(Mix {
                 id: format!("mix{i}"),
                 name: "Mix".into(),

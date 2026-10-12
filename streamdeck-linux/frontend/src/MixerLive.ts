@@ -40,6 +40,7 @@ export function mixerRoutingShape(config: MixerConfig) {
   const { fade_ms: _fade, monitoring: _monitoring, ...rest } = config;
   return {
     ...rest,
+    connections: config.connections ?? [],
     channels: config.channels.map(({ linked: _linked, ...channel }) => ({
       ...channel,
       capture_unassigned: channel.capture_unassigned ?? false,
@@ -62,6 +63,7 @@ function controlValues(value: Partial<MixerControlPatch> | undefined) {
 function semanticConfig(config: MixerConfig) {
   return {
     ...config,
+    connections: config.connections ?? [],
     fade_ms: config.fade_ms ?? 0,
     monitoring: {
       output: config.monitoring?.output ?? null,

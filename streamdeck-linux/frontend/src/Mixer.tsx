@@ -1,3 +1,4 @@
+import type { AudioConnection } from "./MixerGraph";
 import { MixerPatchbay } from "./MixerPatchbay";
 import { newId } from "./ids";
 import {
@@ -46,6 +47,7 @@ export interface MixerRoute {
   muted: boolean;
 }
 export interface MixerConfig {
+  connections?: AudioConnection[];
   monitoring?: { output: string | null; mix: string | null };
   fade_ms?: number;
   enabled: boolean;
@@ -54,6 +56,7 @@ export interface MixerConfig {
   routes: MixerRoute[];
 }
 export interface AudioDevice {
+  channels?: string[];
   name: string;
   description: string;
   owned: boolean;
@@ -140,6 +143,9 @@ export function removeChannel(config: MixerConfig, id: string): MixerConfig {
   return {
     ...config,
     channels: config.channels.filter((c) => c.id !== id),
+    connections: (config.connections ?? []).filter(
+      (c) => ![c.from, c.to].some((e) => e.kind === "channel" && e.id === id),
+    ),
     routes: config.routes.filter((r) => r.channel !== id),
   };
 }
@@ -147,6 +153,14 @@ export function removeMix(config: MixerConfig, id: string): MixerConfig {
   return {
     ...config,
     mixes: config.mixes.filter((m) => m.id !== id),
+    connections: (config.connections ?? []).filter(
+      (c) =>
+        ![c.from, c.to].some(
+          (e) =>
+            (e.kind === "mix" && e.id === id) ||
+            (e.kind === "recording" && e.mix === id),
+        ),
+    ),
     ...(config.monitoring?.mix === id
       ? { monitoring: { ...config.monitoring, mix: null } }
       : {}),
@@ -870,13 +884,7 @@ export function AudioMixer({
   const channel = (next: MixerChannel) =>
     change({
       ...config,
-      channels: config.channels.map((c) =>
-        c.id === next.id
-          ? next
-          : next.capture_unassigned
-            ? { ...c, capture_unassigned: false }
-            : c,
-      ),
+      channels: config.channels.map((c) => (c.id === next.id ? next : c)),
     });
   const mix = (next: MixerMix) =>
     change({
@@ -894,9 +902,7 @@ export function AudioMixer({
     capture_unassigned = false,
     source?: AudioDevice,
   ) {
-    const channels = config.channels.map((channel) =>
-      capture_unassigned ? { ...channel, capture_unassigned: false } : channel,
-    );
+    const channels = config.channels;
     change({
       ...config,
       channels: [
@@ -1096,11 +1102,7 @@ export function AudioMixer({
                   {listenDevices.map((device) => {
                     const owners = outputOwners(device.name);
                     return (
-                      <option
-                        key={device.name}
-                        value={device.name}
-                        disabled={owners.length > 0}
-                      >
+                      <option key={device.name} value={device.name}>
                         {device.description || device.name}
                         {owners.length
                           ? ` · fixed output of ${owners.join(", ")}`
@@ -1340,7 +1342,7 @@ export function AudioMixer({
               <button
                 ref={createButton}
                 type="button"
-                disabled={config.channels.length >= 12}
+                disabled={config.channels.length >= 128}
                 aria-expanded={createOpen}
                 aria-controls="mixer-create-menu"
                 onClick={() => {
@@ -1533,6 +1535,9 @@ export function AudioMixer({
             snapshot={snapshot}
             onChange={change}
             onSetup={showSetup}
+            error={error || controlError || snapshot.save_error || ""}
+            onApply={() => void apply()}
+            canApply={draft.dirty && !busy && !stale && pendingControls === 0}
           />
         ) : (
           <section className="mixer-setup" aria-label="Routing setup">
@@ -1586,7 +1591,7 @@ export function AudioMixer({
               </div>
               <button
                 type="button"
-                disabled={config.channels.length >= 12}
+                disabled={config.channels.length >= 128}
                 onClick={() =>
                   change({
                     ...config,
@@ -1670,7 +1675,7 @@ export function AudioMixer({
               </div>
               <button
                 type="button"
-                disabled={config.mixes.length >= 5}
+                disabled={config.mixes.length >= 64}
                 onClick={() =>
                   change({
                     ...config,

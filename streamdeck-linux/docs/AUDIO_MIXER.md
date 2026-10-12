@@ -26,8 +26,9 @@ choices live in **Routing setup**.
 5. Select a mix's **Deckforge mix** virtual input in your recording or streaming
    application. Deckforge does not change system default devices.
 
-Monitor and Stream are the initial mixes. Up to five mixes and twelve channels
-are supported. A channel can contain several apps and input devices; a mix can
+Monitor and Stream are the initial mixes. The current resource bounds are 64
+mixes, 128 input groups and 4096 explicit patchbay connections. Stereo input ports
+can each accept multiple feeds; they are not a two-source limit. A channel can contain several apps and input devices; a mix can
 feed several outputs. Missing saved devices stay visible and are never silently
 replaced with the system default. Audio uses 48 kHz stereo; volume percentages
 represent linear amplitude.
@@ -53,8 +54,9 @@ stream, so it can be configured ahead of time.
 ## All audio and explicit exceptions
 
 Choose **All audio** under Create channel, or enable **Default for other apps** on
-an existing channel. Only one channel can be the default. After Apply, it accepts
-application audio that has no explicit channel assignment, including new streams.
+an existing channel. Multiple channels can share this source. After Apply, one
+capture bus accepts application audio without an explicit assignment, including
+new streams, and fans it out to the chosen channels.
 Explicit app assignments take priority. A stream deliberately sent to another
 Deckforge channel stays there; manually moving an already routed stream to another
 output is also respected, including when an unrelated app assignment changes.
@@ -78,10 +80,10 @@ destination stays selected and unavailable until that same named device returns;
 Deckforge never substitutes the system default. Its current system mute state is
 shown, but choosing a mix does not change the device's system volume or mute.
 
-An output reserved for listening cannot simultaneously be assigned as a fixed mix
-output. Remove its fixed assignment and Apply before choosing it under Listen on.
-This prevents two feeds into the same destination. Existing routing drafts survive
-listening changes. Deleting the selected mix clears its listening selection when
+Several mixes may feed the same output, including the chosen listening device.
+An identical fixed-output/listening pair is sent once, using that fixed send's
+gain and mute. Different mixes remain separate feeds and are summed by the audio
+server. Existing routing drafts survive listening changes. Deleting the selected mix clears its listening selection when
 that deletion is applied and retains the chosen output device.
 
 ## Live controls and meters
@@ -221,44 +223,69 @@ in the user's Wave Link 3.3 screenshots and shipped resources. See
 [Wave Link 3.3 reference investigation](WAVE_LINK_REFERENCE.md) for artifact identity,
 REA evidence and the distinction between recovered declarations and inferred code.
 
-## Advanced routing graph
+## Advanced routing canvas
 
-The Advanced routing tab exposes Deckforge's existing routing configuration as
-applications/audio inputs → channels → mixes → output devices and recording
-inputs. Click ports or drag between compatible ports to connect them. Select a
-cable with a click or Enter/Space to inspect and disconnect it. Escape cancels an
-unfinished connection. Zoom and a scrolling canvas keep larger graphs usable.
-Changes share the normal retained mixer draft and require **Apply routes**.
+The Carla-style canvas has freely movable nodes, background panning, zoom,
+Fit canvas, Arrange nodes and an expanded view. Drag node headers or use their
+focused arrow keys; Shift moves by larger steps. Node positions, zoom and channel
+expansion survive restart in a private `audio-canvas.json` file. These layout
+changes never alter audio configuration or save unrelated action drafts.
 
-Application assignments and microphone inputs transfer between channels rather
-than creating duplicate ownership. All other audio can belong to one channel.
-Connecting a mix to the selected listening device changes its listening mix;
-other device connections are fixed mix outputs. Recording inputs are automatic
-and have dashed cables. The main mixer also has an explicit **Listen to mix**
-selector beside **Listen on**; selecting only a device does not select a mix.
+Click ports or drag between them to connect. Each input accepts multiple cables.
+Applications and microphones can feed several destinations, mixes can share an
+output, channels and mixes can feed one another, and direct source-to-output
+connections are supported. A physical output's outgoing port captures its monitor.
+The recording node is the mix's automatic virtual input for other applications;
+its outgoing port can feed another mixer node. Sources expose output ports and
+receiving devices/buses expose input ports according to their role.
 
-The graph reports channels without routes or an audible device path, unavailable
-inputs, and observed playback still attached to a removed channel. Recording-only
-mixes are supported: an absent audible path does not imply their recording input
-is broken. This is a graph of Deckforge routing, not an unrestricted editor for
-other applications' PipeWire/JACK ports. Effects remain deferred.
+Use **L/R** to expose individual channel positions at both ends of a connection.
+Microphones retain their actual mono/channel map. For example, a source's Left
+port can connect only to the headphones' Right port. Split an existing stereo
+cable to remove or trim one side while retaining the other. Selecting a cable
+exposes its level, mute and Disconnect controls. Connection edits share the
+normal retained routing draft and require **Apply routes**, also available in
+expanded view. Runtime errors and unapplied-change status remain visible there.
 
-Carla's external patchbay was inspected as a behavior reference. Its
-[`CarlaEngineJack::patchbayConnect` and `restorePatchbayConnection`](https://github.com/falkTX/Carla/blob/main/source/backend/engine/CarlaEngineJack.cpp)
-resolve named ports, connect through JACK, and check existing connections when
-restoring. Deckforge continues to use its independently written Rust mixer and
-Pulse-compatible PipeWire routing. No Carla implementation was copied.
+Applications are captured once before fan-out, including a shared All other audio
+source. This avoids repeatedly moving a single playback stream between competing
+destinations. Existing single-group captures keep their original routing. Ambiguous
+alternative selectors still produce a notice instead of guessing an application.
+Node-level feedback cycles are rejected before changing the graph, including
+known physical monitor loops. A channel-only self-route stalled an isolated
+PipeWire graph even though its signal channels looked acyclic, so such node cycles
+are not permitted. Missing devices stay named and unavailable without fallback.
 
-The reported physical silent-output case is still unconfirmed. A read-only
-inspection found a voice playback stream on a muted, removed Deckforge channel,
-with no retained original-stream move record. That establishes its current
-silent destination, not the cause of the earlier routing failure. A private
-mono-source → channel → mix → listening-output PCM test passed, including
-recording-source identity and output switching. The user will retry the failing
-configuration after the advanced view is installed.
+The new typed connection model uses independently implemented Rust planning and
+ownership tracking. Individual channel mappings use an owned
+[`module-remap-source`](https://docs.pipewire.org/page_pulse_module_remap_source.html)
+followed by a loopback with remixing disabled. No Carla code, JACK host, or effects
+engine is embedded. Carla's [patchbay description](https://kx.studio/Applications:Carla)
+and [JACK engine](https://github.com/falkTX/Carla/blob/main/source/backend/engine/CarlaEngineJack.cpp)
+were behavior references. This canvas edits Deckforge-owned audio routing; MIDI,
+effects and editing unrelated applications' raw PipeWire/JACK port graphs remain
+outside this implementation.
 
-`frontend/src/MixerPatchbay.test.tsx` covers connection/disconnection, source/app
-ownership transfers, drag/cancel, silent-path diagnostics and shared draft/Apply
-behavior. `frontend/tests/native_mixer_patchbay_interop.py` verifies native port
-controls, keyboard cable selection, view switching and saving a disabled graph.
-It does not enable routing, capture audio, or open a USB device.
+## Patchbay verification and reported silence
+
+`tests/patchbay_channel_probe.py` checks the native routing primitives on private
+PipeWire with generated PCM. It verifies left-to-right mapping, two sources summed
+into one ear, and simultaneous right-to-left mapping to another output.
+`tests/mixer_patchbay_interop.py` exercises the real host with three inputs to a
+mix, chained channels and mixes, output-monitor and recording taps, an application
+feeding two mixes, shared fixed/listening destinations without accidental double
+feeds, per-connection gain and feedback rejection. Defaults remain unchanged.
+
+Frontend tests cover fan-in/out, individual cables, gains, duplicate suppression,
+node gestures, draft retention and Apply. The native window fixture verifies
+multiple mixes on one device, individual channel connections, expanded view,
+keyboard movement/disconnect and saved node positions/port expansion across a
+full process restart. Native UI tests keep routing disabled. Physical drag/cable
+acceptance and physical headphone audio still need user acceptance.
+
+The earlier physical silent-output report is not claimed fixed by these tests.
+Read-only inspection found a voice playback stream attached to a muted, removed
+Deckforge channel without a retained original-stream move record. That proves its
+current silent destination, not the cause of the earlier failure. The canvas
+reports that condition and disconnected/muted/unavailable paths. The user will
+retry the failing setup with this view. Effects remain deferred.

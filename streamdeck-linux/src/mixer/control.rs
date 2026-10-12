@@ -225,6 +225,7 @@ fn same_base_routing(a: &Config, b: &Config) -> bool {
         result
     }
     a.enabled == b.enabled
+        && a.connections == b.connections
         && channels(a) == channels(b)
         && mixes(a) == mixes(b)
         && routes(a) == routes(b)

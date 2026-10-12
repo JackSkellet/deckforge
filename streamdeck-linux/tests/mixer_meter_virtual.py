@@ -13,7 +13,7 @@ def main():
     before=info();children=[];feeders=[];fixture_modules={};helper=None
     with tempfile.TemporaryDirectory(prefix='deckforge-meter-probe-') as temporary:
         root=pathlib.Path(temporary);(root/'src').mkdir()
-        (root/'Cargo.toml').write_text('[package]\nname="deckforge-meter-probe"\nversion="0.0.0"\nedition="2024"\n[dependencies]\nanyhow="1"\nserde={version="1",features=["derive"]}\nserde_json="1"\nlibpulse-binding="2.30"\nlibc="0.2"\nuuid={version="1",features=["v4"]}\n')
+        (root/'Cargo.toml').write_text('[package]\nname="deckforge-meter-probe"\nversion="0.0.0"\nedition="2024"\n[dependencies]\nanyhow="1"\nserde={version="1",features=["derive"]}\nserde_json="1"\nlibpulse-binding="2.30"\nsha2="0.10"\nlibc="0.2"\nuuid={version="1",features=["v4"]}\n')
         module=pathlib.Path(__file__).resolve().parents[1]/'src/mixer.rs'
         (root/'src/main.rs').write_text('#[path='+json.dumps(str(module))+'] mod mixer;\n'+PROBE_MAIN.replace('if let Some(c)=value.get("config")', 'if let Some(c)=value.get("fade"){let config:Config=serde_json::from_value(c.clone()).unwrap();worker.submit_controls(config,std::collections::BTreeMap::from([(mixer::control::Target::Route{channel:"tone".into(),mix:"mix".into()},Duration::from_secs(3))])).unwrap();}if let Some(c)=value.get("config")'))
         build_target=module.parents[1]/'target/mixer-meter-probe'

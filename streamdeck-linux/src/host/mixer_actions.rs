@@ -344,6 +344,7 @@ mod tests {
     use crate::mixer::{Channel, Mix, Route};
     fn config() -> Config {
         Config {
+            connections: vec![],
             fade_ms: 0,
             monitoring: crate::mixer::Monitoring::default(),
             enabled: true,

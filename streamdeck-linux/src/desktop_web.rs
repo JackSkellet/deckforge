@@ -1,4 +1,6 @@
 //! Native WebKit editor shell. Devices, profiles and plugin policy stay in Host.
+#[path = "desktop_canvas.rs"]
+mod canvas;
 use crate::{host::Controller, instance::Command, window::Window};
 use anyhow::{Context, Result, bail, ensure};
 use serde::Deserialize;
@@ -116,7 +118,7 @@ impl Worker {
                 script: String::new(),
             }),
             proxy: Mutex::new(None),
-            ui_state: Mutex::new(Value::Null),
+            ui_state: Mutex::new(canvas::load(state)),
             stop: AtomicBool::new(false),
             running: AtomicBool::new(true),
             refresh_queued: AtomicBool::new(false),
@@ -329,7 +331,9 @@ fn dispatch(
                 serde_json::to_vec(value)?.len() <= MAX_IPC,
                 "Editor drafts exceed 1 MiB"
             );
-            *shared.ui_state.lock().unwrap() = value.clone();
+            let mut ui_state = shared.ui_state.lock().unwrap();
+            canvas::save(state, &ui_state, value).context("Save audio canvas layout")?;
+            *ui_state = value.clone();
             Ok(Value::Null)
         }
         "window" => {

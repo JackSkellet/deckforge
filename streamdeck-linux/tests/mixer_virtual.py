@@ -36,7 +36,7 @@ def main():
     harness=None
     if not args.probe_binary:
         harness=tempfile.TemporaryDirectory(prefix='deckforge-mixer-probe-');root=pathlib.Path(harness.name);(root/'src').mkdir()
-        (root/'Cargo.toml').write_text('[package]\nname="deckforge-mixer-probe"\nversion="0.0.0"\nedition="2024"\n[dependencies]\nanyhow="1"\nserde={version="1",features=["derive"]}\nserde_json="1"\nlibpulse-binding="2.30"\nlibc="0.2"\nuuid={version="1",features=["v4"]}\n')
+        (root/'Cargo.toml').write_text('[package]\nname="deckforge-mixer-probe"\nversion="0.0.0"\nedition="2024"\n[dependencies]\nanyhow="1"\nserde={version="1",features=["derive"]}\nserde_json="1"\nlibpulse-binding="2.30"\nsha2="0.10"\nlibc="0.2"\nuuid={version="1",features=["v4"]}\n')
         module=pathlib.Path(__file__).resolve().parents[1]/'src/mixer.rs'
         (root/'src/main.rs').write_text('#[path='+json.dumps(str(module))+'] mod mixer;\n'+PROBE_MAIN)
         subprocess.run(['cargo','build','--offline','--quiet','--manifest-path',str(root/'Cargo.toml')],check=True)

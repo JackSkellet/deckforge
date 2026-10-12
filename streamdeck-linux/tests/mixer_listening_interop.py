@@ -195,8 +195,13 @@ def run(args, root):
         assert original_output_controls() == output_controls, 'Listening changed system output volume/mute'
         previous = host.state()['mixer']['config']
         host.post({'command':'mixer_control','revision':host.state()['mixer']['revision'],
-                   'target':{'kind':'monitor'},'output':outputs['fixed'][0]}, expected=400)
-        assert host.state()['mixer']['config'] == previous
+                   'target':{'kind':'monitor'},'output':outputs['fixed'][0]})
+        applied_monitor('stream', outputs['fixed'][0])
+        capture(records,.3)
+        shared=capture(records,.4)
+        assert .17 < shared['fixed']['880hz'] < .23, 'Listening plus fixed output doubled the same feed'
+        monitoring(output=previous['monitoring']['output'],mix=previous['monitoring']['mix'])
+        applied_monitor(previous['monitoring']['mix'],previous['monitoring']['output'])
         pulse('set-sink-mute', outputs['spare'][0], '1')
         host.wait(lambda s:any(d['name']==outputs['spare'][0] and d['muted'] for d in s['mixer']['sinks']), 'read-only output mute status')
         monitoring(mix='monitor')
@@ -248,7 +253,7 @@ def run(args, root):
         assert all(before[k]==after[k] for k in ['default_sink_name','default_source_name'])
         report.update(ok=True, baseline=baseline, during_switch=switching, selected=selected,
             no_mix=silent, switched_output=swapped, fade_preserved=True, nodes_preserved=True,
-            duplicate_feed_rejected=True, system_output_controls_unchanged=True,
+            shared_feed_deduplicated=True, system_output_controls_unchanged=True,
             muted_device_reported=True, missing_output_no_fallback=True, recording_inputs_verified=True, reconnect_initial_muted=reconnect_muted, reconnect=recovered, inactive_restart_preserves_selection=True, cleanup=True,
             default_devices_unchanged=True)
     except Exception as error:

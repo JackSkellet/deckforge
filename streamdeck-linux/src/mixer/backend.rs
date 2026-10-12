@@ -4,6 +4,8 @@ mod gain;
 mod journal;
 #[path = "meter.rs"]
 mod meter;
+#[path = "patchbay_backend.rs"]
+mod patchbay_backend;
 use super::*;
 use anyhow::{Context as _, bail};
 use libpulse_binding as pulse;
@@ -162,6 +164,7 @@ impl Engine {
             self.clear_meters();
         }
         let result = (|| -> Result<()> {
+            let routing = super::patchbay::materialize(config)?;
             if self.connection.is_none() {
                 self.meters.clear();
                 self.meter_client = None;
@@ -190,13 +193,13 @@ impl Engine {
                     .collect();
                 self.adopt_pending(&inv);
                 snapshot.connected = true;
-                self.update_memberships(config);
+                self.update_memberships(&routing);
                 if config.enabled {
                     let targets = self.meter_targets(config, &inv);
                     self.trim_meters(&targets);
                     self.apply(
                         &mut connection,
-                        config,
+                        &routing,
                         &mut inv,
                         &mut snapshot.warnings,
                         stop,
@@ -607,6 +610,10 @@ impl Engine {
         }
         if config.enabled
             && let (Some(mix), Some(output)) = (&config.monitoring.mix, &config.monitoring.output)
+            && !config
+                .mixes
+                .iter()
+                .any(|m| &m.id == mix && m.outputs.contains(output))
         {
             if inv.sinks.iter().any(|sink| sink.device.name == *output) {
                 plan.push(self.link(
@@ -620,6 +627,7 @@ impl Engine {
                 ));
             }
         }
+        plan.extend(self.patch_plan(&config.connections, inv, warnings));
         plan
     }
     fn link(&self, key: String, source: String, sink: String) -> Spec {
@@ -652,6 +660,7 @@ impl Engine {
         stop: &AtomicBool,
     ) -> Result<()> {
         reject_monitor_cycles(config, inv)?;
+        self.validate_patch_ports(&config.connections, inv)?;
         let plan = self.plan(config, inv, warnings);
         // Retain only identities still present; a new daemon can reuse indices.
         self.owned
@@ -783,13 +792,23 @@ impl Engine {
             if key.starts_with("capture:")
                 || key.starts_with("output:")
                 || key.starts_with("listen:")
+                || key.starts_with("connection:")
             {
                 let input = inv
                     .inputs
                     .iter()
                     .find(|i| i.module == Some(module.id))
                     .context("Owned capture/output stream missing")?;
-                let (volume, muted) = output_gain(config, key);
+                let (volume, muted) = if let Some(id) = key.strip_prefix("connection:") {
+                    config
+                        .connections
+                        .iter()
+                        .find(|c| c.id == id)
+                        .map(|c| (c.volume, c.muted))
+                        .unwrap_or((100., false))
+                } else {
+                    output_gain(config, key)
+                };
                 if !gain_matches(&input.volume, volume) || input.muted != muted {
                     c.input_gain(input.app.index, input.channels, volume, muted, stop)?;
                 }
@@ -1138,56 +1157,17 @@ fn gain_matches(volumes: &ChannelVolumes, percent: f64) -> bool {
     !volumes.get().is_empty() && volumes.get().iter().all(|v| *v == wanted)
 }
 fn reject_monitor_cycles(config: &Config, inv: &Inventory) -> Result<()> {
-    let mut edges: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    for route in &config.routes {
-        let channel = config
-            .channels
-            .iter()
-            .find(|c| c.id == route.channel)
-            .context("Unknown channel")?;
-        let mix = config
-            .mixes
-            .iter()
-            .find(|m| m.id == route.mix)
-            .context("Unknown mix")?;
-        for source in &channel.sources {
-            if let Some(sink) = inv
-                .sources
-                .iter()
-                .find(|s| s.device.name == *source)
-                .and_then(|s| s.monitor_sink.as_ref())
-            {
-                edges
-                    .entry(sink.clone())
-                    .or_default()
-                    .extend(mix.outputs.iter().cloned());
-                if config.monitoring.mix.as_ref() == Some(&mix.id)
-                    && let Some(output) = &config.monitoring.output
-                {
-                    edges
-                        .entry(sink.clone())
-                        .or_default()
-                        .insert(output.clone());
-                }
-            }
-        }
-    }
-    for start in edges.keys() {
-        let mut pending = edges[start].iter().cloned().collect::<Vec<_>>();
-        let mut seen = BTreeSet::new();
-        while let Some(node) = pending.pop() {
-            ensure!(
-                &node != start,
-                "Audio routing would feed a sink monitor back into itself"
-            );
-            if seen.insert(node.clone())
-                && let Some(next) = edges.get(&node)
-            {
-                pending.extend(next.iter().cloned());
-            }
-        }
-    }
-    Ok(())
+    let aliases = inv
+        .sources
+        .iter()
+        .filter_map(|source| {
+            source
+                .monitor_sink
+                .as_ref()
+                .map(|sink| (source.device.name.clone(), sink.clone()))
+        })
+        .collect::<Vec<_>>();
+    super::patchbay::reject_cycles(config, &aliases)
 }
 /// Explicit assignments win. Ambiguous explicit selectors never become catch-all.
 fn selected_channel<'a>(
@@ -1409,6 +1389,14 @@ impl Connection {
             .get_sink_info_list(move |r| match r {
                 ListResult::Item(i) => to.borrow_mut().push(Sink {
                     device: Device {
+                        channels: i
+                            .channel_map
+                            .get()
+                            .iter()
+                            .filter_map(|p| {
+                                pulse::channelmap::Position::to_string(*p).map(|s| s.into_owned())
+                            })
+                            .collect(),
                         muted: i.mute,
                         name: i.name.as_deref().unwrap_or("").into(),
                         description: i.description.as_deref().unwrap_or("").into(),
@@ -1436,6 +1424,14 @@ impl Connection {
                 ListResult::Item(i) => to.borrow_mut().push(Source {
                     index: i.index,
                     device: Device {
+                        channels: i
+                            .channel_map
+                            .get()
+                            .iter()
+                            .filter_map(|p| {
+                                pulse::channelmap::Position::to_string(*p).map(|s| s.into_owned())
+                            })
+                            .collect(),
                         muted: i.mute,
                         name: i.name.as_deref().unwrap_or("").into(),
                         description: i.description.as_deref().unwrap_or("").into(),
@@ -1887,7 +1883,16 @@ mod tests {
         });
         assert!(selected_channel(&config, &identity).is_err());
         config.channels[2].capture_unassigned = true;
-        assert!(config.validate().is_err());
+        config.validate().unwrap();
+        let routing = super::patchbay::materialize(&config).unwrap();
+        assert_eq!(
+            routing
+                .channels
+                .iter()
+                .filter(|c| c.capture_unassigned)
+                .count(),
+            1
+        );
         config.channels[0].capture_unassigned = false;
         config.channels[2].capture_unassigned = false;
         config.channels[2].apps.clear();

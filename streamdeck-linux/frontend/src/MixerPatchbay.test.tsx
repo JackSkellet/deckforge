@@ -79,19 +79,21 @@ it("connects a microphone through a channel/mix to the listening device and remo
   ]);
   expect(current().monitoring).toEqual({
     output: "headphones",
-    mix: "monitor",
+    mix: null,
   });
-  expect(current().mixes[0].outputs).toEqual([]);
+  expect(current().mixes[0].outputs).toEqual(["headphones"]);
   fireEvent.click(
     screen.getByRole("button", { name: "Voice to Personal: 100%" }),
   );
   fireEvent.click(screen.getByRole("button", { name: "Disconnect" }));
   expect(current().routes).toEqual([]);
   expect(current().channels[0].sources).toEqual(["mic"]);
-  expect(screen.getByText("Voice has no connection to a mix.")).toBeTruthy();
+  expect(
+    screen.getByText("Voice has no outgoing audio connection."),
+  ).toBeTruthy();
 });
 
-it("finds an installed silent app, then transfers it to exactly one channel", () => {
+it("fans an installed silent app and microphone out to multiple channels", () => {
   render(<Fixture />);
   fireEvent.change(screen.getByRole("searchbox"), {
     target: { value: "Browser" },
@@ -102,15 +104,15 @@ it("finds an installed silent app, then transfers it to exactly one channel", ()
     { field: "desktop_application", value: "org.browser" },
   ]);
   connect("Browser", "Other");
-  expect(current().channels[0].apps).toEqual([]);
+  expect(current().channels[0].apps).toHaveLength(1);
   expect(current().channels[1].apps).toHaveLength(1);
   connect("USB Mic", "Voice");
   connect("USB Mic", "Other");
-  expect(current().channels.map((c) => c.sources)).toEqual([[], ["mic"]]);
+  expect(current().channels.map((c) => c.sources)).toEqual([["mic"], ["mic"]]);
   connect("All other audio", "Voice");
   connect("All other audio", "Other");
   expect(current().channels.map((c) => c.capture_unassigned)).toEqual([
-    false,
+    true,
     true,
   ]);
 });
@@ -180,7 +182,7 @@ it("diagnoses missing listening mix, mute/zero gains and stranded playback witho
     connectPorts(
       config,
       { kind: "output", id: "headphones" },
-      { kind: "channel", id: "voice" },
+      { kind: "source", id: "mic" },
       live,
     ),
   ).toBe(config);
@@ -215,4 +217,135 @@ it("keeps graph edits across mixer views and sends them only when Apply routes i
     ).toBe(true),
   );
   expect(exportFormDrafts()["audio-mixer"].config.routes).toHaveLength(1);
+});
+
+it("connects individual channels and two mixes to one device without replacing another feed", () => {
+  render(<Fixture />);
+  fireEvent.click(screen.getByRole("button", { name: "Add mix" }));
+  connect("Personal", "Headphones");
+  connect("Mix 2", "Headphones");
+  expect(current().mixes.map((m) => m.outputs)).toEqual([
+    ["headphones"],
+    ["headphones"],
+  ]);
+  fireEvent.click(
+    screen.getByRole("button", {
+      name: "Show individual channels for Personal",
+    }),
+  );
+  fireEvent.click(
+    screen.getByRole("button", {
+      name: "Show individual channels for Speakers",
+    }),
+  );
+  connect("Personal Left", "Speakers Right");
+  expect(current().connections?.[0]).toMatchObject({
+    from: { kind: "mix", id: "monitor" },
+    to: { kind: "output", name: "speakers" },
+    source_channel: "front-left",
+    target_channel: "front-right",
+  });
+});
+
+it("removes one side of a stereo cable without removing the other channel", () => {
+  render(<Fixture />);
+  connect("Voice", "Personal");
+  fireEvent.click(
+    screen.getByRole("button", { name: "Show individual channels for Voice" }),
+  );
+  fireEvent.click(
+    screen.getByRole("button", {
+      name: "Show individual channels for Personal",
+    }),
+  );
+  fireEvent.click(
+    screen.getByRole("button", {
+      name: "Voice to Personal: 100% · Left → Left",
+    }),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Disconnect" }));
+  expect(current().routes).toEqual([]);
+  expect(current().connections).toHaveLength(1);
+  expect(current().connections?.[0]).toMatchObject({
+    source_channel: "front-right",
+    target_channel: "front-right",
+  });
+});
+
+it("moves nodes freely with pointer/keyboard gestures, retains the layout, and leaves audio config untouched", () => {
+  const { unmount } = render(<Fixture />);
+  const before = current();
+  const header = screen.getByRole("button", { name: "Move Voice" });
+  const node = header.closest("article")!;
+  const left = parseFloat(node.style.left),
+    top = parseFloat(node.style.top);
+  fireEvent(
+    header,
+    new MouseEvent("pointerdown", {
+      bubbles: true,
+      button: 0,
+      clientX: 100,
+      clientY: 100,
+    }),
+  );
+  fireEvent(
+    header,
+    new MouseEvent("pointermove", {
+      bubbles: true,
+      clientX: 180,
+      clientY: 160,
+    }),
+  );
+  fireEvent(
+    header,
+    new MouseEvent("pointerup", { bubbles: true, clientX: 180, clientY: 160 }),
+  );
+  expect(parseFloat(node.style.left)).toBe(left + 80);
+  expect(parseFloat(node.style.top)).toBe(top + 60);
+  fireEvent.keyDown(header, { key: "ArrowLeft", shiftKey: true });
+  expect(parseFloat(node.style.left)).toBe(left + 30);
+  expect(current()).toEqual(before);
+  unmount();
+  render(<Fixture />);
+  expect(
+    parseFloat(
+      screen.getByRole("button", { name: "Move Voice" }).closest("article")!
+        .style.left,
+    ),
+  ).toBe(left + 30);
+  fireEvent.click(screen.getByRole("button", { name: "Expand canvas" }));
+  expect(screen.getByRole("button", { name: "Return to mixer" })).toBeTruthy();
+});
+
+it("keeps a stereo leg unique and edits one connection gain without changing another route", () => {
+  render(<Fixture />);
+  connect("Voice", "Personal");
+  fireEvent.click(
+    screen.getByRole("button", { name: "Voice to Personal: 100%" }),
+  );
+  fireEvent.change(screen.getByRole("slider", { name: "Connection level" }), {
+    target: { value: "37" },
+  });
+  expect(current().routes[0].volume).toBe(37);
+  fireEvent.click(
+    screen.getByRole("button", { name: "Show individual channels for Voice" }),
+  );
+  fireEvent.click(
+    screen.getByRole("button", {
+      name: "Show individual channels for Personal",
+    }),
+  );
+  connect("Voice Left", "Personal Left");
+  expect(current().connections ?? []).toEqual([]);
+  fireEvent.click(
+    screen.getByRole("button", {
+      name: "Voice to Personal: 37% · Left → Left",
+    }),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Disconnect" }));
+  expect(current().connections?.[0]).toMatchObject({
+    source_channel: "front-right",
+    target_channel: "front-right",
+    volume: 37,
+  });
 });
