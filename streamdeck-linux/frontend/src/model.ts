@@ -4,6 +4,7 @@ import type { DeviceGeometry, DeviceCapabilities } from "./device";
 export type RecordValue = Record<string, any>;
 export type Controller = "Keypad" | "Encoder" | "Neo";
 export interface Action {
+  enabled?: boolean;
   user_title_enabled?: boolean;
   uuid: string;
   name: string;
@@ -45,6 +46,7 @@ export interface AppearanceEdit {
   reset_image?: boolean;
 }
 export interface Slot {
+  plugin_disabled?: boolean;
   appearance?: AppearanceInfo;
   state_count?: number;
   state_names?: string[];
@@ -322,11 +324,13 @@ export const isContainer = (id: string) =>
 export function allowed(action: Action, controller: Controller) {
   return (
     action.visible !== false &&
+    action.enabled !== false &&
     !action.multi_only &&
     action.controllers.includes(controller)
   );
 }
 export function childAllowed(action: Action, parent: string) {
+  if (action.enabled === false) return false;
   if (parent === STACK)
     return action.controllers.includes("Encoder") && action.uuid !== STACK;
   if (parent === TRIGGER)

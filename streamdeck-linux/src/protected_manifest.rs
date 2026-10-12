@@ -15,6 +15,7 @@ use zeroize::Zeroizing;
 const LIMIT: usize = 32 * 1024 * 1024;
 const REFERENCE_LIMIT: u64 = 64 * 1024 * 1024;
 const REFERENCE_HASH: &str = "2963df27b13f97e5736e3f931348d89d2f693109f3cb9dc3c9899300e35ea9e3";
+const MAC_REFERENCE_HASH: &str = "2cd1253d94b0fdb548920b72be4edc94791562d0cdda80be3fe28a410b8123ed";
 const MULTIPLIER: u64 = 0x5851_f42d_4c95_7f2d;
 const INCREMENT: u64 = 0x1405_7b7e_f767_814f;
 const MAX_METADATA: usize = 1024 * 1024;
@@ -24,6 +25,12 @@ struct Keys {
     application: [u8; 32],
     private: Zeroizing<[u8; 32]>,
     signer: [u8; 32],
+}
+
+#[derive(Clone, Copy)]
+enum ReferenceKind {
+    Windows,
+    Mac,
 }
 
 /// Checks the original application identity without executing it or exposing keys.
@@ -114,12 +121,12 @@ pub(crate) fn required_files(manifest: &Value) -> Result<Vec<RequiredFile>> {
 
 /// Returns authenticated plaintext in memory, never a plaintext file.
 pub fn decode(bytes: &[u8], reference: &Path) -> Result<Vec<u8>> {
-    let original = reference_bytes(reference)?;
-    let keys = provider(&original)?;
+    let (original, kind) = reference_bytes(reference)?;
+    let keys = provider(&original, kind)?;
     decode_with_keys(bytes, &keys)
 }
 
-fn reference_bytes(path: &Path) -> Result<Vec<u8>> {
+fn reference_bytes(path: &Path) -> Result<(Vec<u8>, ReferenceKind)> {
     let path = path
         .canonicalize()
         .context("Resolve original application reference")?;
@@ -143,11 +150,14 @@ fn reference_bytes(path: &Path) -> Result<Vec<u8>> {
         bytes.len() as u64 <= REFERENCE_LIMIT,
         "Original application reference exceeds 64 MiB"
     );
-    ensure!(
-        format!("{:x}", Sha256::digest(&bytes)) == REFERENCE_HASH,
-        "Unsupported original application reference: expected Stream Deck 7.6.0.23012 (SHA256 {REFERENCE_HASH})"
-    );
-    Ok(bytes)
+    let kind = match format!("{:x}", Sha256::digest(&bytes)).as_str() {
+        REFERENCE_HASH => ReferenceKind::Windows,
+        MAC_REFERENCE_HASH => ReferenceKind::Mac,
+        _ => bail!(
+            "Unsupported original application reference: use the unmodified Windows or macOS Stream Deck 7.6.0.23012 application"
+        ),
+    };
+    Ok((bytes, kind))
 }
 
 fn slice(bytes: &[u8], offset: usize, length: usize) -> Result<&[u8]> {
@@ -189,6 +199,23 @@ fn pe_bytes(bytes: &[u8], address: u64, length: usize) -> Result<&[u8]> {
     bail!("Original application reference address is outside a section")
 }
 
+// Fixed __TEXT mapping for the hash-pinned universal application's x86_64 slice.
+// Only the exact complete application hash admits this reader; no vendor bytes
+// or key material are compiled into Deckforge.
+fn mac_bytes(bytes: &[u8], address: u64, length: usize) -> Result<&[u8]> {
+    let relative = address
+        .checked_sub(0x100000000)
+        .context("Invalid macOS reference address")?;
+    let end = relative
+        .checked_add(length.try_into()?)
+        .context("macOS reference range overflow")?;
+    ensure!(
+        end <= 0x1a5f000,
+        "macOS reference address is outside the x86_64 text segment"
+    );
+    slice(bytes, usize::try_from(relative)? + 16384, length)
+}
+
 fn pcg(state: &mut u64) -> u32 {
     let rotate = *state >> 59;
     let value = ((*state >> 18) ^ *state) >> 27;
@@ -197,13 +224,18 @@ fn pcg(state: &mut u64) -> u32 {
     output
 }
 
-fn restore(bytes: &[u8], blocks: [u64; 2], seed_instruction: u64) -> Result<Zeroizing<[u8; 32]>> {
+fn restore<'a>(
+    read: impl Fn(u64, usize) -> Result<&'a [u8]>,
+    blocks: [u64; 2],
+    seed_instruction: u64,
+    mask_address: u64,
+) -> Result<Zeroizing<[u8; 32]>> {
     // These are locations in the required local artifact, not vendor key bytes.
     ensure!(
-        pe_bytes(bytes, seed_instruction, 2)? == [0x49, 0xb8],
+        read(seed_instruction, 2)? == [0x49, 0xb8],
         "Original key provider instruction mismatch"
     );
-    let mut state = u64::from_le_bytes(pe_bytes(bytes, seed_instruction + 2, 8)?.try_into()?);
+    let mut state = u64::from_le_bytes(read(seed_instruction + 2, 8)?.try_into()?);
     let mut table = [0_u8; 256];
     for (i, item) in table.iter_mut().enumerate() {
         *item = i as u8;
@@ -216,20 +248,44 @@ fn restore(bytes: &[u8], blocks: [u64; 2], seed_instruction: u64) -> Result<Zero
     for (i, item) in table.iter().enumerate() {
         inverse[*item as usize] = i as u8;
     }
-    let mask = pe_bytes(bytes, 0x1416b1430, 32)?;
+    let mask = read(mask_address, 32)?;
     let mut result = Zeroizing::new([0_u8; 32]);
     for (block, address) in blocks.iter().enumerate() {
-        for (i, encoded) in pe_bytes(bytes, *address, 16)?.iter().enumerate() {
+        for (i, encoded) in read(*address, 16)?.iter().enumerate() {
             result[block * 16 + i] = inverse[*encoded as usize] ^ mask[block * 16 + i];
         }
     }
     Ok(result)
 }
 
-fn provider(bytes: &[u8]) -> Result<Keys> {
-    let application = *restore(bytes, [0x1416e0040, 0x1416dff60], 0x140690029)?;
-    let private = restore(bytes, [0x1416e0120, 0x1416e0230], 0x140690479)?;
-    let signer = *restore(bytes, [0x1416dfca0, 0x1416e0130], 0x1406908c9)?;
+fn provider(bytes: &[u8], kind: ReferenceKind) -> Result<Keys> {
+    let (blocks, seeds, mask) = match kind {
+        ReferenceKind::Windows => (
+            [
+                [0x1416e0040, 0x1416dff60],
+                [0x1416e0120, 0x1416e0230],
+                [0x1416dfca0, 0x1416e0130],
+            ],
+            [0x140690029, 0x140690479, 0x1406908c9],
+            0x1416b1430,
+        ),
+        ReferenceKind::Mac => (
+            [
+                [0x1018612c0, 0x1018612d0],
+                [0x101861360, 0x101861370],
+                [0x1018613d0, 0x1018613e0],
+            ],
+            [0x100e44c7c, 0x100e450dc, 0x100e4553c],
+            0x10196fed0,
+        ),
+    };
+    let read = |address, length| match kind {
+        ReferenceKind::Windows => pe_bytes(bytes, address, length),
+        ReferenceKind::Mac => mac_bytes(bytes, address, length),
+    };
+    let application = *restore(read, blocks[0], seeds[0], mask)?;
+    let private = restore(read, blocks[1], seeds[1], mask)?;
+    let signer = *restore(read, blocks[2], seeds[2], mask)?;
     ensure!(
         PublicKey::from(&StaticSecret::from(*private)).as_bytes() == &application,
         "Original application key pair does not match"
@@ -824,13 +880,26 @@ mod tests {
     #[test]
     fn wrong_local_reference_is_rejected_before_provider_access() {
         let file = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(file.path(), b"not an original vendor executable").unwrap();
-        assert!(
-            validate_reference(file.path())
-                .unwrap_err()
-                .to_string()
-                .contains("Unsupported original")
-        );
+        for bytes in [
+            b"MZ altered reference".as_slice(),
+            b"\xca\xfe\xba\xbe altered reference",
+        ] {
+            std::fs::write(file.path(), bytes).unwrap();
+            assert!(
+                validate_reference(file.path())
+                    .unwrap_err()
+                    .to_string()
+                    .contains("Unsupported original")
+            );
+        }
+    }
+
+    #[test]
+    fn mac_reference_ranges_cannot_escape_the_pinned_slice() {
+        assert!(mac_bytes(&[], 0x100000000, 1).is_err());
+        assert!(mac_bytes(&[], 0xffffffff, 1).is_err());
+        assert!(mac_bytes(&[], 0x101a5efff, 2).is_err());
+        assert!(mac_bytes(&[], u64::MAX, 2).is_err());
     }
 
     #[test]
@@ -872,5 +941,57 @@ mod tests {
         assert_eq!(manifest["UUID"], "com.elgato.discord");
         assert_eq!(manifest["Name"], "Discord");
         assert_eq!(manifest["Actions"].as_array().unwrap().len(), 17);
+    }
+
+    #[test]
+    #[ignore = "requires explicitly supplied local macOS and Windows applications and Discord package"]
+    fn mac_and_windows_references_authenticate_identical_discord_files() {
+        let mac =
+            std::env::var_os("DECKFORGE_ORIGINAL_MAC_APP").expect("DECKFORGE_ORIGINAL_MAC_APP");
+        let windows = std::env::var_os("DECKFORGE_ORIGINAL_APP").expect("DECKFORGE_ORIGINAL_APP");
+        let package =
+            std::env::var_os("DECKFORGE_DISCORD_PACKAGE").expect("DECKFORGE_DISCORD_PACKAGE");
+        let mut archive = zip::ZipArchive::new(File::open(package).unwrap()).unwrap();
+        let mut protected = Vec::new();
+        archive
+            .by_name("com.elgato.discord.sdPlugin/manifest.json")
+            .unwrap()
+            .take(LIMIT as u64 + 1)
+            .read_to_end(&mut protected)
+            .unwrap();
+        let mac_clear = Zeroizing::new(decode(&protected, Path::new(&mac)).unwrap());
+        let windows_clear = Zeroizing::new(decode(&protected, Path::new(&windows)).unwrap());
+        // Compare hashes, not plaintext, so assertion failures cannot log vendor data.
+        let mac_digest = format!("{:x}", Sha256::digest(&mac_clear));
+        assert_eq!(mac_digest, format!("{:x}", Sha256::digest(&windows_clear)));
+        assert_eq!(
+            mac_digest,
+            "038c015493d11a665e7c561b993afc6f6933ad9db0ec926e1d0c6e50c33bae25"
+        );
+        let manifest: Value = serde_json::from_slice(&mac_clear).unwrap();
+        assert_eq!(manifest["UUID"], "com.elgato.discord");
+        assert_eq!(manifest["Actions"].as_array().unwrap().len(), 17);
+        let required = required_files(&manifest).unwrap();
+        assert!(!required.is_empty());
+        for record in required {
+            let mut bytes = Vec::new();
+            archive
+                .by_name(&format!("com.elgato.discord.sdPlugin/{}", record.path))
+                .unwrap()
+                .take(LIMIT as u64 + 1)
+                .read_to_end(&mut bytes)
+                .unwrap();
+            record.verify(&bytes).unwrap();
+        }
+        let mut changed = std::fs::read(mac).unwrap();
+        changed[0] ^= 1;
+        let temp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(temp.path(), changed).unwrap();
+        assert!(
+            validate_reference(temp.path())
+                .unwrap_err()
+                .to_string()
+                .contains("Unsupported original")
+        );
     }
 }

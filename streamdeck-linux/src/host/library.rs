@@ -1234,6 +1234,9 @@ impl Host {
     pub(super) fn install_bundled_profiles(&mut self, activate: bool) -> Result<()> {
         let mut install = Vec::new();
         for plugin in &self.plugins {
+            if !self.plugin_enabled(plugin) {
+                continue;
+            }
             for entry in plugin.manifest["Profiles"].as_array().into_iter().flatten() {
                 let Some(name) = entry["Name"].as_str() else {
                     continue;

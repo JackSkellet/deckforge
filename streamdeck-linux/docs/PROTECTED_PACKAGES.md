@@ -3,12 +3,28 @@
 Some Marketplace plugins store `manifest.json` in an Elgato binary envelope.
 Deckforge can authenticate the supported envelope and check its required files
 before installing the package. It needs a local copy of the original Stream Deck
-**7.6.0.23012** executable as a static reference. The reference is hash-pinned and
+**7.6.0.23012** Windows or macOS executable as a static reference. The reference is hash-pinned and
 never executed. Vendor key material is not embedded in Deckforge or published
 with the source.
 
-In **Plugins → Protected Elgato packages**, choose the reference executable and
-save it before importing the package. The command-line installer also accepts:
+In **Plugins → Protected Elgato packages**, click **Import Elgato installer**
+and select `Stream_Deck_7.6.0.23012.pkg`. Deckforge extracts the application,
+validates its identity, and saves a private managed copy. No Elgato login is needed
+for local manifest verification. Marketplace downloads and account entitlements
+are separate from this step.
+
+The importer requires `bsdtar` from libarchive. It reads only the expected
+application member through two stdout pipes; it never installs the package or
+runs its scripts or executable. Extraction has a 30-second timeout, a 512 MiB
+input limit and a 64 MiB application limit. The managed copy is mode 0600 inside
+a mode 0700 `references` directory beside `session.json`. Reimporting the same
+application reuses that copy. Failed imports preserve the configured reference.
+Other application versions are rejected until their identity and format are
+verified.
+
+**Advanced: use an extracted executable** retains the original manual path
+option. **Clear reference** removes the saved selection without deleting the
+cached file. The command-line package installer also accepts:
 
 ```sh
 deckforge install example.streamDeckPlugin --destination /path/to/plugins \
@@ -35,6 +51,9 @@ The supplied Discord 2.4.0.123 package contains 179 listed files; all match the
 recovered checksum algorithm, and 54 are required by the original manifest.
 Tests cover a valid inert installation, missing and changed required members,
 optional-member changes, and required-file revalidation after installation.
+The supplied macOS installer also passes the real extraction test. Its universal
+application authenticates the same Discord manifest as the Windows reference,
+including all required-file checks. Altered application bytes are rejected.
 These tests never execute the vendor backend.
 
 ## Runtime compatibility

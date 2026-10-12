@@ -21,7 +21,7 @@ use std::{
 pub(crate) fn read_manifest(bytes: &[u8]) -> Result<Value> {
     ensure!(
         !bytes.starts_with(b"ELGATO"),
-        "This plugin has an Elgato-protected manifest. Supply the original Stream Deck application with --reference-app to authenticate and verify it."
+        "This plugin has an Elgato-protected manifest. In Plugins, import the supported Elgato installer under Protected Elgato packages, then retry. Command-line installs can use --reference-app with the original application."
     );
     serde_json::from_slice(bytes).context("Invalid plugin manifest JSON")
 }

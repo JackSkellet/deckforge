@@ -671,6 +671,14 @@ export default function App() {
     if (!savedOnly(destination?.context, "replacing this action")) return;
 
     const metadata = snapshot?.actions.find((a) => a.uuid === uuid);
+    if (metadata?.enabled === false) {
+      onError(
+        new Error(
+          "Enable this plugin in Plugins before assigning its actions.",
+        ),
+      );
+      return;
+    }
     if (!metadata || !allowed(metadata, target.controller)) {
       onError(new Error("This action does not support that control."));
       return;
@@ -690,6 +698,7 @@ export default function App() {
   async function testPress() {
     if (
       !slot ||
+      slot.plugin_disabled ||
       !snapshot ||
       !acceptsInput(snapshot, slot.controller, slot.index)
     )
@@ -1252,12 +1261,15 @@ export default function App() {
                 {slot && (
                   <>
                     {slot.controller !== "Neo" && (
-                      <button onClick={testPress} disabled={!selectedAvailable}>
+                      <button
+                        onClick={testPress}
+                        disabled={!selectedAvailable || slot.plugin_disabled}
+                      >
                         Test{" "}
                         {selected.controller === "Keypad" ? "press" : "push"}
                       </button>
                     )}
-                    {slot.has_inspector && (
+                    {slot.has_inspector && !slot.plugin_disabled && (
                       <button
                         className="primary"
                         onClick={() =>
@@ -1394,11 +1406,24 @@ export default function App() {
                         />
                       </AppearanceEditor>
                     )}
-                    {slot.available === false && (
+                    {slot.plugin_disabled ? (
                       <p className="warning">
-                        This action's plugin is unavailable. Its settings are
-                        preserved; install or restart the plugin to use it.
+                        This plugin is disabled. Its settings and draft are
+                        preserved.{" "}
+                        <button
+                          type="button"
+                          onClick={() => setPanel("plugins")}
+                        >
+                          Enable plugin in Plugins
+                        </button>
                       </p>
+                    ) : (
+                      slot.available === false && (
+                        <p className="warning">
+                          This action's plugin is unavailable. Its settings are
+                          preserved; install or restart the plugin to use it.
+                        </p>
+                      )
                     )}
                     {draft.dirty && draft.source !== sourceOf(slot) && (
                       <p className="warning">
@@ -1487,68 +1512,70 @@ export default function App() {
                 </form>
               )
             )}
-            {slot?.controller === "Encoder" && selectedAvailable && (
-              <div className="test-controls">
-                <span>Test dial</span>
-                {[-1, 1].map((ticks) => (
-                  <button
-                    key={ticks}
-                    onClick={() =>
-                      run({
-                        command: "input",
-                        event: "dialRotate",
-                        index: slot.index,
-                        ticks,
-                      })
-                    }
-                  >
-                    {ticks < 0 ? "↶ Turn left" : "Turn right ↷"}
-                  </button>
-                ))}
-                {hasTouchscreen(snapshot) && (
-                  <button
-                    onClick={() =>
-                      run({
-                        command: "input",
-                        event: "touchTap",
-                        index: slot.index,
-                      })
-                    }
-                  >
-                    Tap screen
-                  </button>
-                )}
-                {hasTouchscreen(snapshot) && (
-                  <button
-                    onClick={() =>
-                      run({
-                        command: "input",
-                        event: "touchTap",
-                        index: slot.index,
-                        hold: true,
-                      })
-                    }
-                  >
-                    Hold screen
-                  </button>
-                )}
-                {slot.uuid === STACK &&
-                  slot.stack_children?.map((child, i) => (
+            {slot?.controller === "Encoder" &&
+              selectedAvailable &&
+              !slot.plugin_disabled && (
+                <div className="test-controls">
+                  <span>Test dial</span>
+                  {[-1, 1].map((ticks) => (
                     <button
-                      key={child.context}
+                      key={ticks}
                       onClick={() =>
                         run({
-                          command: "stack_select",
-                          context: slot.context,
-                          index: i,
+                          command: "input",
+                          event: "dialRotate",
+                          index: slot.index,
+                          ticks,
                         })
                       }
                     >
-                      {child.name}
+                      {ticks < 0 ? "↶ Turn left" : "Turn right ↷"}
                     </button>
                   ))}
-              </div>
-            )}
+                  {hasTouchscreen(snapshot) && (
+                    <button
+                      onClick={() =>
+                        run({
+                          command: "input",
+                          event: "touchTap",
+                          index: slot.index,
+                        })
+                      }
+                    >
+                      Tap screen
+                    </button>
+                  )}
+                  {hasTouchscreen(snapshot) && (
+                    <button
+                      onClick={() =>
+                        run({
+                          command: "input",
+                          event: "touchTap",
+                          index: slot.index,
+                          hold: true,
+                        })
+                      }
+                    >
+                      Hold screen
+                    </button>
+                  )}
+                  {slot.uuid === STACK &&
+                    slot.stack_children?.map((child, i) => (
+                      <button
+                        key={child.context}
+                        onClick={() =>
+                          run({
+                            command: "stack_select",
+                            context: slot.context,
+                            index: i,
+                          })
+                        }
+                      >
+                        {child.name}
+                      </button>
+                    ))}
+                </div>
+              )}
           </section>
         </main>
         <aside className="action-sidebar">
@@ -1597,10 +1624,20 @@ export default function App() {
                   .filter((a) => a.category === category)
                   .map((a) => (
                     <div
-                      className="library-action"
+                      className={`library-action${a.enabled === false ? " plugin-disabled" : ""}`}
+                      title={
+                        a.enabled === false
+                          ? "Enable this plugin in Plugins to assign its actions."
+                          : a.tooltip
+                      }
+                      aria-disabled={a.enabled === false}
                       key={a.uuid}
-                      draggable={!readonly}
+                      draggable={!readonly && a.enabled !== false}
                       onDragStart={(event) => {
+                        if (readonly || a.enabled === false) {
+                          event.preventDefault();
+                          return;
+                        }
                         event.dataTransfer.setData(
                           "application/x-deckforge-action",
                           a.uuid,
@@ -1616,6 +1653,7 @@ export default function App() {
                       <div className="action-copy">
                         <strong>{a.name}</strong>
                         <small>
+                          {a.enabled === false ? "Disabled · " : ""}
                           {a.controllers
                             .filter((c) => availableControllers.includes(c))
                             .map((c) => controlName(c, snapshot))

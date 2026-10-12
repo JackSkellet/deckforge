@@ -81,6 +81,10 @@ impl Host {
             .position(|p| p.id == action.plugin)
             .context("Plugin missing")?;
         let plugin = &self.plugins[plugin_index];
+        anyhow::ensure!(
+            self.plugin_enabled(plugin),
+            "Enable this plugin before opening its settings"
+        );
         let path = action.raw["PropertyInspectorPath"]
             .as_str()
             .or_else(|| plugin.manifest["PropertyInspectorPath"].as_str())

@@ -27,6 +27,7 @@ mod plugin_localization;
 mod preferences;
 mod profile;
 mod protected_manifest;
+mod reference_import;
 mod render;
 mod resources;
 mod screensaver;

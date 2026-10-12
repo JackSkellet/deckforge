@@ -17,12 +17,12 @@ use axum::{
     routing::{get, post},
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
-use futures_util::{SinkExt, StreamExt};
+use futures_util::StreamExt;
 use image::{DynamicImage, GenericImage, Rgb, RgbImage};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
-    collections::{BTreeMap, HashMap, HashSet, VecDeque},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
     fs::{self, File},
     io::Cursor,
     path::{Path, PathBuf},
@@ -51,12 +51,14 @@ mod mixer;
 mod mixer_actions;
 mod multiaction;
 mod plugins;
+mod reference;
 mod resources;
 mod screensaver;
 mod settings;
 mod stack;
 mod system_events;
 mod transfer;
+mod transport;
 mod trigger;
 mod volume;
 use crate::device_model::Model;
@@ -290,8 +292,20 @@ fn stop_child(child: &mut Option<Child>) {
         let _ = child.wait();
     }
 }
+impl Plugin {
+    /// Revoke new output and give the independent writer a bounded flush window.
+    /// This is transport completion, not acknowledgement of plugin side effects.
+    fn drain_output(&mut self) -> bool {
+        self.sender = None;
+        self.runtime
+            .output_drain
+            .take()
+            .is_none_or(|drain| drain.wait())
+    }
+}
 impl Drop for Plugin {
     fn drop(&mut self) {
+        let _ = self.drain_output();
         stop_child(&mut self.child);
     }
 }
@@ -329,6 +343,8 @@ mod image_serde {
 }
 #[derive(Serialize, Deserialize, Default)]
 struct Saved {
+    #[serde(default)]
+    disabled_plugins: BTreeSet<PathBuf>,
     #[serde(default = "localization::default_preference")]
     plugin_language: String,
     #[serde(default)]
@@ -365,6 +381,7 @@ enum HeldControl {
     Dial(u8),
 }
 struct Host {
+    disabled_plugins: BTreeSet<PathBuf>,
     plugin_language: String,
     language: &'static str,
     localizations: HashMap<String, crate::plugin_localization::Presentation>,
@@ -506,6 +523,7 @@ impl Host {
             globals: &'a HashMap<String, Value>,
             application_mappings: &'a applications::Mappings,
             plugin_language: &'a str,
+            disabled_plugins: &'a BTreeSet<PathBuf>,
         }
         let data = serde_json::to_vec_pretty(&View {
             devices: self.device_records(),
@@ -523,6 +541,7 @@ impl Host {
             globals: &self.globals,
             application_mappings: &self.application_mappings,
             plugin_language: &self.plugin_language,
+            disabled_plugins: &self.disabled_plugins,
         })?;
         {
             use std::io::Write;
@@ -814,6 +833,10 @@ impl Host {
             .find(|a| a.uuid == uuid && a.controllers.iter().any(|c| c == controller))
             .cloned()
             .context("Action is not installed or does not support this controller")?;
+        anyhow::ensure!(
+            !self.action_plugin_disabled(&action.uuid),
+            "Enable this plugin before assigning its actions"
+        );
         if (controller == "Encoder" && self.model.capabilities().strip) || controller == "Neo" {
             let root = self
                 .plugins
@@ -1579,7 +1602,7 @@ async fn root(
     Html(include_str!("ui.html").replace("__TOKEN__", &token)).into_response()
 }
 fn slot_snapshot(host: &Host, s: &Slot) -> Value {
-    json!({"appearance":appearance::snapshot(s,&host.actions),"state_count":appearance::count(s,&host.actions),"available":host.actions.iter().any(|a|a.uuid==s.uuid),"pinned":s.pinned,"context":s.context,"controller":s.controller,"index":s.index,"uuid":s.uuid,"name":host.presented_slot_name(s),"state_names":host.state_names(s),"settings":s.settings,"resources":s.resources.clone().unwrap_or_default(),"title":s.title,"state":s.state,"feedback":s.feedback,"layout":s.layout,"preview":s.preview,"raw":s.raw,
+    json!({"appearance":appearance::snapshot(s,&host.actions),"state_count":appearance::count(s,&host.actions),"plugin_disabled":host.action_plugin_disabled(&s.uuid),"available":host.actions.iter().any(|a|a.uuid==s.uuid)&&!host.action_plugin_disabled(&s.uuid),"pinned":s.pinned,"context":s.context,"controller":s.controller,"index":s.index,"uuid":s.uuid,"name":host.presented_slot_name(s),"state_names":host.state_names(s),"settings":s.settings,"resources":s.resources.clone().unwrap_or_default(),"title":s.title,"state":s.state,"feedback":s.feedback,"layout":s.layout,"preview":s.preview,"raw":s.raw,
         "trigger_description":host.trigger_description(s),
         "trigger_children":if s.uuid==crate::action_trigger::UUID {s.children.iter().map(|g|g.first().map(|c|slot_snapshot(host,c)).unwrap_or(Value::Null)).collect::<Vec<_>>()}else{vec![]},
         "stack_children":if s.uuid==crate::dial_stack::UUID {s.children.first().map(|children|children.iter().map(|c|slot_snapshot(host,c)).collect::<Vec<_>>()).unwrap_or_default()}else{vec![]},
@@ -1616,7 +1639,7 @@ fn action_snapshot(host: &Host, action: &Action) -> Value {
     };
     json!({
         "uuid":action.uuid,"name":presentation["Name"].as_str().unwrap_or(&action.name),"plugin":action.plugin,
-        "source_name":action.name,"source_states":action.raw["States"],
+        "source_name":action.name,"source_states":action.raw["States"],"enabled":!host.action_plugin_disabled(&action.uuid),
         "plugin_name":plugin_name,
         "category":plugin.map(|p|p.manifest["Category"].as_str().unwrap_or(plugin_name)).unwrap_or(category),
         "icon":action.raw["Icon"],"plugin_root":plugin.map(|p|p.root.as_path()),
@@ -1699,6 +1722,7 @@ fn apply_control(host: &mut Host, r: Value) -> Result<()> {
             | "system_wake"
             | "plugin_applications"
             | "plugin_language"
+            | "plugin_enabled"
             | "restart_plugin"
             | "reference_app"
             | "mixer_config"
@@ -1857,6 +1881,7 @@ fn apply_control_local(host: &mut Host, r: Value) -> Result<()> {
         "restart_plugin" => host.restart_plugin(r["id"].as_str().context("Plugin id missing")?),
         "plugin_applications" => host.save_application_mappings(&r),
         "plugin_language" => host.save_plugin_language(&r),
+        "plugin_enabled" => host.set_plugin_enabled(&r),
         "install_plugin" => {
             let state_dir = host
                 .state_path
@@ -1891,7 +1916,11 @@ fn apply_control_local(host: &mut Host, r: Value) -> Result<()> {
             {
                 bail!("Plugin declares an action UUID already owned by another installed plugin");
             }
-            if !plugins[0].runtime.load_failed
+            if host.disabled_plugins.contains(&plugins[0].root) {
+                plugins[0].runtime.status = "disabled";
+            }
+            if host.plugin_enabled(&plugins[0])
+                && !plugins[0].runtime.load_failed
                 && let Err(error) = launch_plugin(
                     &mut plugins[0],
                     &host.registration_devices(),
@@ -2076,7 +2105,7 @@ enum Client {
     Inspector(String),
 }
 async fn socket_session(socket: WebSocket, state: Shared) {
-    let (mut sink, mut stream) = socket.split();
+    let (sink, mut stream) = socket.split();
     let registration = tokio::time::timeout(Duration::from_secs(5), stream.next()).await;
     let Some(Ok(Message::Text(text))) = registration.ok().flatten() else {
         return;
@@ -2084,12 +2113,14 @@ async fn socket_session(socket: WebSocket, state: Shared) {
     let Ok(frame) = serde_json::from_str::<Value>(&text) else {
         return;
     };
-    let (sender, mut receiver) = mpsc::unbounded_channel();
+    let (sender, receiver) = mpsc::unbounded_channel();
+    let drain = transport::Drain::default();
     let client = {
         let mut host = state.lock().unwrap();
         if frame["event"] == "registerPlugin" {
             let Some(index) = host.plugins.iter().position(|p| {
-                frame["uuid"] == p.registration
+                host.plugin_enabled(p)
+                    && frame["uuid"] == p.registration
                     && p.sender.is_none()
                     && matches!(p.runtime.status, "starting" | "disconnected")
             }) else {
@@ -2099,6 +2130,7 @@ async fn socket_session(socket: WebSocket, state: Shared) {
             let session = uuid::Uuid::new_v4().to_string();
             host.plugins[index].sender = Some(sender);
             host.plugins[index].runtime.session = Some(session.clone());
+            host.plugins[index].runtime.output_drain = Some(drain.clone());
             host.plugins[index].runtime.status = "connected";
             host.plugins[index].runtime.error = None;
             host.hydrate_resources();
@@ -2161,21 +2193,16 @@ async fn socket_session(socket: WebSocket, state: Shared) {
             return;
         }
     };
+    // The writer never takes Host's mutex. Disabling/restarting may hold that
+    // mutex while waiting for queued cleanup frames to leave this channel.
+    let (controls, control_rx) = mpsc::channel(16);
+    let mut writer = transport::Writer(tokio::spawn(transport::write(
+        sink, receiver, control_rx, drain,
+    )));
+    let mut writer_done = false;
     loop {
-        if let Client::Plugin {
-            index,
-            launch,
-            session,
-        } = &client
-            && !state
-                .lock()
-                .unwrap()
-                .plugin_session_current(*index, launch, session)
-        {
-            break;
-        }
         tokio::select! {
-            outgoing=receiver.recv()=>{let Some(outgoing)=outgoing else{break;};if sink.send(Message::Text(outgoing.to_string().into())).await.is_err(){break;}}
+            _=&mut writer.0=>{writer_done=true;break;},
             incoming=stream.next()=>{match incoming {
                 Some(Ok(Message::Text(text)))=>{
                     let result=serde_json::from_str::<Value>(&text).map_err(anyhow::Error::from).and_then(|message|{
@@ -2183,11 +2210,16 @@ async fn socket_session(socket: WebSocket, state: Shared) {
                     });
                     if let Err(error)=result {state.lock().unwrap().log(format!("SDK command rejected: {error}"));}
                 }
-                Some(Ok(Message::Ping(data)))=>{if sink.send(Message::Pong(data)).await.is_err(){break;}}
+                Some(Ok(Message::Ping(data)))=>{if controls.try_send(Message::Pong(data)).is_err(){break;}},
                 Some(Ok(Message::Close(_)))|None|Some(Err(_))=>break,
                 _=>{}
             }}
         }
+    }
+    // A lost peer/reader must not leave an orphan writer awaiting Host messages.
+    if !writer_done {
+        writer.0.abort();
+        let _ = (&mut writer.0).await;
     }
     let mut host = state.lock().unwrap();
     match client {
@@ -2210,6 +2242,10 @@ fn launch_plugins(host: &mut Host, port: u16, state_dir: &Path) {
     let devices = host.registration_devices();
     let mut failures = Vec::new();
     for plugin in &mut host.plugins {
+        if host.disabled_plugins.contains(&plugin.root) {
+            plugin.runtime.status = "disabled";
+            continue;
+        }
         if plugin.runtime.load_failed {
             continue;
         }
@@ -2675,6 +2711,7 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
         slots,
         globals: saved.globals,
         application_mappings: saved.application_mappings,
+        disabled_plugins: saved.disabled_plugins,
         plugin_language,
         language,
         localizations: HashMap::new(),
@@ -3024,11 +3061,19 @@ fn stop_plugins(host: &mut Host) {
     if let Some(redraw) = &host.redraw {
         redraw();
     }
+    let mut incomplete_drains = Vec::new();
     for plugin in &mut host.plugins {
-        plugin.sender = None;
         plugin.runtime.session = None;
         plugin.runtime.status = "stopped";
+        if !plugin.drain_output() {
+            incomplete_drains.push(plugin.id.clone());
+        }
         stop_child(&mut plugin.child);
+    }
+    for id in incomplete_drains {
+        host.log(format!(
+            "Plugin output drain failed or timed out; stopped owned child: {id}"
+        ));
     }
 }
 
@@ -3218,6 +3263,7 @@ mod tests {
             }],
             globals: HashMap::new(),
             application_mappings: HashMap::new(),
+            disabled_plugins: BTreeSet::new(),
             plugin_language: "system".into(),
             language: "en",
             localizations: HashMap::new(),

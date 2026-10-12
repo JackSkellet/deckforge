@@ -14,8 +14,8 @@ are dependencies. Linux HTML support uses system GTK3 and WebKitGTK4.1 libraries
 This is a working early compatibility build, **not a complete port of Elgato's
 application**. Its first targets are the unchanged official Counter and Layouts
 feedback sample plugins. Elgato's Windows executable is never run. The supported
-protected Marketplace format can optionally use a local executable as a static
-key reference during package verification and plugin loading.
+protected Marketplace format can import the original macOS 7.6.0.23012 installer
+to obtain a local static verification reference. No vendor executable is run.
 
 ## Device models
 
@@ -90,11 +90,16 @@ Right-click a control or use **Edit** to copy, cut, paste or remove it. Dragging
 between occupied controls swaps them; Ctrl-drag copies. See
 [Action editing](docs/ACTION_EDITING.md) for shortcuts, folder copies and draft
 protection. [Protected packages](docs/PROTECTED_PACKAGES.md) describes the optional
-static reference needed by some Marketplace downloads.
+static reference needed by some Marketplace downloads. Use **Plugins → Import
+Elgato installer** to extract it from the supported `.pkg` without entering an
+executable path or logging into Elgato.
 Use **Plugin settings…** to open an action's original HTML property inspector
 when its manifest provides one. Advanced JSON editing remains available. Draft changes survive periodic refresh
 and switching between controls. **Plugins** contains installation and runtime
-status; the left sidebar manages profiles and imports. Title editing, removal and input
+status, Enable, Disable and Restart. Disabling a plugin stops its backend and
+inspectors while preserving assignments and settings, and remains in effect
+after restarting Deckforge. See [plugin lifecycle](docs/PLUGIN_LIFECYCLE.md).
+The left sidebar manages profiles and imports. Title editing, removal and input
 testing stay with the selected control. Closing or hiding the editor
 keeps the device and plugins running. Open Deckforge again from the launcher or
 tray to restore the editor, including unsaved drafts. **Quit** in the editor or

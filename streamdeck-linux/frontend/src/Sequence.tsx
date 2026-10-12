@@ -243,7 +243,10 @@ export function Sequence({
         </select>
         <button
           type="button"
-          disabled={!add || (trigger && selected === null)}
+          disabled={
+            !compatible.some((action) => action.uuid === add) ||
+            (trigger && selected === null)
+          }
           onClick={() => {
             const action = compatible.find((a) => a.uuid === add);
             if (!action) return;
@@ -267,7 +270,7 @@ export function Sequence({
           <div className="section-label">
             {childLabel(selectedEntry, "Selected action")}
           </div>
-          {liveChild?.has_inspector && run && (
+          {liveChild?.has_inspector && !liveChild.plugin_disabled && run && (
             <button
               type="button"
               onClick={() =>

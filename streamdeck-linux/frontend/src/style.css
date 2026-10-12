@@ -2443,3 +2443,28 @@ dialog.mixer-dialog {
 .plugin-application-identity small {
   color: #9eb4c0;
 }
+
+.library-action.plugin-disabled .action-icon {
+  opacity: 0.45;
+}
+.library-action.plugin-disabled .action-copy {
+  color: #9aabb3;
+}
+.library-action.plugin-disabled strong {
+  color: #9aabb3;
+}
+
+.protected-reference {
+  border-top: 1px solid #34434c;
+  padding-top: 14px;
+  margin-top: 18px;
+}
+.reference-controls {
+  border: 0;
+  padding: 0;
+  margin: 12px 0 0;
+  min-width: 0;
+}
+.reference-path {
+  overflow-wrap: anywhere;
+}

@@ -29,6 +29,10 @@ impl Controller {
     }
 }
 impl Host {
+    pub(super) fn discard_plugin_links(&mut self, plugin_id: &str) {
+        self.pending_links
+            .retain(|pending| pending.plugin != plugin_id);
+    }
     fn receive_deep_link(&mut self, link: DeepLink) -> Result<()> {
         anyhow::ensure!(self.running, "Deckforge is shutting down");
         // The original app ignores an empty suffix. A trailing slash is a message.
@@ -44,6 +48,10 @@ impl Host {
             .next()
             .context("The target plugin is not installed")?;
         anyhow::ensure!(matches.next().is_none(), "Plugin identifier is ambiguous");
+        anyhow::ensure!(
+            self.plugin_enabled(plugin),
+            "The target plugin is disabled; enable it before receiving callbacks"
+        );
         let id = plugin.id.clone();
         if plugin.sender.as_ref().is_some_and(|sender| {
             sender
@@ -79,7 +87,7 @@ impl Host {
         let Some(sender) = self
             .plugins
             .iter()
-            .find(|p| p.id == plugin_id)
+            .find(|p| p.id == plugin_id && self.plugin_enabled(p))
             .and_then(|p| p.sender.clone())
         else {
             return;
@@ -105,6 +113,30 @@ impl Host {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn disable_discards_waiting_callbacks_and_rejects_new_ones_without_enabling() {
+        let root = tempfile::tempdir().unwrap();
+        let mut host = super::super::tests::fixture(root.path());
+        let id = host.plugins[0].id.clone();
+        let callback = format!("streamdeck://plugins/message/{id}/auth?code=PRIVATE_PENDING");
+        host.receive_deep_link(DeepLink::parse(&callback).unwrap())
+            .unwrap();
+        assert_eq!(host.pending_links.len(), 1);
+        host.set_plugin_enabled(&json!({"id":id,"enabled":false,"expected_enabled":true}))
+            .unwrap();
+        assert!(host.pending_links.is_empty());
+        assert!(
+            host.receive_deep_link(DeepLink::parse(&callback).unwrap())
+                .is_err()
+        );
+        assert!(host.pending_links.is_empty());
+        assert!(!host.plugin_enabled(&host.plugins[0]));
+        assert!(
+            !fs::read_to_string(&host.state_path)
+                .unwrap()
+                .contains("PRIVATE_PENDING")
+        );
+    }
     #[test]
     fn callback_waits_for_its_plugin_once_and_never_enters_saved_state() {
         let root = tempfile::tempdir().unwrap();

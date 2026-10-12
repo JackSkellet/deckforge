@@ -84,6 +84,7 @@ fn matches(process: &Process, executable: &str) -> bool {
 impl Host {
     pub(super) fn plugin_snapshot(&self, plugin: &Plugin) -> Value {
         let mut value = plugin.snapshot();
+        value["enabled"] = json!(self.plugin_enabled(plugin));
         let presentation = self.presented_manifest(plugin);
         value["name"] = json!(presentation["Name"].as_str().unwrap_or(&plugin.name));
         value["description"] = presentation["Description"].clone();

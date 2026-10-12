@@ -91,7 +91,12 @@ const actions = definitions.map(
       name,
       category,
       controllers: [controller],
-      plugin: category === "Discord" ? "discord" : "sample",
+      plugin:
+        category === "Discord"
+          ? "discord"
+          : uuid.startsWith("com.elgato.counter.")
+            ? "sample"
+            : "builtin",
       plugin_name:
         category === "Discord"
           ? "Discord for Deckforge"
@@ -499,6 +504,32 @@ export function installFixture(modelId?: string) {
           if (!source) throw new Error("Unknown source action");
           transfer(source, payload, payload.copy, payload.expected_target);
         }
+        if (payload.command === "plugin_enabled") {
+          const plugin = snapshot.plugins.find(
+            (plugin) => plugin.id === payload.id,
+          );
+          if (!plugin) throw new Error("Plugin not installed");
+          if (payload.expected_enabled !== (plugin.enabled !== false))
+            throw new Error("Plugin state changed; refresh and retry");
+          plugin.enabled = payload.enabled;
+          plugin.connected = payload.enabled;
+          plugin.status = payload.enabled ? "connected" : "disabled";
+          snapshot.actions = snapshot.actions.map((action) =>
+            action.plugin === plugin.id
+              ? { ...action, enabled: payload.enabled }
+              : action,
+          );
+          snapshot.slots = snapshot.slots.map((slot) =>
+            snapshot.actions.find((action) => action.uuid === slot.uuid)
+              ?.plugin === plugin.id
+              ? {
+                  ...slot,
+                  plugin_disabled: !payload.enabled,
+                  available: payload.enabled,
+                }
+              : slot,
+          );
+        }
         if (payload.command === "mixer_config") {
           if (!sameMixerValue(snapshot.mixer.config, payload.expected))
             throw new Error(
@@ -552,6 +583,11 @@ export function installFixture(modelId?: string) {
         if (payload.command === "assign") {
           if (!validControl(snapshot, payload.controller, payload.index))
             throw new Error("Control outside device geometry");
+          if (
+            snapshot.actions.find((action) => action.uuid === payload.uuid)
+              ?.enabled === false
+          )
+            throw new Error("Plugin is disabled");
           snapshot.slots = snapshot.slots.filter(
             (s) =>
               !(

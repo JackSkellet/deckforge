@@ -5,6 +5,7 @@ import type { Snapshot, RecordValue } from "./model";
 import { getFormDraft, setFormDraft } from "./transient";
 import { PluginApplications } from "./PluginApplications";
 import { PluginLanguage } from "./PluginLanguage";
+import { ReferenceInstaller } from "./ReferenceInstaller";
 import { deviceName } from "./device";
 export type Run = (payload: RecordValue) => Promise<boolean>;
 export function Modal({
@@ -62,6 +63,33 @@ export function Plugins({
   onError: (e: unknown) => void;
   error?: string;
 }) {
+  const [pluginBusy, setPluginBusy] = useState<
+    Record<string, "enable" | "disable" | "restart" | undefined>
+  >({});
+  async function pluginCommand(
+    id: string,
+    operation: "enable" | "disable" | "restart",
+    expectedEnabled: boolean,
+  ) {
+    if (pluginBusy[id]) return;
+    setPluginBusy((previous) => ({ ...previous, [id]: operation }));
+    try {
+      await run(
+        operation === "restart"
+          ? { command: "restart_plugin", id }
+          : {
+              command: "plugin_enabled",
+              id,
+              enabled: operation === "enable",
+              expected_enabled: expectedEnabled,
+            },
+      );
+    } catch (error) {
+      onError(error);
+    } finally {
+      setPluginBusy((previous) => ({ ...previous, [id]: undefined }));
+    }
+  }
   const saved = getFormDraft("plugins") ?? {};
   const [path, setPath] = useState(saved.path ?? "");
   const [reference, setReference] = useState(
@@ -135,13 +163,46 @@ export function Plugins({
                   {p.id}
                 </small>
               </div>
-              <span className={"status " + (p.connected ? "good" : "")}>
-                {p.connected ? "Connected" : p.status}
+              <span
+                className={
+                  "status " + (p.enabled !== false && p.connected ? "good" : "")
+                }
+              >
+                {p.enabled === false
+                  ? "Disabled"
+                  : p.connected
+                    ? "Connected"
+                    : p.status}
               </span>
               <button
-                onClick={() => run({ command: "restart_plugin", id: p.id })}
+                type="button"
+                disabled={!!pluginBusy[p.id]}
+                aria-label={`${p.enabled === false ? "Enable" : "Disable"} ${p.name}`}
+                onClick={() =>
+                  void pluginCommand(
+                    p.id,
+                    p.enabled === false ? "enable" : "disable",
+                    p.enabled !== false,
+                  )
+                }
               >
-                Restart
+                {pluginBusy[p.id] === "enable"
+                  ? "Enabling…"
+                  : pluginBusy[p.id] === "disable"
+                    ? "Disabling…"
+                    : p.enabled === false
+                      ? "Enable"
+                      : "Disable"}
+              </button>
+              <button
+                type="button"
+                disabled={p.enabled === false || !!pluginBusy[p.id]}
+                aria-label={`Restart ${p.name}`}
+                onClick={() =>
+                  void pluginCommand(p.id, "restart", p.enabled !== false)
+                }
+              >
+                {pluginBusy[p.id] === "restart" ? "Restarting…" : "Restart"}
               </button>
             </div>
             {p.error && (
@@ -192,40 +253,12 @@ export function Plugins({
           </div>
         )}
       </div>
-      <details className="advanced">
-        <summary>Protected Elgato packages</summary>
-        <p className="hint">
-          Some downloaded packages require the original Stream Deck executable
-          to read their manifest. This does not make Windows executables run on
-          Linux.
-        </p>
-        <Field label="Original Stream Deck executable">
-          <input
-            value={reference}
-            onChange={(e) => setReference(e.target.value)}
-          />
-        </Field>
-        <div className="row">
-          <button
-            onClick={() =>
-              pick("file")
-                .then((value) => {
-                  if (value) setReference(value);
-                })
-                .catch(onError)
-            }
-          >
-            Choose executable…
-          </button>
-          <button
-            onClick={() =>
-              run({ command: "reference_app", path: reference.trim() || null })
-            }
-          >
-            Save reference
-          </button>
-        </div>
-      </details>
+      <ReferenceInstaller
+        configuredPath={snapshot.reference_app}
+        reference={reference}
+        onReferenceChange={setReference}
+        run={run}
+      />
     </>
   );
 }

@@ -8,6 +8,7 @@ pub(super) struct Runtime {
     pub status: &'static str,
     pub error: Option<String>,
     pub session: Option<String>,
+    pub output_drain: Option<super::transport::Drain>,
     pub started: Option<Instant>,
     pub log_path: Option<PathBuf>,
     pub entry_path: Option<PathBuf>,
@@ -21,6 +22,7 @@ impl Default for Runtime {
             status: "stopped",
             error: None,
             session: None,
+            output_drain: None,
             started: None,
             log_path: None,
             entry_path: None,
@@ -182,9 +184,101 @@ pub(super) fn load(
 }
 
 impl Host {
+    pub(super) fn plugin_enabled(&self, plugin: &Plugin) -> bool {
+        !self.disabled_plugins.contains(&plugin.root)
+    }
+    pub(super) fn action_plugin_disabled(&self, uuid: &str) -> bool {
+        self.actions
+            .iter()
+            .find(|a| a.uuid == uuid)
+            .and_then(|a| self.plugins.iter().find(|p| p.id == a.plugin))
+            .is_some_and(|p| !self.plugin_enabled(p))
+    }
+    pub(super) fn set_plugin_enabled(&mut self, request: &Value) -> Result<()> {
+        let id = request["id"].as_str().context("Plugin id missing")?;
+        let enabled = request["enabled"]
+            .as_bool()
+            .context("Plugin enabled state missing")?;
+        let expected = request["expected_enabled"]
+            .as_bool()
+            .context("Expected plugin state missing")?;
+        let index = self
+            .plugins
+            .iter()
+            .position(|p| p.id == id)
+            .context("Plugin is no longer installed")?;
+        let previous = self.plugin_enabled(&self.plugins[index]);
+        anyhow::ensure!(
+            previous == expected,
+            "Plugin state changed; refresh before changing it again"
+        );
+        if previous == enabled {
+            return Ok(());
+        }
+        let root = self.plugins[index].root.clone();
+        if enabled {
+            self.disabled_plugins.remove(&root);
+        } else {
+            self.disabled_plugins.insert(root.clone());
+        }
+        // Commit the preference before disrupting a working process. A failed
+        // save leaves the previous process, inspectors and held controls intact.
+        if let Err(error) = self.persist() {
+            if previous {
+                self.disabled_plugins.remove(&root);
+            } else {
+                self.disabled_plugins.insert(root);
+            }
+            return Err(error);
+        }
+        if enabled {
+            // A launch failure stays visible as enabled-but-failed and can be
+            // retried; it must not silently revert the user's saved preference.
+            return self.restart_plugin(id);
+        }
+        for device in self.device_ids() {
+            if let Err(error) = self.with_device(&device, |host| {
+                host.prepare_plugin_restart(index, id);
+                for slot in host.slots.iter().flat_map(Slot::visible_flatten) {
+                    if host
+                        .actions
+                        .iter()
+                        .any(|a| a.uuid == slot.uuid && a.plugin == id)
+                    {
+                        host.emit(slot, "willDisappear", json!({}));
+                    }
+                }
+                host.sync_visible();
+                Ok(())
+            }) {
+                self.log(format!("Plugin disable cleanup: {error:#}"));
+            }
+        }
+        let plugin = &mut self.plugins[index];
+        plugin.runtime.session = None;
+        plugin.registration = uuid::Uuid::new_v4().to_string();
+        let drained = plugin.drain_output();
+        stop_child(&mut plugin.child);
+        plugin.runtime.status = "disabled";
+        plugin.runtime.started = None;
+        if !drained {
+            self.log(format!(
+                "Plugin output drain failed or timed out; stopped owned child: {id}"
+            ));
+        }
+        self.discard_plugin_links(id);
+        self.application_delivered.remove(id);
+        self.poll_applications();
+        self.log(format!("Plugin disabled: {id}"));
+        if let Some(redraw) = &self.redraw {
+            redraw();
+        }
+        Ok(())
+    }
     pub(super) fn plugin_session_current(&self, index: usize, launch: &str, session: &str) -> bool {
         self.plugins.get(index).is_some_and(|plugin| {
-            plugin.registration == launch
+            self.plugin_enabled(plugin)
+                && plugin.registration == launch
                 && plugin.runtime.session.as_deref() == Some(session)
                 && plugin.sender.is_some()
         })
@@ -211,6 +305,10 @@ impl Host {
             .iter()
             .position(|p| p.id == id)
             .context("Plugin is no longer installed")?;
+        anyhow::ensure!(
+            self.plugin_enabled(&self.plugins[index]),
+            "Enable the plugin before restarting it"
+        );
         let root = self.plugins[index].root.clone();
         let state = self
             .state_path
@@ -224,10 +322,15 @@ impl Host {
                 Ok(())
             })?;
         }
-        self.plugins[index].sender = None;
         self.plugins[index].runtime.session = None;
         self.plugins[index].registration = uuid::Uuid::new_v4().to_string();
+        let drained = self.plugins[index].drain_output();
         stop_child(&mut self.plugins[index].child);
+        if !drained {
+            self.log(format!(
+                "Plugin output drain failed or timed out; stopped owned child: {id}"
+            ));
+        }
         let result = (|| {
             let (mut plugin, incoming) = parse(&root, self.reference_app.as_deref())?;
             if self
@@ -388,6 +491,55 @@ impl Host {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn disabled_preference_is_durable_and_failed_save_does_not_disrupt_runtime() {
+        let root = tempfile::tempdir().unwrap();
+        let mut host = crate::host::tests::fixture(root.path());
+        let id = host.plugins[0].id.clone();
+        let original = serde_json::to_value(host.device_records()).unwrap();
+        let (sender, mut events) = mpsc::unbounded_channel();
+        host.plugins[0].sender = Some(sender);
+        host.plugins[0].registration = "old-launch".into();
+        host.plugins[0].runtime.session = Some("old-session".into());
+        host.plugins[0].runtime.status = "connected";
+        let state_path = host.state_path.clone();
+        host.state_path = root.path().join("missing/session.json");
+        let disable = json!({"id":id,"enabled":false,"expected_enabled":true});
+        assert!(host.set_plugin_enabled(&disable).is_err());
+        assert!(host.plugin_session_current(0, "old-launch", "old-session"));
+        assert!(host.disabled_plugins.is_empty());
+        assert!(events.try_recv().is_err());
+        host.state_path = state_path;
+        host.set_plugin_enabled(&disable).unwrap();
+        assert!(!host.plugin_session_current(0, "old-launch", "old-session"));
+        assert_eq!(host.plugins[0].runtime.status, "disabled");
+        assert!(host.plugins[0].sender.is_none() && host.plugins[0].child.is_none());
+        assert_eq!(
+            serde_json::to_value(host.device_records()).unwrap(),
+            original
+        );
+        let saved: Saved = serde_json::from_slice(&fs::read(&host.state_path).unwrap()).unwrap();
+        assert!(saved.disabled_plugins.contains(&host.plugins[0].root));
+        assert_eq!(snapshot(&host)["plugins"][0]["enabled"], false);
+        assert_eq!(snapshot(&host)["slots"][0]["plugin_disabled"], true);
+        assert_eq!(snapshot(&host)["slots"][0]["available"], false);
+        assert!(host.restart_plugin(&id).is_err());
+        let context = host.slots[0].context.clone();
+        assert!(host.open_inspector(&context).is_err());
+        assert!(host.assign("Keypad", 1, "test.action").is_err());
+        assert!(host.set_plugin_enabled(&disable).is_err()); // stale UI state
+        host.plugin_disconnected(0, "old-launch", "old-session");
+        host.monitor_plugins();
+        assert_eq!(host.plugins[0].runtime.status, "disabled");
+        // A bad manifest on explicit enable is a visible launch failure, not an
+        // implicit undo of the user's saved preference.
+        assert!(
+            host.set_plugin_enabled(&json!({"id":id,"enabled":true,"expected_enabled":false}))
+                .is_err()
+        );
+        assert!(host.plugin_enabled(&host.plugins[0]));
+        assert_eq!(host.plugins[0].runtime.status, "failed");
+    }
     #[test]
     fn missing_malformed_and_builtin_claiming_plugins_remain_visible_without_actions() {
         let root = tempfile::tempdir().unwrap();

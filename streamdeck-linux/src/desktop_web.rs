@@ -80,6 +80,7 @@ struct Shared {
     refresh_queued: AtomicBool,
     snapshot_queued: AtomicBool,
     picker: AtomicBool,
+    importing_reference: AtomicBool,
 }
 impl Shared {
     fn notify(&self, event: UiEvent) {
@@ -121,6 +122,7 @@ impl Worker {
             refresh_queued: AtomicBool::new(false),
             snapshot_queued: AtomicBool::new(false),
             picker: AtomicBool::new(false),
+            importing_reference: AtomicBool::new(false),
         });
         let redraw = shared.clone();
         let redraw_sender = sender.clone();
@@ -159,6 +161,35 @@ impl Worker {
                                     picker.picker.store(false, Ordering::Release);
                                     reply(&picker, generation, request.id, result);
                                 });
+                            } else if request.method == "reference_import" {
+                                if work.importing_reference.swap(true, Ordering::AcqRel) {
+                                    reply(
+                                        &work,
+                                        generation,
+                                        request.id,
+                                        Err(anyhow::anyhow!(
+                                            "An installer import is already running"
+                                        )),
+                                    );
+                                    continue;
+                                }
+                                let importer = work.clone();
+                                let importer_controller = controller.clone();
+                                let request_id = request.id.clone();
+                                let spawned = std::thread::Builder::new()
+                                    .name("reference-import".into())
+                                    .spawn(move || {
+                                        let result =
+                                            import_reference(&importer_controller, request.payload);
+                                        importer
+                                            .importing_reference
+                                            .store(false, Ordering::Release);
+                                        reply(&importer, generation, request.id, result);
+                                    });
+                                if let Err(error) = spawned {
+                                    work.importing_reference.store(false, Ordering::Release);
+                                    reply(&work, generation, request_id, Err(error.into()));
+                                }
                             } else {
                                 let result = dispatch(
                                     &controller,
@@ -241,6 +272,15 @@ fn parse_request(origin: &str, body: &str) -> Result<Request> {
     ensure!(request.method.len() <= 64, "Invalid editor method");
     Ok(request)
 }
+fn import_reference(controller: &Controller, payload: Value) -> Result<Value> {
+    let path = payload["path"].as_str().context("Installer path missing")?;
+    let expected: Option<PathBuf> = serde_json::from_value(payload["expected"].clone())
+        .context("Previous reference selection missing")?;
+    Ok(serde_json::to_value(
+        controller.import_reference(Path::new(path), expected.as_deref())?,
+    )?)
+}
+
 fn dispatch(
     controller: &Controller,
     state: &Path,
@@ -322,6 +362,9 @@ fn pick_file(payload: &Value) -> Result<Value> {
         .as_str()
         .context("Missing file dialog kind")?
     {
+        "reference_installer" => dialog
+            .add_filter("Stream Deck macOS installer", &["pkg"])
+            .pick_file(),
         "plugin" => dialog
             .add_filter("Stream Deck plugin", &["streamDeckPlugin"])
             .pick_file(),
