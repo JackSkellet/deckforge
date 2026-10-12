@@ -44,6 +44,7 @@ mod export;
 mod feedback;
 mod inspectors;
 mod library;
+mod links;
 mod mixer;
 mod mixer_actions;
 mod multiaction;
@@ -357,6 +358,7 @@ enum HeldControl {
     Dial(u8),
 }
 struct Host {
+    pending_links: VecDeque<links::Pending>,
     registry_routes: HashMap<crate::device_registry::Key, String>,
     registry_commands: Option<std::sync::mpsc::Sender<crate::device_registry::Command>>,
     forgetting_devices: HashSet<crate::device_registry::Key>,
@@ -1271,6 +1273,9 @@ impl Host {
             return self.plugin_switch_profile(plugin_index, &message);
         }
         let plugin = &self.plugins[plugin_index];
+        if event == "openUrl" {
+            return crate::external_url::open(payload["url"].as_str().context("Missing link URL")?);
+        }
         if event == "logMessage" {
             self.log(format!(
                 "{}: {}",
@@ -2072,6 +2077,8 @@ async fn socket_session(socket: WebSocket, state: Shared) {
                     host.log(format!("Device replay failed: {error:#}"));
                 }
             }
+            // Callback messages follow registration and visible-action replay.
+            host.flush_deep_links(&id);
             Client::Plugin {
                 index,
                 launch,
@@ -2541,6 +2548,7 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
         controls.insert(device.clone(), previous_controls);
     }
     let mut host = Host {
+        pending_links: VecDeque::new(),
         registry_routes: HashMap::new(),
         registry_commands: None,
         forgetting_devices: HashSet::new(),
@@ -3035,6 +3043,7 @@ mod tests {
     }
     pub(super) fn fixture(root: &Path) -> Host {
         let mut host = Host {
+            pending_links: VecDeque::new(),
             registry_routes: HashMap::new(),
             registry_commands: None,
             forgetting_devices: HashSet::new(),

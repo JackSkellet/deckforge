@@ -143,8 +143,10 @@ the Rust executable, with no server needed at runtime. Rebuild the frontend befo
 compiling Rust after editor changes. `desktop --legacy-editor` temporarily retains
 the earlier egui editor as a migration fallback.
 
-The per-user installer changes only its executable, icon and launcher; it keeps
-replaced files as `.previous`. It does not install system packages, a startup
+The per-user installer updates its executable, icon and launcher, keeping replaced
+files as `.previous`. It also registers `streamdeck://` plugin links when no other
+default handler is configured; existing handlers are preserved. See
+[Plugin browser links and callbacks](docs/PLUGIN_URLS.md). It does not install system packages, a startup
 service or udev rules. It leaves application settings unchanged. Your Linux seat
 or udev configuration must grant access to the device. No device reset or firmware
 write is used.

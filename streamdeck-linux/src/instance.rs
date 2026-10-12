@@ -28,9 +28,10 @@ use tokio::{
     time::timeout,
 };
 
-const LIMIT: usize = 4096;
+const LIMIT: usize = 16 * 1024;
 const TIMEOUT: Duration = Duration::from_secs(1);
 type Callback = Arc<dyn Fn(Command) -> Result<Value> + Send + Sync>;
+type LinkCallback = Arc<dyn Fn(&str) -> Result<Value> + Send + Sync>;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -50,6 +51,19 @@ struct Message {
 }
 
 #[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LinkMessage {
+    state: String,
+    uri: String,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+enum Request {
+    Window(Message),
+    Link(LinkMessage),
+}
+
+#[derive(Serialize, Deserialize)]
 #[serde(
     tag = "status",
     content = "value",
@@ -64,6 +78,28 @@ enum Reply {
 /// Returns None only for a missing state/socket or a refused socket connection.
 /// A slow, inaccessible, malformed, or mismatched server is an error. Never unlinks.
 pub fn request(state: &Path, command: Command) -> Result<Option<Value>> {
+    request_message(state, move |state| {
+        Request::Window(Message { state, command })
+    })
+}
+
+pub fn request_deep_link(state: &Path, uri: &str) -> Result<Option<Value>> {
+    crate::deep_link::DeepLink::parse(uri)?;
+    let uri = uri.to_owned();
+    // Validate serialized size even when no endpoint exists.
+    line(&LinkMessage {
+        state: "0".repeat(64),
+        uri: uri.clone(),
+    })?;
+    request_message(state, move |state| {
+        Request::Link(LinkMessage { state, uri })
+    })
+}
+
+fn request_message(
+    state: &Path,
+    message: impl FnOnce(String) -> Request + Send,
+) -> Result<Option<Value>> {
     let canonical = match state.canonicalize() {
         Ok(path) => path,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -80,10 +116,7 @@ pub fn request(state: &Path, command: Command) -> Result<Option<Value>> {
             let Some(mut stream) = open(&endpoint.path).await? else {
                 return Ok(None);
             };
-            let bytes = line(&Message {
-                state: endpoint.identity,
-                command,
-            })?;
+            let bytes = line(&message(endpoint.identity))?;
             stream
                 .write_all(&bytes)
                 .await
@@ -103,6 +136,18 @@ pub fn request(state: &Path, command: Command) -> Result<Option<Value>> {
 /// The caller must already own the state directory's session.lock. Refuses live
 /// sockets and foreign files. Only a refused, unchanged socket may be replaced.
 pub fn spawn(state: &Path, callback: Callback) -> Result<Server> {
+    spawn_with_deep_links(
+        state,
+        callback,
+        Arc::new(|_| bail!("This editor does not support plugin deep links")),
+    )
+}
+
+pub fn spawn_with_deep_links(
+    state: &Path,
+    callback: Callback,
+    link_callback: LinkCallback,
+) -> Result<Server> {
     let endpoint = Endpoint::new(
         &state
             .canonicalize()
@@ -142,7 +187,13 @@ pub fn spawn(state: &Path, callback: Callback) -> Result<Server> {
     let thread = thread::Builder::new()
         .name("deckforge-instance".into())
         .spawn(move || {
-            runtime.block_on(serve(listener, endpoint.identity, callback, stopped));
+            runtime.block_on(serve(
+                listener,
+                endpoint.identity,
+                callback,
+                link_callback,
+                stopped,
+            ));
         })?;
     Ok(Server {
         stop: Some(stop),
@@ -350,7 +401,7 @@ fn blocking<T: Send>(future: impl Future<Output = Result<T>> + Send) -> Result<T
 
 fn line(value: &impl Serialize) -> Result<Vec<u8>> {
     let mut bytes = serde_json::to_vec(value)?;
-    ensure!(bytes.len() < LIMIT, "Instance message exceeds 4 KiB");
+    ensure!(bytes.len() < LIMIT, "Instance message exceeds 16 KiB");
     bytes.push(b'\n');
     Ok(bytes)
 }
@@ -362,7 +413,10 @@ async fn read_line(stream: &mut UnixStream) -> Result<Vec<u8>> {
         ensure!(count != 0, "Instance peer closed without a JSON line");
         let end = buffer[..count].iter().position(|&byte| byte == b'\n');
         let take = end.unwrap_or(count);
-        ensure!(bytes.len() + take < LIMIT, "Instance message exceeds 4 KiB");
+        ensure!(
+            bytes.len() + take < LIMIT,
+            "Instance message exceeds 16 KiB"
+        );
         bytes.extend_from_slice(&buffer[..take]);
         if end.is_some() {
             return Ok(bytes);
@@ -370,19 +424,31 @@ async fn read_line(stream: &mut UnixStream) -> Result<Vec<u8>> {
     }
 }
 
-async fn exchange(mut stream: UnixStream, identity: &str, callback: &Callback) -> Result<()> {
+async fn exchange(
+    mut stream: UnixStream,
+    identity: &str,
+    callback: &Callback,
+    link_callback: &LinkCallback,
+) -> Result<()> {
     ensure!(
         stream.peer_cred()?.uid() == uid(),
         "Instance peer belongs to another user"
     );
     let result = async {
-        let message: Message = serde_json::from_slice(&read_line(&mut stream).await?)
+        let message: Request = serde_json::from_slice(&read_line(&mut stream).await?)
             .context("Invalid instance command")?;
-        ensure!(
-            message.state == identity,
-            "Instance state identity mismatch"
-        );
-        callback(message.command)
+        let state = match &message {
+            Request::Window(message) => &message.state,
+            Request::Link(message) => &message.state,
+        };
+        ensure!(state == identity, "Instance state identity mismatch");
+        match message {
+            Request::Window(message) => callback(message.command),
+            Request::Link(message) => {
+                crate::deep_link::DeepLink::parse(&message.uri)?;
+                link_callback(&message.uri)
+            }
+        }
     }
     .await;
     let reply = match result {
@@ -390,7 +456,7 @@ async fn exchange(mut stream: UnixStream, identity: &str, callback: &Callback) -
         Err(error) => Reply::Error(format!("{error:#}")),
     };
     let bytes = line(&reply).unwrap_or_else(|_| {
-        b"{\"status\":\"error\",\"value\":\"Instance response exceeds 4 KiB\"}\n".to_vec()
+        b"{\"status\":\"error\",\"value\":\"Instance response exceeds 16 KiB\"}\n".to_vec()
     });
     stream.write_all(&bytes).await?;
     Ok(())
@@ -400,6 +466,7 @@ async fn serve(
     listener: UnixListener,
     identity: String,
     callback: Callback,
+    link_callback: LinkCallback,
     mut stop: oneshot::Receiver<()>,
 ) {
     let identity = Arc::new(identity);
@@ -413,7 +480,8 @@ async fn serve(
                 Ok((stream, _)) if clients.len() < 16 => {
                     let identity = identity.clone();
                     let callback = callback.clone();
-                    clients.spawn(async move { let _ = timeout(TIMEOUT, exchange(stream, &identity, &callback)).await; });
+                    let link_callback = link_callback.clone();
+                    clients.spawn(async move { let _ = timeout(TIMEOUT, exchange(stream, &identity, &callback, &link_callback)).await; });
                 },
                 Ok(_) => {}, // Bound simultaneous clients even if a peer never sends a line.
                 Err(_) => tokio::time::sleep(Duration::from_millis(25)).await,
@@ -458,6 +526,92 @@ mod tests {
         let mut response = Vec::new();
         stream.read_to_end(&mut response).unwrap();
         serde_json::from_slice(&response).unwrap()
+    }
+
+    #[test]
+    fn deep_links_keep_window_protocol_and_route_private_opaque_messages() {
+        let state = tempfile::tempdir().unwrap();
+        let received = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let capture = received.clone();
+        let _server = spawn_with_deep_links(
+            state.path(),
+            callback(),
+            Arc::new(move |uri| {
+                capture.lock().unwrap().push(uri.to_owned());
+                Ok(json!({"accepted": true}))
+            }),
+        )
+        .unwrap();
+        let uri = format!(
+            "streamdeck://plugins/message/com.example.test/callback?token={}&streamdeck=HIDDEN#Keep%2F",
+            "x".repeat(6000)
+        );
+        assert_eq!(
+            request_deep_link(state.path(), &uri).unwrap(),
+            Some(json!({"accepted": true}))
+        );
+        assert_eq!(*received.lock().unwrap(), vec![uri]);
+        assert_eq!(
+            request(state.path(), Command::Status).unwrap(),
+            Some(json!({"command":"status"}))
+        );
+        let ep = endpoint(state.path());
+        let mismatched = line(&LinkMessage {
+            state: "other-state".into(),
+            uri: "streamdeck://plugins/message/com.example.test/private".into(),
+        })
+        .unwrap();
+        assert!(matches!(raw(&ep.path, &mismatched), Reply::Error(_)));
+        let malformed = line(&LinkMessage {
+            state: ep.identity,
+            uri: "streamdeck://unsupported?token=secret".into(),
+        })
+        .unwrap();
+        match raw(&ep.path, &malformed) {
+            Reply::Error(error) => assert!(!error.contains("secret")),
+            _ => panic!("Malformed deep link accepted"),
+        }
+        assert_eq!(received.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn deep_link_errors_are_not_missing_instances_and_size_is_bounded() {
+        let state = tempfile::tempdir().unwrap();
+        let _server = spawn(state.path(), callback()).unwrap();
+        let uri = "streamdeck://plugins/message/com.example.test/private?token=secret";
+        let error = request_deep_link(state.path(), uri)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("does not support plugin deep links"));
+        assert!(!error.contains("secret"));
+        let oversized = format!(
+            "streamdeck://plugins/message/com.example.test/{}",
+            "x".repeat(LIMIT)
+        );
+        assert!(request_deep_link(state.path(), &oversized).is_err());
+        assert!(request(state.path(), Command::Status).unwrap().is_some());
+        let absent = state.path().join("absent");
+        assert!(request_deep_link(&absent, uri).unwrap().is_none());
+        assert!(!absent.exists());
+    }
+
+    #[test]
+    fn slow_deep_link_endpoint_is_an_error_without_cleanup_or_fallback() {
+        let state = tempfile::tempdir().unwrap();
+        let ep = endpoint(state.path());
+        let _listener = StdListener::bind(&ep.path).unwrap();
+        fs::set_permissions(&ep.path, fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(
+            request_deep_link(
+                state.path(),
+                "streamdeck://plugins/message/com.example.test/private"
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("timed out")
+        );
+        assert!(ep.path.exists());
+        fs::remove_file(&ep.path).unwrap();
     }
 
     #[test]
@@ -652,7 +806,7 @@ mod tests {
                 .unwrap_err()
                 .to_string();
             assert!(error.contains(if large {
-                "exceeds 4 KiB"
+                "exceeds 16 KiB"
             } else {
                 "window unavailable"
             }));

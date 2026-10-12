@@ -4,12 +4,14 @@ mod action_trigger;
 mod appearance;
 mod audio_output;
 mod brightness;
+mod deep_link;
 mod desktop;
 mod desktop_web;
 mod device_model;
 mod device_registry;
 mod device_session;
 mod dial_stack;
+mod external_url;
 mod feedback;
 mod hardware;
 mod host;
@@ -50,6 +52,9 @@ use std::{
 #[derive(Parser)]
 #[command(version, about = "Independent Rust Linux host for Stream Deck")]
 struct Args {
+    /// Plugin callback opened by the desktop URI handler.
+    #[arg(value_name = "STREAMDECK_URI")]
+    uri: Option<String>,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -138,6 +143,9 @@ enum Command {
 
 #[derive(clap::Args, Default)]
 struct DesktopArgs {
+    /// Deliver a streamdeck:// plugin callback to this application state.
+    #[arg(long)]
+    uri: Option<String>,
     /// Restrict hardware selection, or choose an offline/simulated device layout.
     #[arg(long, value_parser = parse_model)]
     model: Option<device_model::Model>,
@@ -185,11 +193,29 @@ fn desktop_state() -> PathBuf {
         })
         .join("deckforge")
 }
+fn activate_instance(
+    state: &std::path::Path,
+    activation: instance::Command,
+    uri: Option<&str>,
+) -> Result<bool> {
+    Ok(match uri {
+        Some(uri) => instance::request_deep_link(state, uri)?,
+        None => instance::request(state, activation)?,
+    }
+    .is_some())
+}
+
 fn main() -> Result<()> {
-    match Args::parse()
-        .command
-        .unwrap_or(Command::Desktop(DesktopArgs::default()))
-    {
+    let args = Args::parse();
+    let command = match (args.command, args.uri) {
+        (None, uri) => Command::Desktop(DesktopArgs {
+            uri,
+            ..Default::default()
+        }),
+        (Some(command), None) => command,
+        (Some(_), Some(_)) => anyhow::bail!("Use a standalone plugin URI or desktop --uri"),
+    };
+    match command {
         Command::Webview {
             path,
             port,
@@ -233,7 +259,15 @@ fn main() -> Result<()> {
             };
             println!("{}", serde_json::to_string(&status)?);
         }
-        Command::Desktop(options) => {
+        Command::Desktop(mut options) => {
+            if let Some(uri) = &options.uri {
+                let link = deep_link::DeepLink::parse(uri)?;
+                anyhow::ensure!(
+                    !options.legacy_editor,
+                    "Plugin deep links require the native TypeScript editor"
+                );
+                options.background |= link.hidden;
+            }
             let state = options.state.unwrap_or_else(desktop_state);
             std::fs::create_dir_all(&state)?;
             let activation = if options.background {
@@ -241,7 +275,7 @@ fn main() -> Result<()> {
             } else {
                 instance::Command::Show
             };
-            if instance::request(&state, activation)?.is_some() {
+            if activate_instance(&state, activation, options.uri.as_deref())? {
                 println!("Existing Deckforge instance activated");
                 return Ok(());
             }
@@ -261,7 +295,7 @@ fn main() -> Result<()> {
                     // its window endpoint is ready. Never remove that lock.
                     for _ in 0..10 {
                         std::thread::sleep(Duration::from_millis(100));
-                        if instance::request(&state, activation)?.is_some() {
+                        if activate_instance(&state, activation, options.uri.as_deref())? {
                             println!("Existing Deckforge instance activated");
                             return Ok(());
                         }
@@ -269,6 +303,13 @@ fn main() -> Result<()> {
                     return Err(error);
                 }
             };
+            if let Some(uri) = &options.uri
+                && running.controller.deliver_deep_link(uri).is_err()
+            {
+                // The controller exposes a sanitized error in the native
+                // status/activity UI. Keep that UI available for recovery.
+                eprintln!("Plugin callback could not be delivered; see the application status");
+            }
             if options.legacy_editor {
                 anyhow::ensure!(
                     running.controller.snapshot()["device_model"] == "plus",
@@ -348,4 +389,45 @@ fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod cli_tests {
+    use super::*;
+
+    #[test]
+    fn desktop_scheme_handler_accepts_bare_uri_and_explicit_isolated_options() {
+        let uri =
+            "streamdeck://plugins/message/com.example.test/callback?code=%2F&streamdeck=Hidden";
+        let args = Args::try_parse_from(["deckforge", uri]).unwrap();
+        assert_eq!(args.uri.as_deref(), Some(uri));
+        assert!(args.command.is_none());
+        let args = Args::try_parse_from([
+            "deckforge",
+            "desktop",
+            "--uri",
+            uri,
+            "--simulate",
+            "--state",
+            "/tmp/owned-test",
+        ])
+        .unwrap();
+        assert!(args.uri.is_none());
+        match args.command.unwrap() {
+            Command::Desktop(options) => {
+                assert_eq!(options.uri.as_deref(), Some(uri));
+                assert!(options.simulate);
+                assert_eq!(options.state.unwrap(), PathBuf::from("/tmp/owned-test"));
+            }
+            _ => panic!("Expected desktop command"),
+        }
+        let args = Args::try_parse_from(["deckforge"]).unwrap();
+        assert!(args.command.is_none() && args.uri.is_none());
+        assert!(matches!(
+            Args::try_parse_from(["deckforge", "devices"])
+                .unwrap()
+                .command,
+            Some(Command::Devices)
+        ));
+    }
 }

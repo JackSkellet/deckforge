@@ -37,6 +37,29 @@ def desktop_quote(path):
     return '"' + value.replace("\\", "\\\\") + '"'
 
 
+def register_uri_handler():
+    """Never replace another app's deliberate scheme registration."""
+    if not shutil.which("xdg-mime"):
+        return "URI handler advertised; xdg-mime is unavailable."
+    try:
+        current = subprocess.run(
+            ["xdg-mime", "query", "default", "x-scheme-handler/streamdeck"],
+            capture_output=True, text=True, timeout=5, check=False,
+        )
+        if current.returncode != 0:
+            return "URI handler advertised; existing default could not be queried."
+        default = current.stdout.strip()
+        if default and default != "deckforge.desktop":
+            return f"Existing Stream Deck URI handler preserved: {default}"
+        subprocess.run(
+            ["xdg-mime", "default", "deckforge.desktop", "x-scheme-handler/streamdeck"],
+            capture_output=True, text=True, timeout=5, check=True,
+        )
+        return "Stream Deck URI handler registered: deckforge.desktop"
+    except (OSError, subprocess.SubprocessError):
+        return "URI handler advertised; desktop default registration failed."
+
+
 def main():
     root = Path(__file__).resolve().parents[1]
     parser = argparse.ArgumentParser(description=__doc__)
@@ -55,8 +78,9 @@ def main():
     content = (
         "[Desktop Entry]\nType=Application\nName=Deckforge\n"
         "Comment=Configure Stream Deck devices and compatible plugins\n"
-        f"Exec={desktop_quote(executable)}\nIcon=deckforge\n"
+        f"Exec={desktop_quote(executable)} %u\nIcon=deckforge\n"
         "Terminal=false\nCategories=Utility;\nStartupWMClass=deckforge\n"
+        "MimeType=x-scheme-handler/streamdeck;\n"
     )
     if entry.exists():
         shutil.copy2(entry, entry.with_suffix(".desktop.previous"))
@@ -67,6 +91,7 @@ def main():
         subprocess.run(["desktop-file-validate", str(entry)], check=True)
     if shutil.which("update-desktop-database"):
         subprocess.run(["update-desktop-database", str(entry.parent)], check=True)
+    print(register_uri_handler())
     print(f"Installed native application: {executable}\nDesktop launcher: {entry}")
 
 

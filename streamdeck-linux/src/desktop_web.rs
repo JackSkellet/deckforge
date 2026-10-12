@@ -305,16 +305,7 @@ fn dispatch(
         }
         "open_url" => {
             let url = external_url(&payload)?;
-            let mut child = std::process::Command::new("xdg-open")
-                .arg(url)
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .spawn()
-                .context("Open link in desktop browser")?;
-            std::thread::spawn(move || {
-                let _ = child.wait();
-            });
+            crate::external_url::open(&url)?;
             Ok(Value::Null)
         }
         "ui_ready" => Ok(Value::Null),
@@ -322,15 +313,9 @@ fn dispatch(
     }
 }
 fn external_url(payload: &Value) -> Result<String> {
-    let text = payload["url"].as_str().context("Missing link URL")?;
-    ensure!(text.len() <= 8192, "Link URL is too long");
-    let url = url::Url::parse(text).context("Invalid link URL")?;
-    ensure!(
-        matches!(url.scheme(), "http" | "https") && url.host_str().is_some(),
-        "Only HTTP and HTTPS links can open externally"
-    );
-    Ok(url.into())
+    crate::external_url::validate(payload["url"].as_str().context("Missing link URL")?)
 }
+
 fn pick_file(payload: &Value) -> Result<Value> {
     let dialog = rfd::FileDialog::new();
     let path = match payload["kind"]
@@ -380,9 +365,20 @@ fn protected_html(html: &str) -> String {
 pub fn run(controller: Controller, state: &Path, background: bool, html: &str) -> Result<()> {
     let window = Window::new(!background);
     let endpoint = window.clone();
-    let _instance = crate::instance::spawn(
+    let link_window = window.clone();
+    let link_controller = controller.clone();
+    let _instance = crate::instance::spawn_with_deep_links(
         state,
         Arc::new(move |command| Ok(endpoint.request(command))),
+        Arc::new(move |uri| {
+            let link = crate::deep_link::DeepLink::parse(uri)?;
+            let delivery = link_controller.deliver_deep_link(uri);
+            if !link.hidden {
+                link_window.request(Command::Show);
+            }
+            delivery?;
+            Ok(serde_json::json!({"accepted": true}))
+        }),
     )?;
     let tray_window = window.clone();
     let _tray = match crate::tray::spawn(Arc::new(move |event| tray_window.tray(event))) {

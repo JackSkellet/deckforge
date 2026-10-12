@@ -16,6 +16,7 @@ impl Drop for Inspector {
 impl Host {
     /// Reap failed helpers even when they never reached WebSocket registration.
     pub(super) fn monitor_children(&mut self) {
+        self.expire_deep_links();
         for device in self.device_ids() {
             if let Err(error) = self.with_device(&device, |host| {
                 host.monitor_inspectors();
@@ -265,6 +266,9 @@ impl Host {
         }
         let payload = message.get("payload").cloned().unwrap_or(json!({}));
         match event {
+            "openUrl" => {
+                crate::external_url::open(payload["url"].as_str().context("Missing link URL")?)?;
+            }
             "getResources" => {
                 let _ = sender.send(self.resources_event(&slot, message.get("id")));
             }
