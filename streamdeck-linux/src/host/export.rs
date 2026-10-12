@@ -84,7 +84,18 @@ pub(super) fn build_profile_files(
                             .as_str()
                             .is_some_and(|p| Path::new(p).is_file())))
         });
-    let wrapped = added_audio
+    let added_resources = profile
+        .pages
+        .iter()
+        .flat_map(|p| &p.slots)
+        .flat_map(Slot::flatten)
+        .any(|slot| {
+            slot.resources
+                .as_ref()
+                .is_some_and(|paths| !paths.is_empty())
+        });
+    let wrapped = added_resources
+        || added_audio
         || source
             .as_ref()
             .is_some_and(|bundle| bundle.manifest_path().starts_with("Profiles/"));
@@ -94,6 +105,7 @@ pub(super) fn build_profile_files(
         profile.id
     );
     let mut files = BTreeMap::new();
+    let mut resource_ids = HashMap::new();
     if let Some(source) = &source {
         let manifest = source.manifest_path();
         let source_root = manifest.strip_suffix("manifest.json").unwrap();
@@ -168,7 +180,14 @@ pub(super) fn build_profile_files(
             if page.slots.iter().any(|s| s.controller == "Encoder") {
                 let actions = raw.as_object_mut().unwrap().remove("Actions").unwrap();
                 raw["Controllers"] = json!([{"Type":"Keypad","Actions":actions}]);
-                insert_controller_slots(&mut raw, page, &page_root, &mut files, plugin_roots)?;
+                insert_controller_slots(
+                    &mut raw,
+                    page,
+                    &page_root,
+                    &mut files,
+                    plugin_roots,
+                    &mut resource_ids,
+                )?;
             } else {
                 // Retain the legacy page-level Actions shape when no encoder exists.
                 clear_managed_positions(&mut raw["Actions"], "Keypad");
@@ -183,12 +202,24 @@ pub(super) fn build_profile_files(
                         occupied.insert(position.clone()),
                         "Duplicate managed legacy position {position}"
                     );
-                    raw["Actions"][position] =
-                        export_action(slot, &page_root, &mut files, plugin_roots)?;
+                    raw["Actions"][position] = export_action(
+                        slot,
+                        &page_root,
+                        &mut files,
+                        plugin_roots,
+                        &mut resource_ids,
+                    )?;
                 }
             }
         } else {
-            insert_controller_slots(&mut raw, page, &page_root, &mut files, plugin_roots)?;
+            insert_controller_slots(
+                &mut raw,
+                page,
+                &page_root,
+                &mut files,
+                plugin_roots,
+                &mut resource_ids,
+            )?;
         }
         files.insert(
             format!("{root}{}", page.manifest_path),
@@ -226,12 +257,34 @@ pub(super) fn build_profile_files(
         raw["Device"] = json!({"Model":"20GBD9901","UUID":profile.device});
     }
     if wrapped {
+        let mut dependencies = std::collections::BTreeSet::new();
+        if added_audio {
+            dependencies.insert("com.elgato.streamdeck.soundboard".to_owned());
+        }
+        for slot in profile
+            .pages
+            .iter()
+            .flat_map(|p| &p.slots)
+            .flat_map(Slot::flatten)
+            .filter(|s| s.resources.as_ref().is_some_and(|p| !p.is_empty()))
+        {
+            let manifest = plugin_roots
+                .get(&slot.uuid)
+                .and_then(|root| fs::read(root.join("manifest.json")).ok())
+                .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
+            if let Some(id) = slot.raw["Plugin"]["UUID"]
+                .as_str()
+                .or_else(|| manifest.as_ref().and_then(|v| v["UUID"].as_str()))
+            {
+                dependencies.insert(id.to_owned());
+            }
+        }
         raw["Version"] = json!("3.0");
         if !files.contains_key("package.json") {
             let package = json!({"FormatVersion":1,"DeviceModel":raw["Device"]["Model"],
-                "RequiredPlugins":if added_audio {vec!["com.elgato.streamdeck.soundboard"]} else {vec![]}});
+                "RequiredPlugins":dependencies});
             files.insert("package.json".into(), serde_json::to_vec_pretty(&package)?);
-        } else if added_audio {
+        } else if !dependencies.is_empty() {
             let mut package: Value = serde_json::from_slice(&files["package.json"])?;
             let required = package
                 .as_object_mut()
@@ -240,11 +293,14 @@ pub(super) fn build_profile_files(
                 .or_insert_with(|| json!([]))
                 .as_array_mut()
                 .context("RequiredPlugins must be an array")?;
-            if !required
-                .iter()
-                .any(|id| id == "com.elgato.streamdeck.soundboard")
-            {
-                required.push(json!("com.elgato.streamdeck.soundboard"));
+            let mut changed = false;
+            for id in dependencies {
+                if !required.iter().any(|old| old == &id) {
+                    required.push(json!(id));
+                    changed = true;
+                }
+            }
+            if changed {
                 files.insert("package.json".into(), serde_json::to_vec_pretty(&package)?);
             }
         }
@@ -269,6 +325,7 @@ fn insert_controller_slots(
     page_root: &str,
     files: &mut BTreeMap<String, Vec<u8>>,
     roots: &HashMap<String, PathBuf>,
+    resource_ids: &mut HashMap<String, String>,
 ) -> Result<()> {
     if raw.get("Controllers").is_none() {
         raw["Controllers"] = json!([]);
@@ -307,7 +364,10 @@ fn insert_controller_slots(
         let actions = controllers[index]["Actions"]
             .as_object_mut()
             .context("Known controller Actions must be an object")?;
-        actions.insert(position, export_action(slot, page_root, files, roots)?);
+        actions.insert(
+            position,
+            export_action(slot, page_root, files, roots, resource_ids)?,
+        );
     }
     Ok(())
 }
@@ -343,8 +403,9 @@ fn export_action(
     page_root: &str,
     files: &mut BTreeMap<String, Vec<u8>>,
     roots: &HashMap<String, PathBuf>,
+    resource_ids: &mut HashMap<String, String>,
 ) -> Result<Value> {
-    export_action_at(slot, page_root, files, roots, 0)
+    export_action_at(slot, page_root, files, roots, resource_ids, 0)
 }
 
 fn export_action_at(
@@ -352,6 +413,7 @@ fn export_action_at(
     page_root: &str,
     files: &mut BTreeMap<String, Vec<u8>>,
     roots: &HashMap<String, PathBuf>,
+    resource_ids: &mut HashMap<String, String>,
     depth: usize,
 ) -> Result<Value> {
     ensure!(depth <= 8, "Container nesting exceeds eight export levels");
@@ -361,6 +423,7 @@ fn export_action_at(
         raw = json!({});
     }
     embed_audio_resource(slot, native, &mut raw, files)?;
+    embed_plugin_resources(slot, &mut raw, files, resource_ids)?;
     raw["UUID"] = json!(slot.uuid);
     if native {
         raw["Name"] = json!(slot.name);
@@ -460,7 +523,8 @@ fn export_action_at(
             );
             if let Some(child) = children.first() {
                 records.resize_with(records.len().max(index + 1), || json!({"Actions":[]}));
-                records[index] = export_action_at(child, page_root, files, roots, depth + 1)?;
+                records[index] =
+                    export_action_at(child, page_root, files, roots, resource_ids, depth + 1)?;
             } else if let Some(record) = records.get_mut(index)
                 && record["UUID"].as_str().is_some_and(|uuid| !uuid.is_empty())
             {
@@ -478,7 +542,14 @@ fn export_action_at(
         raw["Actions"] = json!(
             slot.children[0]
                 .iter()
-                .map(|child| export_action_at(child, page_root, files, roots, depth + 1))
+                .map(|child| export_action_at(
+                    child,
+                    page_root,
+                    files,
+                    roots,
+                    resource_ids,
+                    depth + 1
+                ))
                 .collect::<Result<Vec<_>>>()?
         );
     } else if multiaction::container(&slot.uuid) && !slot.children.is_empty() {
@@ -495,7 +566,9 @@ fn export_action_at(
         for (branch, children) in slot.children.iter().enumerate() {
             let exported = children
                 .iter()
-                .map(|child| export_action_at(child, page_root, files, roots, depth + 1))
+                .map(|child| {
+                    export_action_at(child, page_root, files, roots, resource_ids, depth + 1)
+                })
                 .collect::<Result<Vec<_>>>()?;
             ensure!(
                 groups[branch].is_object(),
@@ -505,6 +578,84 @@ fn export_action_at(
         }
     }
     Ok(raw)
+}
+
+fn embed_plugin_resources(
+    slot: &Slot,
+    raw: &mut Value,
+    files: &mut BTreeMap<String, Vec<u8>>,
+    resource_ids: &mut HashMap<String, String>,
+) -> Result<()> {
+    let Some(paths) = &slot.resources else {
+        return Ok(());
+    };
+    // The built-in soundboard's path override has its own compatibility behavior.
+    if slot.uuid == crate::audio_output::PLAY {
+        return Ok(());
+    }
+    if paths.is_empty() {
+        if raw
+            .get("Resources")
+            .is_some_and(|v| !v.is_null() && *v != json!({}))
+        {
+            raw["Resources"] = json!({});
+        }
+        return Ok(());
+    }
+    let mut registry: Value = match files.get("Resources/manifest.json") {
+        Some(bytes) => serde_json::from_slice(bytes).context("Invalid resource registry")?,
+        None => json!({"resources":{}}),
+    };
+    let resources = registry
+        .as_object_mut()
+        .context("Resource registry must be an object")?
+        .entry("resources")
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .context("Resource map must be an object")?;
+    let mut references = serde_json::Map::new();
+    let mut registry_changed = false;
+    for (key, path) in paths {
+        if let Some(id) = resource_ids.get(path) {
+            references.insert(key.clone(), json!(id));
+            continue;
+        }
+        let (name, bytes) = crate::resources::read_regular(Path::new(path))
+            .with_context(|| format!("Read resource {key:?} for export"))?;
+        safe_export_path(&name)?;
+        let existing = raw["Resources"][key].as_str().and_then(|id| {
+            let relative = resources.get(id)?.get("file")?.as_str()?;
+            let member = if relative.starts_with("Resources/") {
+                relative.to_owned()
+            } else {
+                format!("Resources/{relative}")
+            };
+            (Path::new(relative).file_name().and_then(|p| p.to_str()) == Some(name.as_str())
+                && files.get(&member) == Some(&bytes))
+            .then(|| id.to_owned())
+        });
+        let id = if let Some(id) = existing {
+            id
+        } else {
+            let id = uuid::Uuid::new_v4().to_string();
+            ensure!(!resources.contains_key(&id), "Resource ID collision");
+            let relative = format!("{id}/{name}");
+            insert_unique(files, format!("Resources/{relative}"), bytes)?;
+            resources.insert(id.clone(), json!({"file":relative}));
+            registry_changed = true;
+            id
+        };
+        resource_ids.insert(path.clone(), id.clone());
+        references.insert(key.clone(), json!(id));
+    }
+    raw["Resources"] = Value::Object(references);
+    if registry_changed {
+        files.insert(
+            "Resources/manifest.json".into(),
+            serde_json::to_vec_pretty(&registry)?,
+        );
+    }
+    Ok(())
 }
 
 fn embed_audio_resource(
@@ -639,11 +790,37 @@ fn insert_unique(files: &mut BTreeMap<String, Vec<u8>>, name: String, data: Vec<
         data.len() <= 32 * 1024 * 1024,
         "Export asset exceeds 32 MiB"
     );
+    ensure!(!files.contains_key(&name), "Duplicate export asset {name}");
+    let total = files.values().try_fold(data.len(), |sum, bytes| {
+        sum.checked_add(bytes.len()).context("Export size overflow")
+    })?;
     ensure!(
-        files.insert(name.clone(), data).is_none(),
-        "Duplicate export asset {name}"
+        files.len() < 10_000 && total <= 128 * 1024 * 1024,
+        "Export exceeds profile size limits"
     );
+    files.insert(name, data);
     Ok(())
+}
+
+#[cfg(test)]
+mod resource_budget_tests {
+    use super::*;
+    #[test]
+    fn aggregate_asset_limit_rejects_before_growing_the_export_map() {
+        let mut files = BTreeMap::new();
+        for index in 0..4 {
+            insert_unique(
+                &mut files,
+                format!("Resources/{index}"),
+                vec![0; 32 * 1024 * 1024],
+            )
+            .unwrap();
+        }
+        assert!(insert_unique(&mut files, "Resources/overflow".into(), vec![1]).is_err());
+        assert_eq!(files.len(), 4);
+        assert!(insert_unique(&mut files, "Resources/0".into(), vec![1]).is_err());
+        assert_eq!(files["Resources/0"].len(), 32 * 1024 * 1024);
+    }
 }
 
 fn write_archive(path: &Path, files: &BTreeMap<String, Vec<u8>>) -> Result<Option<PathBuf>> {
@@ -1315,6 +1492,7 @@ mod tests {
             "profile.sdProfile/Profiles/page/",
             &mut files,
             &HashMap::new(),
+            &mut HashMap::new(),
         )
         .unwrap();
         assert!(action["States"][0].get("Title").is_none());
@@ -1327,6 +1505,7 @@ mod tests {
             "profile.sdProfile/Profiles/page/",
             &mut files,
             &HashMap::new(),
+            &mut HashMap::new(),
         )
         .unwrap();
         assert_eq!(action["States"][0]["Title"], "Explicit edited title");
@@ -1399,13 +1578,27 @@ mod tests {
         slot.hydrate_children(&[]).unwrap();
         let mut files = BTreeMap::new();
         assert_eq!(
-            export_action(&slot, "p/", &mut files, &HashMap::new()).unwrap(),
+            export_action(
+                &slot,
+                "p/",
+                &mut files,
+                &HashMap::new(),
+                &mut HashMap::new()
+            )
+            .unwrap(),
             raw
         );
         slot.raw["Actions"] = json!([{"UUID":"test.action","ActionID":"remove","Settings":{}}]);
         slot.hydrate_children(&[]).unwrap();
         slot.children[0].clear();
-        let exported = export_action(&slot, "p/", &mut files, &HashMap::new()).unwrap();
+        let exported = export_action(
+            &slot,
+            "p/",
+            &mut files,
+            &HashMap::new(),
+            &mut HashMap::new(),
+        )
+        .unwrap();
         assert_eq!(exported["Actions"][0], json!({"Actions":[]}));
     }
     #[test]
@@ -1426,7 +1619,16 @@ mod tests {
             parent.children = vec![vec![slot]];
             slot = parent;
         }
-        assert!(export_action(&slot, "p/", &mut BTreeMap::new(), &HashMap::new()).is_err());
+        assert!(
+            export_action(
+                &slot,
+                "p/",
+                &mut BTreeMap::new(),
+                &HashMap::new(),
+                &mut HashMap::new()
+            )
+            .is_err()
+        );
     }
     #[test]
     fn overwrite_keeps_exact_backup_and_invalid_export_keeps_destination() {

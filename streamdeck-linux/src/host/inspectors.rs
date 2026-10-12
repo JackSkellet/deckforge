@@ -224,6 +224,14 @@ impl Host {
         }
         let payload = message.get("payload").cloned().unwrap_or(json!({}));
         match event {
+            "getResources" => {
+                let _ = sender.send(self.resources_event(&slot, message.get("id")));
+            }
+            "setResources" => {
+                self.editable()?;
+                let changed = self.set_resources(&slot, payload)?;
+                self.emit(&changed, "didReceiveResources", json!({}));
+            }
             "getSettings" => {
                 let _ = sender.send(self.settings_event(&slot, message.get("id")));
             }

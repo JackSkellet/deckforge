@@ -47,7 +47,7 @@ Desktop interaction requirements come from the official [plugin setup guide][plu
 | PR-07 | Backup/restore all profiles and migrations without data loss | **Missing, A/C.** Binary contains `ProfilesV2`, `ProfilesV3` and a migration literal; no migration control flow was recovered. | Restore `.StreamDeckProfilesBackup`; test interrupted migration, old backups, rollback and missing-plugin preservation against real fixtures. [Backups][backups] |
 | PR-08 | Smart Profiles switch according to focused application | **Missing, C.** No focus monitoring or application bindings. | On supported Linux desktop sessions, focus configured apps, return to default, and verify editing does not cause disruptive switching. Record compositor-specific restrictions honestly. [Smart Profiles][smart] |
 | PR-09 | Plugin-bundled profiles and authorized profile switching | **Verified subset, A/C/T.** Unchanged Lights Out auto-imports its Plus profile and runs real game/image logic. SDK switching validates registration, device, declared profile and page; read-only and persisted bundle bindings tested. | Unchanged official Lights Out plugin installs/activates its declared profile and returns correctly. Validate device/page and manifest profile-access rules. [SDK profiles][profiles] |
-| PR-10 | Embedded resources, dependency discovery and repair of missing plugins | **Partial, A/C.** Unknown action UUIDs are retained/inactive. General resource import/export and dependency installation are absent. | Import a 7.1+ profile containing media/resources; install a missing plugin and regain function without recreating action settings. [Resources][resources], [7.1 release][release71] |
+| PR-10 | Embedded resources, dependency discovery and repair of missing plugins | **Partial, A/C/T.** Unknown action UUIDs are retained/inactive. Soundboard and SDK resource files import/export with original basenames; resource export records plugin dependencies. Automatic missing-plugin installation remains absent. | Import a 7.1+ profile containing media/resources; install a missing plugin and regain function without recreating action settings. [Resources][resources], [7.1 release][release71] |
 
 ## Built-in actions and action composition
 
@@ -80,7 +80,7 @@ The shipped profiles contain real action identifiers and settings; their presenc
 | PL-08 | Image formats, animation and resource path behavior | **Partial, C/T.** PNG/JPEG/GIF and SVG file/data-URI rendering work; SVG transparency is checked. Animation and WebP remain missing. | Test file/data-URI icons, SVG and animated assets, scaling/transparency, frame timing and bounded memory with real devices. [Keys][keys], [6.0.1 release][release601] |
 | PL-09 | All built-in feedback layouts and custom JSON layouts | **Verified subset, C/T.** All six built-ins and four official custom layouts run unchanged with real preview-pixel checks. Incremental properties, SVG, clipping/layers/gradients work. Exact Windows text/bar raster parity remains unverified. | Run every unchanged Layouts sample action; compare text, pixmap, bars, ranges, z-order, clipping, opacity and incremental updates. [Layouts][layouts] |
 | PL-10 | Visual alerts, success feedback and trigger descriptions | **Partial, C.** `showAlert`/`showOk` only log; trigger descriptions are accepted without UI effect. | Observe correct temporary overlays and restoration on keys/dials; inspector descriptions update when requested. [WebSocket API][ws], [dials][dials] |
-| PL-11 | Embedded plugin resources | **Missing, C.** Events use empty resources; no get/set resource command implementation. | Save/update resources through unchanged plugin/PI, export profile, import elsewhere and reopen the file successfully. [Resources][resources] |
+| PL-11 | Embedded plugin resources | **Verified subset, D/A/C/T.** get/setResources, complete action envelopes, correlated replies, opposite-side PI/plugin notifications and portable files implemented. Generated fixtures call unchanged SDK 2.0.4, including nested bindings, duplication and explicit clears; Windows acceptance remains open. | Save/update resources through unchanged plugin/PI, export profile, import elsewhere and reopen the file successfully. [Resources][resources] |
 | PL-12 | App monitoring, wake notifications, deep links, openURL and localization | **Missing/Partial, C.** `logMessage` exists; external/system callbacks and plugin localization are absent. | Trigger app launch/exit, suspend/resume and routed URI callbacks; test translated metadata/UI and external browser operations. [Monitoring][monitoring], [deep links][deeplinks], [environment][environment] |
 | PL-13 | Plugin crash handling, timeouts, upgrades and removal while actions remain | **Partial, C.** Owned child shutdown exists; restart supervision and replacement policies absent. | Crash one plugin without freezing host/other plugins; recover with action settings intact; test repeated failures and upgrade rollback. [Environment][environment], [6.0.1 fixes][release601] |
 
@@ -437,3 +437,37 @@ build retains the user's saved controls; hardware startup and sample registratio
 are checked separately from physical gesture acceptance. Evidence is retained in
 `../../evidence/action-triggers/`. Public tests now include MIT-licensed official
 layout/profile fixtures; proprietary installers and private sessions stay local.
+
+
+### Plugin resource evidence update, 2026-10-12
+
+`../../evidence/plugin-resource-contracts.json` records official API/SDK sources,
+package hashes and bounded native resource setter/getter/linker paths. The setter
+replaces the complete map, removes empty path values and requires remaining paths
+to be absolute; registration does not require the file to exist. Getter replies
+preserve request IDs. Plugin setters notify the bound inspector; inspector setters
+notify the owning plugin. Neither receives its own setter echo. The native linker
+reuses an ID for the same path; exact Windows normalization remains untraced.
+
+`src/host/resources.rs` connects these contracts to settings-independent persisted
+bindings. The filesystem helper retains imported basenames and uses bounded,
+atomic cache writes. Export preserves unchanged original IDs/blobs, shares IDs
+for identical Linux path strings, and keeps distinct same-named files separate.
+File size and aggregate export limits are checked before accumulating oversized
+asset maps. Duplication regenerates contexts while retaining nested overrides and
+explicit clears; discarded raw resource IDs cannot resurrect a cleared binding.
+
+`tests/resources_interop.py` uses generated plugins with unchanged official SDK
+2.0.4 and native WebKit inspectors. It checks owner isolation, response correlation,
+notification direction, replacement/clearing, nested Trigger/Multi bindings,
+duplication, export/import after deleting originals and restart. No complete
+resource sample was found in the pinned/current official sample repository.
+This establishes generated-SDK conformance, not an unchanged end-user resource
+plugin or acceptance in the Windows app. Evidence: `../../evidence/plugin-resources/`.
+
+This resource checkpoint passes 198 non-injection tests plus the gated keyboard
+test's default no-op path, Rust 1.99 strict Clippy and thirteen process suites.
+The installed binary reconnects to the attached Plus and all three sample plugins;
+its prior session is backed up and saved control settings are preserved. The first
+resource test runs exposed nested controller addressing and duplicate aliases in
+the test's snapshot traversal; their logs are retained with the passing final run.

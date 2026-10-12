@@ -38,6 +38,7 @@ mod export;
 mod inspectors;
 mod library;
 mod multiaction;
+mod resources;
 mod stack;
 mod trigger;
 mod volume;
@@ -131,6 +132,8 @@ struct Slot {
     child_id: String,
     #[serde(default)]
     in_multi_action: bool,
+    #[serde(default)]
+    resources: Option<std::collections::BTreeMap<String, String>>,
     context: String,
     controller: String,
     index: u8,
@@ -290,7 +293,7 @@ struct Host {
 }
 
 fn action_payload(slot: &Slot) -> Value {
-    let mut payload = json!({"controller":slot.controller,"settings":slot.settings,"state":slot.state,"isInMultiAction":slot.in_multi_action,"resources":{}});
+    let mut payload = json!({"controller":slot.controller,"settings":slot.settings,"state":slot.state,"isInMultiAction":slot.in_multi_action,"resources":slot.resources.clone().unwrap_or_default()});
     if !slot.in_multi_action {
         payload["coordinates"] =
             json!({"column":slot.index%4,"row":if slot.controller=="Encoder"{0}else{slot.index/4}});
@@ -527,6 +530,7 @@ impl Host {
         let mut slot = Slot {
             children: vec![],
             child_id: String::new(),
+            resources: None,
             in_multi_action: false,
             context: uuid::Uuid::new_v4().to_string(),
             controller: controller.into(),
@@ -911,6 +915,18 @@ impl Host {
         {
             bail!("Plugin does not own this context");
         }
+        if event == "getResources" {
+            let reply = self.resources_event(&original, message.get("id"));
+            if let Some(sender) = &plugin.sender {
+                let _ = sender.send(reply);
+            }
+            return Ok(());
+        }
+        if event == "setResources" {
+            let slot = self.set_resources(&original, payload)?;
+            self.notify_inspectors(context, self.resources_event(&slot, None), None);
+            return Ok(());
+        }
         if event == "getSettings" {
             let reply = self.settings_event(&original, message.get("id"));
             if let Some(sender) = &plugin.sender {
@@ -1081,7 +1097,7 @@ async fn root(
     Html(include_str!("ui.html").replace("__TOKEN__", &token)).into_response()
 }
 fn slot_snapshot(host: &Host, s: &Slot) -> Value {
-    json!({"available":host.actions.iter().any(|a|a.uuid==s.uuid),"pinned":s.pinned,"context":s.context,"controller":s.controller,"index":s.index,"uuid":s.uuid,"name":s.name,"settings":s.settings,"title":s.title,"state":s.state,"feedback":s.feedback,"layout":s.layout,"preview":s.preview,"raw":s.raw,
+    json!({"available":host.actions.iter().any(|a|a.uuid==s.uuid),"pinned":s.pinned,"context":s.context,"controller":s.controller,"index":s.index,"uuid":s.uuid,"name":s.name,"settings":s.settings,"resources":s.resources.clone().unwrap_or_default(),"title":s.title,"state":s.state,"feedback":s.feedback,"layout":s.layout,"preview":s.preview,"raw":s.raw,
         "trigger_children":if s.uuid==crate::action_trigger::UUID {s.children.iter().map(|g|g.first().map(|c|slot_snapshot(host,c)).unwrap_or(Value::Null)).collect::<Vec<_>>()}else{vec![]},
         "stack_children":if s.uuid==crate::dial_stack::UUID {s.children.first().map(|children|children.iter().map(|c|slot_snapshot(host,c)).collect::<Vec<_>>()).unwrap_or_default()}else{vec![]},
         "multi_running":host.multi_running(&s.context),"multi_children":s.children.iter().map(|g|g.iter().map(|c|slot_snapshot(host,c)).collect::<Vec<_>>()).collect::<Vec<_>>(),
@@ -1288,24 +1304,22 @@ fn apply_control(host: &mut Host, r: Value) -> Result<()> {
         }
         "settings" => {
             host.editable()?;
-            let index = host
-                .slots
-                .iter()
-                .position(|s| s.context == r["context"])
+            let context = r["context"].as_str().context("Missing context")?;
+            let mut slot = host
+                .visible_slot(context)
+                .cloned()
                 .context("Unknown context")?;
             if !r["settings"].is_object() {
                 bail!("Settings must be an object");
             }
-            host.slots[index].settings = r["settings"].clone();
+            slot.settings = r["settings"].clone();
+            host.store_slot(slot.clone());
             host.persist()?;
-            host.emit(&host.slots[index], "didReceiveSettings", json!({}));
-            host.notify_inspectors(
-                &host.slots[index].context,
-                host.settings_event(&host.slots[index], None),
-                None,
-            );
+            host.emit(&slot, "didReceiveSettings", json!({}));
+            host.notify_inspectors(&slot.context, host.settings_event(&slot, None), None);
             Ok(())
         }
+
         _ => bail!("Unknown command"),
     }
 }
@@ -1336,6 +1350,7 @@ async fn socket_session(socket: WebSocket, state: Shared) {
             };
             let _=sender.send(json!({"event":"deviceDidConnect","device":host.device,"deviceInfo":{"name":"Stream Deck +","type":7,"size":{"columns":4,"rows":2}}}));
             host.plugins[index].sender = Some(sender);
+            host.hydrate_resources();
             let id = host.plugins[index].id.clone();
             host.log(format!("Plugin connected: {id}"));
             for slot in host.slots.iter().flat_map(Slot::visible_flatten) {
@@ -1857,6 +1872,7 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
     });
     host.sync_visible();
     host.hydrate_library_children();
+    host.hydrate_resources();
     host.slots = host.library.visible()?;
     host.render()?;
     host.persist()?;
@@ -2138,6 +2154,7 @@ mod tests {
             slots: vec![Slot {
                 children: vec![],
                 child_id: String::new(),
+                resources: None,
                 in_multi_action: false,
                 context: "test.context".into(),
                 controller: "Keypad".into(),

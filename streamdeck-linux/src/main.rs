@@ -10,6 +10,7 @@ mod multi_editor;
 mod package;
 mod profile;
 mod render;
+mod resources;
 mod soundboard;
 mod soundboard_editor;
 mod stack_editor;

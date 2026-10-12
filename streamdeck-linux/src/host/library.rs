@@ -175,6 +175,31 @@ fn renew_action_ids(value: &mut Value) {
         _ => {}
     }
 }
+
+fn duplicate_slot_identity(slot: &mut Slot, actions: &[Action]) -> Result<()> {
+    let original = slot.clone();
+    slot.children.clear();
+    slot.context = new_id();
+    renew_action_ids(&mut slot.raw);
+    if slot.raw.is_object() {
+        slot.raw["ActionID"] = json!(slot.context);
+    }
+    slot.hydrate_children(actions)?;
+    // Raw archive tokens cannot represent runtime replacements or explicit
+    // clears. The duplicated tree keeps the same positional structure.
+    restore_resource_bindings(&original, slot);
+    Ok(())
+}
+
+fn restore_resource_bindings(original: &Slot, duplicate: &mut Slot) {
+    duplicate.resources = original.resources.clone();
+    for (old_group, new_group) in original.children.iter().zip(&mut duplicate.children) {
+        for (old, new) in old_group.iter().zip(new_group) {
+            restore_resource_bindings(old, new);
+        }
+    }
+}
+
 impl Library {
     pub fn legacy(slots: Vec<Slot>, device: &str) -> Self {
         let mut profile = native_profile("Default profile", device);
@@ -358,6 +383,7 @@ impl Host {
     }
     pub(super) fn refresh_page(&mut self) -> Result<()> {
         self.hydrate_library_children();
+        self.hydrate_resources();
         let mut next = self.library.visible()?;
         let profile = self.library.current()?;
         let page_index = profile
@@ -612,6 +638,7 @@ impl Host {
                 slots.push(Slot {
                     children: vec![],
                     child_id: String::new(),
+                    resources: None,
                     in_multi_action: false,
                     context: new_id(),
                     controller: item.controller.clone(),
@@ -752,14 +779,9 @@ impl Host {
                     remap_page_references(&mut page.raw, &map);
                     renew_action_ids(&mut page.raw);
                     for slot in &mut page.slots {
-                        slot.children.clear();
-                        slot.context = new_id();
-                        renew_action_ids(&mut slot.raw);
-                        if slot.raw.is_object() {
-                            slot.raw["ActionID"] = json!(slot.context);
-                        }
                         remap_page_references(&mut slot.settings, &map);
                         remap_page_references(&mut slot.raw, &map);
+                        duplicate_slot_identity(slot, &self.actions)?;
                     }
                 }
                 p.pin_page = map[&p.pin_page].clone();
@@ -843,12 +865,7 @@ impl Host {
                 p.manifest_path = page_path(&p.id);
                 renew_action_ids(&mut p.raw);
                 for slot in &mut p.slots {
-                    slot.children.clear();
-                    slot.context = new_id();
-                    renew_action_ids(&mut slot.raw);
-                    if slot.raw.is_object() {
-                        slot.raw["ActionID"] = json!(slot.context);
-                    }
+                    duplicate_slot_identity(slot, &self.actions)?;
                 }
                 let id = p.id.clone();
                 let profile = self.library.current_mut()?;
@@ -1122,6 +1139,7 @@ fn navigation_slot(uuid: &str, name: &str, index: u8, settings: Value) -> Slot {
     Slot {
         children: vec![],
         child_id: String::new(),
+        resources: None,
         in_multi_action: false,
         context: new_id(),
         controller: "Keypad".into(),
@@ -1143,5 +1161,111 @@ fn navigation_slot(uuid: &str, name: &str, index: u8, settings: Value) -> Slot {
         image_cache: HashMap::new(),
         display_warnings: vec![],
         preview: String::new(),
+    }
+}
+
+#[cfg(test)]
+mod resource_duplication_tests {
+    use super::*;
+
+    fn check_duplicate(command: &str) {
+        let temp = tempfile::tempdir().unwrap();
+        let mut host = super::super::tests::fixture(temp.path());
+        host.actions.push(stack::action());
+        host.actions.push(trigger::action());
+        host.actions.extend(multiaction::definitions());
+        host.assign("Encoder", 0, crate::dial_stack::UUID).unwrap();
+        let context = host
+            .slots
+            .iter()
+            .find(|s| s.uuid == crate::dial_stack::UUID)
+            .unwrap()
+            .context
+            .clone();
+        host.save_stack(
+            &context,
+            json!({
+                "Settings":{"CurrentIdx":0},
+                "Actions":[{
+                    "UUID":crate::action_trigger::UUID,"ActionID":"trigger",
+                    "Actions":[
+                        {"UUID":"test.action","ActionID":"replace","Resources":{"file":"old-reference"}},
+                        {"UUID":multiaction::ROUTINE,"ActionID":"sequence","Actions":[
+                            {"Actions":[{"UUID":"test.action","ActionID":"clear","Resources":{"file":"cleared-reference"}}]},
+                            {"Actions":[{"UUID":"missing.action","ActionID":"unknown","Resources":{"file":"unknown-reference"}}]}
+                        ]},
+                        {"Actions":[]}
+                    ]
+                }]
+            }),
+        )
+        .unwrap();
+        let parent = host.visible_slot(&context).unwrap().clone();
+        let replaced = parent
+            .flatten()
+            .into_iter()
+            .find(|s| s.raw["ActionID"] == "replace")
+            .unwrap();
+        host.set_resources(
+            replaced,
+            json!({"file":temp.path().join("replacement.txt")}),
+        )
+        .unwrap();
+        let cleared = parent
+            .flatten()
+            .into_iter()
+            .find(|s| s.raw["ActionID"] == "clear")
+            .unwrap();
+        host.set_resources(cleared, json!({})).unwrap();
+        let original = host.visible_slot(&context).unwrap().clone();
+        let id = if command == "page_duplicate" {
+            host.library.active_page.clone()
+        } else {
+            host.library.active_profile.clone()
+        };
+        host.library_command(&json!({"command":command,"id":id,"name":"Resource copy"}))
+            .unwrap();
+        // Rehydrate again to catch explicit clears reverting to old archive IDs.
+        host.refresh_page().unwrap();
+        let copied = host
+            .slots
+            .iter()
+            .find(|s| s.uuid == crate::dial_stack::UUID)
+            .unwrap();
+        let old_tree = original.flatten();
+        let new_tree = copied.flatten();
+        assert_eq!(old_tree.len(), new_tree.len());
+        for (old, new) in old_tree.iter().zip(&new_tree) {
+            assert_ne!(old.context, new.context);
+            assert_ne!(old.raw["ActionID"], new.raw["ActionID"]);
+            assert_eq!(old.resources, new.resources);
+            assert_eq!(old.raw.get("Resources"), new.raw.get("Resources"));
+            assert_eq!(
+                host.library.slot(&old.context).unwrap().resources,
+                old.resources
+            );
+        }
+        let leaves: Vec<_> = new_tree
+            .iter()
+            .filter(|s| s.raw.get("Resources").is_some())
+            .collect();
+        assert_eq!(leaves.len(), 3);
+        assert_eq!(
+            leaves[0].resources.as_ref().unwrap()["file"],
+            temp.path().join("replacement.txt").to_str().unwrap()
+        );
+        assert_eq!(leaves[1].resources, Some(BTreeMap::new()));
+        assert_eq!(leaves[2].resources, None);
+        host.library.validate().unwrap();
+    }
+
+    #[test]
+    fn page_duplicate_preserves_nested_replacements_and_explicit_clears() {
+        check_duplicate("page_duplicate");
+    }
+
+    #[test]
+    fn profile_duplicate_preserves_nested_replacements_and_explicit_clears() {
+        check_duplicate("profile_duplicate");
     }
 }

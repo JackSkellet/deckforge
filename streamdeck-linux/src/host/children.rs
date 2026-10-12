@@ -184,6 +184,9 @@ impl Slot {
                         // own settings or child records have just been edited.
                         children: previous.map(|s| s.children.clone()).unwrap_or_default(),
                         child_id: id,
+                        resources: previous
+                            .filter(|s| s.raw.get("Resources") == raw.get("Resources"))
+                            .and_then(|s| s.resources.clone()),
                         in_multi_action: multi,
                         controller: if keypad { "Keypad" } else { "Encoder" }.into(),
                         index: self.index,

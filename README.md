@@ -14,7 +14,7 @@ Current working areas include:
 
 - An always-dark native Rust editor and Stream Deck+ key/dial/touch-strip support.
 - Profiles, pages, folders, pinned actions, and original-format profile import/export.
-- Node and HTML plugins, native property-inspector windows, and feedback layouts.
+- Node and HTML plugins, native property inspectors, portable plugin resources, and feedback layouts.
 - Multi Actions, Dial Stacks, Action Triggers, Linux desktop actions, and a native soundboard.
 - Live system-volume feedback and configurable volume steps.
 

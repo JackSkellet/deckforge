@@ -204,6 +204,26 @@ All eleven recovered original Action Trigger records round-trip in tests.
 Simulation verifies plugin events and rendered images; physical acceptance of
 these new gestures and Windows acceptance of exported profiles remain pending.
 
+## Plugin resources
+
+Plugins and native property inspectors can use `getResources` and `setResources`.
+Bindings remain separate from settings, and action events include the resource
+map. Updates replace the complete map; empty path values remove those bindings.
+Notifications go to the other side: plugin changes reach its inspector, and
+inspector changes reach its plugin. Request replies retain their IDs.
+
+Profile export bundles referenced files. Import restores readable local paths
+while preserving filenames and shared-file references. Different source files
+with the same name remain separate. Nested actions, page/profile duplication,
+explicit clears and restart preserve their resource bindings. File data is read
+at export time; a missing file prevents export without overwriting an existing
+archive. Each file is limited to 32 MiB and the complete profile to 128 MiB.
+
+The resource conformance test calls unchanged official SDK 2.0.4 methods from a
+generated plugin and runs native WebKit inspectors. There is no complete official
+resource sample in the inspected sample repository. Windows import acceptance
+and broader third-party file-picker workflows remain unverified.
+
 ## Commands
 
 ```sh
@@ -260,12 +280,12 @@ The full objective stays open. [FEATURE_PARITY.md](docs/FEATURE_PARITY.md) track
 60 feature requirements against the shipped Windows 7.6 release. No sample-only
 completion criterion replaces the desktop parity goal.
 
-1. Broader HTML/property-inspector workflows, embedded resources, local file
-   controls and real-world plugin compatibility beyond the tested samples.
+1. Broader HTML/property-inspector workflows, local file controls and real-world
+   plugin compatibility beyond the tested samples and SDK fixtures.
 2. Separate hardware/editor targets, inactive-state image/title updates, alerts,
    animation, and native-reference visual validation of layout font/bar details.
-3. Windows acceptance of exported profiles, folder auto-exit, Action Trigger,
-   text/hotkey-switch/audio actions, application activation, and automatic profile selection.
+3. Windows acceptance of exported profiles, folder auto-exit, physical acceptance
+   of Action Trigger, text/hotkey-switch actions, application activation, and automatic profile selection.
 4. Native Windows/macOS plugin binaries and platform-specific dependencies.
    These do not become Linux programs simply by reproducing the WebSocket API.
 5. USB reconnect recovery, more device models, plugin supervision, tray/autostart,
@@ -296,6 +316,7 @@ python tests/multi_interop.py --binary target/release/deckforge
 python tests/stack_interop.py --binary target/release/deckforge
 python tests/volume_interop.py --binary target/release/deckforge
 python tests/trigger_interop.py --binary target/release/deckforge
+python tests/resources_interop.py --binary target/release/deckforge
 ```
 
 The optional installer test needs the local Windows artifacts. The sample
