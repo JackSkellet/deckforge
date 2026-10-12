@@ -423,8 +423,15 @@ fn export_action(
     if native || raw.get("States").is_some() || !states.is_empty() {
         raw["States"] = json!(states);
     }
-    if !slot.multi_children.is_empty() {
-        for (branch, children) in slot.multi_children.iter().enumerate() {
+    if slot.uuid == crate::dial_stack::UUID && !slot.children.is_empty() {
+        raw["Actions"] = json!(
+            slot.children[0]
+                .iter()
+                .map(|child| export_action(child, page_root, files, roots))
+                .collect::<Result<Vec<_>>>()?
+        );
+    } else if !slot.children.is_empty() {
+        for (branch, children) in slot.children.iter().enumerate() {
             let exported = children
                 .iter()
                 .map(|child| export_action(child, page_root, files, roots))

@@ -356,7 +356,7 @@ impl Host {
         Ok(())
     }
     pub(super) fn refresh_page(&mut self) -> Result<()> {
-        self.hydrate_library_multi();
+        self.hydrate_library_children();
         let mut next = self.library.visible()?;
         let profile = self.library.current()?;
         let page_index = profile
@@ -374,12 +374,12 @@ impl Host {
         let old: HashSet<_> = self
             .slots
             .iter()
-            .flat_map(Slot::flatten)
+            .flat_map(Slot::visible_flatten)
             .map(|s| s.context.clone())
             .collect();
         let new: HashSet<_> = next
             .iter()
-            .flat_map(Slot::flatten)
+            .flat_map(Slot::visible_flatten)
             .map(|s| s.context.clone())
             .collect();
         let removed: Vec<_> = self
@@ -394,12 +394,13 @@ impl Host {
         for (context, action) in removed {
             self.remember_removed(&context, &action);
         }
+        self.cancel_departing_stacks(&new);
         self.cancel_departing_multi(&new);
         self.cancel_departing_inputs(&new);
         for context in old.difference(&new) {
             self.close_inspectors(Some(context));
         }
-        for slot in self.slots.iter().flat_map(Slot::flatten) {
+        for slot in self.slots.iter().flat_map(Slot::visible_flatten) {
             if !new.contains(&slot.context) {
                 self.emit(slot, "willDisappear", json!({}));
             }
@@ -411,7 +412,7 @@ impl Host {
                 self.slots[index].background = self.resolve_state_image(&slot, slot.state);
             }
         }
-        for slot in self.slots.iter().flat_map(Slot::flatten) {
+        for slot in self.slots.iter().flat_map(Slot::visible_flatten) {
             if !old.contains(&slot.context) {
                 self.emit(slot, "willAppear", json!({}));
             }
@@ -584,8 +585,9 @@ impl Host {
                     .unwrap_or("$B1")
                     .to_owned();
                 slots.push(Slot {
-                    multi_children: vec![],
-                    multi_id: String::new(),
+                    children: vec![],
+                    child_id: String::new(),
+                    in_multi_action: false,
                     context: new_id(),
                     controller: item.controller.clone(),
                     index: if item.controller == "Encoder" {
@@ -725,7 +727,7 @@ impl Host {
                     remap_page_references(&mut page.raw, &map);
                     renew_action_ids(&mut page.raw);
                     for slot in &mut page.slots {
-                        slot.multi_children.clear();
+                        slot.children.clear();
                         slot.context = new_id();
                         renew_action_ids(&mut slot.raw);
                         if slot.raw.is_object() {
@@ -816,7 +818,7 @@ impl Host {
                 p.manifest_path = page_path(&p.id);
                 renew_action_ids(&mut p.raw);
                 for slot in &mut p.slots {
-                    slot.multi_children.clear();
+                    slot.children.clear();
                     slot.context = new_id();
                     renew_action_ids(&mut slot.raw);
                     if slot.raw.is_object() {
@@ -1093,8 +1095,9 @@ impl Host {
 }
 fn navigation_slot(uuid: &str, name: &str, index: u8, settings: Value) -> Slot {
     Slot {
-        multi_children: vec![],
-        multi_id: String::new(),
+        children: vec![],
+        child_id: String::new(),
+        in_multi_action: false,
         context: new_id(),
         controller: "Keypad".into(),
         index,

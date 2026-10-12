@@ -15,180 +15,7 @@ pub(super) fn definitions() -> Vec<Action> {
         raw:json!({"SupportedInMultiActions":uuid==DELAY,"States":if uuid==SWITCH {json!([{"Title":"Sequence 1"},{"Title":"Sequence 2"}])}else{json!([{"Title":name}])}}),
     }).collect()
 }
-impl Slot {
-    pub(super) fn flatten(&self) -> Vec<&Self> {
-        let mut slots = vec![self];
-        for child in self.multi_children.iter().flatten() {
-            slots.extend(child.flatten());
-        }
-        slots
-    }
-    pub(super) fn find(&self, context: &str) -> Option<&Self> {
-        if self.context == context {
-            Some(self)
-        } else {
-            self.multi_children
-                .iter()
-                .flatten()
-                .find_map(|s| s.find(context))
-        }
-    }
-    pub(super) fn find_mut(&mut self, context: &str) -> Option<&mut Self> {
-        if self.context == context {
-            Some(self)
-        } else {
-            self.multi_children
-                .iter_mut()
-                .flatten()
-                .find_map(|s| s.find_mut(context))
-        }
-    }
-    pub(super) fn sync_multi_raw(&mut self) {
-        if !container(&self.uuid) {
-            return;
-        }
-        for (branch, children) in self.multi_children.iter_mut().enumerate() {
-            for (index, child) in children.iter_mut().enumerate() {
-                child.raw["Settings"] = child.settings.clone();
-                child.raw["State"] = json!(child.state);
-                if child.title_changed
-                    && child.raw["States"].is_array()
-                    && let Some(state) = child.raw["States"].get_mut(child.state as usize)
-                {
-                    state["Title"] = json!(child.title);
-                }
-                if let Some(record) = self
-                    .raw
-                    .get_mut("Actions")
-                    .and_then(|v| v.get_mut(branch))
-                    .and_then(|v| v.get_mut("Actions"))
-                    .and_then(|v| v.get_mut(index))
-                {
-                    *record = child.raw.clone();
-                }
-            }
-        }
-    }
-    fn hydrate(&mut self) -> Result<()> {
-        if !container(&self.uuid) {
-            return Ok(());
-        }
-        if self.raw.get("Actions").is_none() {
-            self.raw["Actions"] = json!([{"Actions":[]},{"Actions":[]}]);
-        }
-        let sequence = Sequence::parse(&self.uuid, &self.raw)?;
-        let old = std::mem::take(&mut self.multi_children);
-        self.multi_children = sequence
-            .groups
-            .iter()
-            .map(|entries| {
-                entries
-                    .iter()
-                    .map(|entry| {
-                        if let Some(existing) = old.iter().flatten().find(|s| {
-                            s.multi_id == entry.id && s.uuid == entry.uuid && s.raw == entry.raw
-                        }) {
-                            return existing.clone();
-                        }
-                        let previous = old
-                            .iter()
-                            .flatten()
-                            .find(|s| s.multi_id == entry.id && s.uuid == entry.uuid);
-                        let state = entry.raw["State"].as_u64().unwrap_or(0);
-                        let title = entry.raw["States"][state as usize]["Title"]
-                            .as_str()
-                            .unwrap_or("")
-                            .to_owned();
-                        Slot {
-                            context: previous
-                                .map(|s| s.context.clone())
-                                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
-                            multi_children: vec![],
-                            multi_id: entry.id.clone(),
-                            controller: "Keypad".into(),
-                            index: self.index,
-                            uuid: entry.uuid.clone(),
-                            name: entry.raw["Name"].as_str().unwrap_or(&entry.uuid).into(),
-                            settings: entry
-                                .raw
-                                .get("Settings")
-                                .filter(|s| !s.is_null())
-                                .cloned()
-                                .unwrap_or(json!({})),
-                            title,
-                            state,
-                            feedback: json!({}),
-                            layout: "$X1".into(),
-                            raw: entry.raw.clone(),
-                            image_changed: false,
-                            title_changed: false,
-                            pinned: false,
-                            states: entry.raw.get("States").cloned().unwrap_or(json!([])),
-                            background: None,
-                            layout_cache: None,
-                            image_cache: HashMap::new(),
-                            display_warnings: vec![],
-                            preview: String::new(),
-                        }
-                    })
-                    .collect()
-            })
-            .collect();
-        Ok(())
-    }
-}
 impl Host {
-    pub(super) fn hydrate_library_multi(&mut self) {
-        let mut errors = vec![];
-        for parent in self
-            .library
-            .profiles
-            .iter_mut()
-            .flat_map(|p| &mut p.pages)
-            .flat_map(|p| &mut p.slots)
-        {
-            if let Err(error) = parent.hydrate() {
-                errors.push(format!(
-                    "Multi Action {} retained but invalid: {error}",
-                    parent.name
-                ));
-            }
-        }
-        for error in errors {
-            if !self.logs.contains(&error) {
-                self.log(error);
-            }
-        }
-    }
-    pub(super) fn visible_slot(&self, context: &str) -> Option<&Slot> {
-        self.slots.iter().find_map(|s| s.find(context))
-    }
-    pub(super) fn slot_any(&self, context: &str) -> Option<&Slot> {
-        self.visible_slot(context)
-            .or_else(|| self.library.slot(context))
-    }
-    pub(super) fn store_slot(&mut self, slot: Slot) {
-        if let Some(active) = self
-            .slots
-            .iter_mut()
-            .find_map(|s| s.find_mut(&slot.context))
-        {
-            *active = slot.clone();
-        }
-        self.library.update(&slot);
-        for parent in &mut self.slots {
-            parent.sync_multi_raw();
-        }
-        for parent in self
-            .library
-            .profiles
-            .iter_mut()
-            .flat_map(|p| &mut p.pages)
-            .flat_map(|p| &mut p.slots)
-        {
-            parent.sync_multi_raw();
-        }
-    }
     fn sequence(&self, parent: &Slot) -> Result<Sequence> {
         let mut sequence = Sequence::parse(&parent.uuid, &parent.raw)?;
         for entry in sequence.groups.iter_mut().flatten() {
@@ -292,12 +119,7 @@ impl Host {
     }
     fn child_for(&self, parent: &str, entry: &Entry) -> Result<Slot> {
         self.slot_any(parent)
-            .and_then(|p| {
-                p.multi_children
-                    .iter()
-                    .flatten()
-                    .find(|s| s.multi_id == entry.id)
-            })
+            .and_then(|p| p.children.iter().flatten().find(|s| s.child_id == entry.id))
             .cloned()
             .context("Multi Action step disappeared")
     }
@@ -465,7 +287,7 @@ impl Host {
         candidate.raw = raw;
         Sequence::parse(&candidate.uuid, &candidate.raw)?;
         // Preserve unsupported imported steps; execution validates availability.
-        candidate.hydrate()?;
+        candidate.hydrate_children(&self.actions)?;
         self.cancel_multi(context);
         // Stable instances remain; removed/replaced children receive lifecycle end.
         let old: HashSet<_> = slot.flatten().iter().map(|s| s.context.clone()).collect();
@@ -474,7 +296,7 @@ impl Host {
             .iter()
             .map(|s| s.context.clone())
             .collect();
-        for child in slot.multi_children.iter().flatten() {
+        for child in slot.children.iter().flatten() {
             if !new.contains(&child.context) {
                 self.close_inspectors(Some(&child.context));
                 self.emit(child, "willDisappear", json!({}));
@@ -484,7 +306,7 @@ impl Host {
         slot = candidate;
         self.store_slot(slot.clone());
         self.persist()?;
-        for child in slot.multi_children.iter().flatten() {
+        for child in slot.children.iter().flatten() {
             if !old.contains(&child.context) {
                 self.emit(child, "willAppear", json!({}));
             } else {

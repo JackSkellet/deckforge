@@ -32,11 +32,13 @@ use std::{
 use tokio::sync::mpsc;
 
 mod audio;
+mod children;
 mod display;
 mod export;
 mod inspectors;
 mod library;
 mod multiaction;
+mod stack;
 use inspectors::Inspector;
 use library::Library;
 
@@ -121,10 +123,12 @@ pub fn start(options: HostOptions) -> Result<EmbeddedHost> {
 }
 #[derive(Clone, Serialize, Deserialize)]
 struct Slot {
+    #[serde(default, alias = "multi_children")]
+    children: Vec<Vec<Slot>>,
+    #[serde(default, alias = "multi_id")]
+    child_id: String,
     #[serde(default)]
-    multi_children: Vec<Vec<Slot>>,
-    #[serde(default)]
-    multi_id: String,
+    in_multi_action: bool,
     context: String,
     controller: String,
     index: u8,
@@ -240,6 +244,8 @@ enum HeldControl {
     Dial(u8),
 }
 struct Host {
+    stack_gestures: HashMap<String, crate::dial_stack::Gesture>,
+    stack_cooldown: HashMap<String, std::time::Instant>,
     multi_owned: HashSet<String>,
     multi_held: HashMap<String, crate::multi::Entry>,
     multi_pending: HashMap<String, Vec<crate::multi::Entry>>,
@@ -277,8 +283,8 @@ struct Host {
 }
 
 fn action_payload(slot: &Slot) -> Value {
-    let mut payload = json!({"controller":slot.controller,"settings":slot.settings,"state":slot.state,"isInMultiAction":!slot.multi_id.is_empty(),"resources":{}});
-    if slot.multi_id.is_empty() {
+    let mut payload = json!({"controller":slot.controller,"settings":slot.settings,"state":slot.state,"isInMultiAction":slot.in_multi_action,"resources":{}});
+    if !slot.in_multi_action {
         payload["coordinates"] =
             json!({"column":slot.index%4,"row":if slot.controller=="Encoder"{0}else{slot.index/4}});
     }
@@ -331,8 +337,7 @@ impl Host {
     }
     fn emit(&self, slot: &Slot, event: &str, extra: Value) {
         let action = self.actions.iter().find(|a| a.uuid == slot.uuid);
-        if !slot.multi_id.is_empty()
-            && action.is_some_and(|a| a.raw["SupportedInMultiActions"] == false)
+        if slot.in_multi_action && action.is_some_and(|a| a.raw["SupportedInMultiActions"] == false)
         {
             return;
         }
@@ -348,17 +353,70 @@ impl Host {
         }
     }
     fn render(&mut self) -> Result<()> {
+        // Selected container children need the same imported/plugin icon lookup
+        // as direct assignments. Keep inactive child caches without drawing them.
+        let missing: Vec<_> = self
+            .slots
+            .iter()
+            .flat_map(Slot::visible_flatten)
+            .filter(|s| s.background.is_none())
+            .cloned()
+            .collect();
+        for slot in missing {
+            if let Some(image) = self.resolve_state_image(&slot, slot.state)
+                && let Some(visible) = self
+                    .slots
+                    .iter_mut()
+                    .find_map(|s| s.find_mut(&slot.context))
+            {
+                visible.background = Some(image);
+            }
+        }
         let mut strip = DynamicImage::ImageRgb8(RgbImage::from_pixel(800, 100, Rgb([14, 21, 29])));
         let mut warnings = Vec::new();
         for slot in &mut self.slots {
             let picture = if slot.controller == "Encoder" {
+                let stacked = slot.uuid == crate::dial_stack::UUID;
+                let index = slot.active_stack_index();
+                let has_child = stacked
+                    && slot
+                        .children
+                        .first()
+                        .is_some_and(|children| index < children.len());
+                let show_mark =
+                    has_child && slot.settings["ShowStackIcon"].as_bool().unwrap_or(true);
+                let target = if has_child {
+                    &mut slot.children[0][index]
+                } else {
+                    &mut *slot
+                };
                 let root = self
                     .actions
                     .iter()
-                    .find(|a| a.uuid == slot.uuid)
+                    .find(|a| a.uuid == target.uuid)
                     .and_then(|a| self.plugins.iter().find(|p| p.id == a.plugin))
                     .map(|p| p.root.as_path());
-                display::dial_image(&self.renderer, slot, root)?
+                let mut picture =
+                    if has_child && !self.actions.iter().any(|a| a.uuid == target.uuid) {
+                        let mut placeholder = target.clone();
+                        placeholder.layout = "$X1".into();
+                        placeholder.layout_cache = None;
+                        placeholder.feedback = json!({"title":"Unavailable"});
+                        placeholder.background = None;
+                        display::dial_image(&self.renderer, &mut placeholder, None)?
+                    } else {
+                        display::dial_image(&self.renderer, target, root)?
+                    };
+                warnings.append(&mut target.display_warnings);
+                if has_child {
+                    let mut preview = Cursor::new(Vec::new());
+                    picture.write_to(&mut preview, image::ImageFormat::Png)?;
+                    target.preview = STANDARD.encode(preview.into_inner());
+                }
+                if show_mark {
+                    stack::mark(&mut picture);
+                }
+                picture
             } else {
                 self.renderer.key(&slot.title, slot.background.as_ref())
             };
@@ -420,8 +478,9 @@ impl Host {
             .unwrap_or("")
             .to_owned();
         let mut slot = Slot {
-            multi_children: vec![],
-            multi_id: String::new(),
+            children: vec![],
+            child_id: String::new(),
+            in_multi_action: false,
             context: uuid::Uuid::new_v4().to_string(),
             controller: controller.into(),
             index,
@@ -430,8 +489,12 @@ impl Host {
             settings: if controller == "Encoder" && uuid == crate::system_actions::MULTIMEDIA {
                 json!({"actionIdx":18})
             } else {
-                crate::audio_output::defaults(uuid)
-                    .unwrap_or_else(|| crate::system_actions::defaults(uuid))
+                if uuid == crate::dial_stack::UUID {
+                    stack::defaults()
+                } else {
+                    crate::audio_output::defaults(uuid)
+                        .unwrap_or_else(|| crate::system_actions::defaults(uuid))
+                }
             },
             title,
             state: 0,
@@ -456,6 +519,9 @@ impl Host {
         }
         if multiaction::container(uuid) {
             slot.raw = json!({"Actions":[{"Actions":[]},{"Actions":[]}]});
+        }
+        if uuid == crate::dial_stack::UUID {
+            slot.raw = json!({"Actions":[],"Settings":slot.settings});
         }
         if uuid == multiaction::DELAY {
             slot.settings = json!({"delay":1000});
@@ -580,6 +646,12 @@ impl Host {
                 _ => {}
             }
         }
+        if slot.uuid == crate::dial_stack::UUID {
+            if pressed || owned_release {
+                self.stack_button(&slot, pressed)?;
+            }
+            return Ok(());
+        }
         if multiaction::container(&slot.uuid) {
             if pressed && self.multi_running(&slot.context) {
                 self.cancel_multi(&slot.context);
@@ -696,7 +768,9 @@ impl Host {
             .find(|s| s.controller == "Encoder" && s.index == index)
             .cloned()
         {
-            if crate::system_actions::supported(&slot.uuid) {
+            if slot.uuid == crate::dial_stack::UUID {
+                self.stack_input(&slot, name, extra)?;
+            } else if crate::system_actions::supported(&slot.uuid) {
                 let trigger = if name == "dialRotate" {
                     crate::system_actions::Trigger::Rotate(
                         extra["ticks"].as_i64().unwrap_or(0) as i8
@@ -935,7 +1009,8 @@ async fn root(
 }
 fn slot_snapshot(host: &Host, s: &Slot) -> Value {
     json!({"available":host.actions.iter().any(|a|a.uuid==s.uuid),"pinned":s.pinned,"context":s.context,"controller":s.controller,"index":s.index,"uuid":s.uuid,"name":s.name,"settings":s.settings,"title":s.title,"state":s.state,"feedback":s.feedback,"layout":s.layout,"preview":s.preview,"raw":s.raw,
-        "multi_running":host.multi_running(&s.context),"multi_children":s.multi_children.iter().map(|g|g.iter().map(|c|slot_snapshot(host,c)).collect::<Vec<_>>()).collect::<Vec<_>>(),
+        "stack_children":if s.uuid==crate::dial_stack::UUID {s.children.first().map(|children|children.iter().map(|c|slot_snapshot(host,c)).collect::<Vec<_>>()).unwrap_or_default()}else{vec![]},
+        "multi_running":host.multi_running(&s.context),"multi_children":s.children.iter().map(|g|g.iter().map(|c|slot_snapshot(host,c)).collect::<Vec<_>>()).collect::<Vec<_>>(),
         "has_inspector":host.actions.iter().find(|a|a.uuid==s.uuid).is_some_and(|a|a.raw["PropertyInspectorPath"].is_string()||host.plugins.iter().find(|p|p.id==a.plugin).is_some_and(|p|p.manifest["PropertyInspectorPath"].is_string()))})
 }
 fn snapshot(host: &Host) -> Value {
@@ -1094,10 +1169,24 @@ fn apply_control(host: &mut Host, r: Value) -> Result<()> {
                     index,
                     ticks: i8::try_from(r["ticks"].as_i64().context("Missing ticks")?)?,
                 },
+                "touchTap" if index < 4 => InputEvent::Touch {
+                    x: u16::try_from(r["x"].as_u64().unwrap_or(u64::from(index) * 200 + 100))?,
+                    y: u16::try_from(r["y"].as_u64().unwrap_or(50))?,
+                    long: r["hold"].as_bool().unwrap_or(false),
+                },
                 _ => bail!("Invalid simulated event"),
             };
             host.input(event)
         }
+        "stack_save" => host.save_stack(
+            r["context"].as_str().context("Stack context missing")?,
+            r["raw"].clone(),
+        ),
+        "stack_select" => host.select_stack(
+            r["context"].as_str().context("Stack context missing")?,
+            usize::try_from(r["index"].as_u64().context("Stack index missing")?)?,
+            true,
+        ),
         "multi_save" => host.save_multi(
             r["context"]
                 .as_str()
@@ -1170,7 +1259,7 @@ async fn socket_session(socket: WebSocket, state: Shared) {
             host.plugins[index].sender = Some(sender);
             let id = host.plugins[index].id.clone();
             host.log(format!("Plugin connected: {id}"));
-            for slot in host.slots.iter().flat_map(Slot::flatten) {
+            for slot in host.slots.iter().flat_map(Slot::visible_flatten) {
                 if host
                     .actions
                     .iter()
@@ -1489,6 +1578,7 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
     let (plugins, mut actions) = load_plugins(plugin_paths)?;
     actions.extend(library::navigation_actions());
     actions.extend(multiaction::definitions());
+    actions.push(stack::action());
     for (uuid, name, _) in crate::system_actions::definitions()
         .into_iter()
         .chain(crate::audio_output::definitions())
@@ -1541,6 +1631,8 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
     library.validate()?;
     let slots = library.visible()?;
     let mut host = Host {
+        stack_gestures: HashMap::new(),
+        stack_cooldown: HashMap::new(),
         multi_owned: HashSet::new(),
         multi_held: HashMap::new(),
         multi_pending: HashMap::new(),
@@ -1679,7 +1771,7 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
         })
     });
     host.sync_visible();
-    host.hydrate_library_multi();
+    host.hydrate_library_children();
     host.slots = host.library.visible()?;
     host.render()?;
     host.persist()?;
@@ -1908,6 +2000,8 @@ mod tests {
     }
     fn fixture(root: &Path) -> Host {
         let mut host = Host {
+            stack_gestures: HashMap::new(),
+            stack_cooldown: HashMap::new(),
             multi_owned: HashSet::new(),
             multi_held: HashMap::new(),
             multi_pending: HashMap::new(),
@@ -1943,8 +2037,9 @@ mod tests {
                 raw: json!({"States":[{}]}),
             }],
             slots: vec![Slot {
-                multi_children: vec![],
-                multi_id: String::new(),
+                children: vec![],
+                child_id: String::new(),
+                in_multi_action: false,
                 context: "test.context".into(),
                 controller: "Keypad".into(),
                 index: 0,
@@ -1989,6 +2084,103 @@ mod tests {
         let context = host.slots[0].context.clone();
         host.save_multi(&context,json!({"Actions":[{"Actions":[{"UUID":action,"ActionID":"child","Settings":settings,"State":0,"States":[{}]}]},{"Actions":[]}]})).unwrap();
         host.slots[0].clone()
+    }
+    #[test]
+    fn legacy_multi_child_storage_migrates_without_changing_contexts() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut host = fixture(temp.path());
+        let parent = multi_fixture(&mut host, "test.action", json!({"keep":73}));
+        let context = parent.children[0][0].context.clone();
+        fn legacy(value: &mut Value) {
+            match value {
+                Value::Object(fields) => {
+                    fields.remove("in_multi_action");
+                    if let Some(value) = fields.remove("children") {
+                        fields.insert("multi_children".into(), value);
+                    }
+                    if let Some(value) = fields.remove("child_id") {
+                        fields.insert("multi_id".into(), value);
+                    }
+                    for value in fields.values_mut() {
+                        legacy(value);
+                    }
+                }
+                Value::Array(items) => {
+                    for value in items {
+                        legacy(value);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut saved = serde_json::to_value(parent).unwrap();
+        legacy(&mut saved);
+        let mut loaded: Slot = serde_json::from_value(saved).unwrap();
+        loaded.hydrate_children(&host.actions).unwrap();
+        assert_eq!(loaded.children[0][0].context, context);
+        assert_eq!(loaded.children[0][0].settings, json!({"keep":73}));
+        let payload = action_payload(&loaded.children[0][0]);
+        assert_eq!(payload["isInMultiAction"], true);
+        assert!(payload.get("coordinates").is_none());
+    }
+    #[test]
+    fn stack_inspector_updates_only_its_selected_child() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut host = fixture(temp.path());
+        host.actions[0].controllers.push("Encoder".into());
+        host.actions.push(stack::action());
+        host.assign("Encoder", 1, crate::dial_stack::UUID).unwrap();
+        let parent = host
+            .slots
+            .iter()
+            .find(|s| s.uuid == crate::dial_stack::UUID)
+            .unwrap()
+            .context
+            .clone();
+        host.save_stack(&parent,json!({"Actions":[{"UUID":"test.action","ActionID":"a","Settings":{"value":10}},{"UUID":"test.action","ActionID":"b","Settings":{"value":20}}],"Settings":{"CurrentIdx":0}})).unwrap();
+        let selected = host.slot_any(&parent).unwrap().children[0][0]
+            .context
+            .clone();
+        let inactive = host.slot_any(&parent).unwrap().children[0][1]
+            .context
+            .clone();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        host.inspectors.insert(
+            "stack-pi".into(),
+            Inspector {
+                context: selected.clone(),
+                plugin: 0,
+                child: None,
+                sender: Some(tx),
+            },
+        );
+        host.inspector_message(
+            "stack-pi",
+            json!({"event":"setSettings","context":selected,"payload":{"value":19}}),
+        )
+        .unwrap();
+        assert_eq!(
+            host.slot_any(&parent).unwrap().children[0][0].settings["value"],
+            19
+        );
+        assert_eq!(
+            host.slot_any(&parent).unwrap().children[0][1].settings["value"],
+            20
+        );
+        assert_eq!(
+            host.slot_any(&parent).unwrap().raw["Actions"][0]["Settings"]["value"],
+            19
+        );
+        assert!(
+            host.inspector_message(
+                "stack-pi",
+                json!({"event":"setSettings","context":inactive,"payload":{"value":99}})
+            )
+            .is_err()
+        );
+        let payload = action_payload(host.slot_any(&selected).unwrap());
+        assert_eq!(payload["coordinates"], json!({"column":1,"row":0}));
+        assert_eq!(payload["isInMultiAction"], false);
     }
     #[test]
     fn cancelling_a_due_batch_releases_only_dispatched_children() {

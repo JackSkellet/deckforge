@@ -60,7 +60,7 @@ The shipped profiles contain real action identifiers and settings; their presenc
 | AC-03 | Multimedia transport, mute and volume | **Partial, A/C/T.** Original transport enum and composite volume-dial mapping recovered and implemented through Linux media key events. Real audio/player acceptance and external state feedback remain open. | Play/pause/seek where supported, mute and change volume against real media players; verify externally changed state feeds back. [System actions][system] |
 | AC-04 | Soundboard playback, looping, overlap/restart, fades, volume and output device | **Verified subset, A/C/T.** Native controls, independent streaming mixer and Pulse/PipeWire transport implement four playback modes, volume, fades, routing and soundboard-wide stop. Captured virtual-sink PCM verifies WAV/embedded MP3, volume and fade envelopes. Audible/physical acceptance, Windows timing/visual equivalence and multichannel downmix remain open. | Play supported audio fixtures in each documented mode, route to selected output, stop/retrigger and restart host safely. Verify captured audio and audible output. [Soundboard][soundboard] |
 | AC-05 | Multi Actions, delays, switch/random variants and plugin multi-action context | **Verified subset, A/C/T.** Native ordered-step editor, delays, Switch and Random run through an incremental scheduler. Child SDK payloads, desired states, settings/PI ownership, cancellation and restart identities pass real-process tests; unchanged Hello World runs nested. Physical shortcuts and full Windows workflow equivalence remain open. | Import/reorder sequences, check measured timing and stateful branches, then verify plugin events with a fixture that consumes multi-action state. Inventory switch/random behavior before marking those variants passed. [Multi Actions][multi], [delay controls][delays] |
-| AC-06 | Dial Stacks | **Missing, A/C.** `com.elgato.streamdeck.dial.stack` appears in shipped profiles. | Load multiple real dial actions; dial push cycles active action and corresponding touch display; settings persist independently. [Dial Stacks][stacks] |
+| AC-06 | Dial Stacks | **Verified subset, A/C/T.** Native editing, selected-child lifecycle, click/held-turn/touch routing, fast navigation and persistence work. Unchanged Layouts instances produce verified PNG changes. Physical acceptance and exact artwork/restore behavior remain open. | Load multiple real dial actions; dial push cycles active action and corresponding touch display; settings persist independently. [Dial Stacks][stacks] |
 | AC-07 | Action Trigger adapts key actions to dial directions/press | **Missing, A/C.** Shipped key-adaptor actions are preserved without execution. | Configure three different actions, exercise both rotation directions and press, and verify corresponding plugin key-event semantics. [Action Trigger][trigger] |
 | AC-08 | Action Wheel and Key Logic/Key Stack behaviors | **Missing/Unresolved, A/C.** Shipped `keys.logic`/`keys.stack` descriptors exist; semantics are not fully investigated. | Implement documented wheel selection/activation and record actual 7.6 Key Logic/Stack reference behavior before creating differential tests. [Action Wheel][wheel], [7.4 fixes][release74] |
 | AC-09 | Device brightness, sleep/screensaver and profile/page navigation actions | **Partial, A/C/T.** Profile/page/folder navigation implemented and process-tested. Brightness, sleep and screensaver remain missing. | Execute user-configured actions on hardware, verify ranges/state restoration, and ensure navigation targets the correct device. [Preferences][preferences], [screensaver][screensaver] |
@@ -344,3 +344,24 @@ keyboard no-op path, strict Clippy and nine optimized-process suites. The native
 editor capture, timing/protocol tests, hashes and unchanged Hello World build
 evidence are retained in `../../evidence/multi-actions/`. The installed app
 connects the attached Plus and all three sample plugins.
+
+
+### Dial Stack evidence update, 2026-10-12
+
+`../../evidence/dial-stack-contracts.json` records four original stacks, archive/
+member hashes, selected-only SDK lifecycle, pending-selection routing and the
+fast-navigation deadline. The stack consumes dial pushes; touch and ordinary
+turns reach the selected Encoder child. Fast held turns select a pending entry,
+and release commits it; the original first clockwise turn advances two positions
+because push already queues the next item. The selected child remains visible
+until commit. Native fast-navigation restore/editor paths remain qualified.
+
+`tests/stack_interop.py` verifies active/inactive contexts, ordinary Encoder
+payloads and coordinates, cached late replies, PI activation, persisted selection,
+flat child export and unknown fields. Original Wave Link records, including an
+out-of-range placement for the attached Plus geometry, survive export. Wave Link
+itself remains unavailable. Actual unchanged Layouts feedback images and icons
+are checked; independently drawn marker changes stay inside [160,8,26,26].
+The common child store also migrates earlier Multi Action sessions without
+changing their contexts or SDK meaning. Native rendering is captured from an
+isolated session; no physical stack gesture is claimed by simulation tests.

@@ -147,6 +147,28 @@ native workflow/hardware acceptance remain separate checks. A sequence dispatche
 asynchronous actions in order; it cannot infer when an external application or
 network operation has finished.
 
+## Dial Stacks
+
+Assign **Dial Stack** to a dial, then add and order compatible dial actions in the
+native editor. Press/release cycles through them. Rotation and touch operate the
+selected action; a normal turn while pressed adjusts it without cycling. The
+selected child keeps its own settings, feedback, layout and property inspector.
+Opening an inactive child's plugin settings explicitly activates it first.
+
+**Fast navigation** consumes held turns and commits the pending selection on
+release, with the recovered 300 ms rotation suppression afterward. Linux honors
+its saved setting; one inspected Windows loader resets it, and other restore
+paths remain unverified. The optional stack mark uses the original overlay
+rectangle with independently drawn artwork.
+
+Only the selected child receives active plugin lifecycle events. Late inactive
+updates are retained without replacing the current display. Native selection,
+page changes, export/reimport and restart preserve child identities/settings.
+Original Wave Link stacks are preserved with unavailable actions identified;
+implementing the container does not make the Windows Wave Link plugin work.
+The unchanged Layouts plugin is tested with multiple independent stack instances
+and actual PNG comparisons. Physical dial-stack acceptance remains pending.
+
 ## Commands
 
 ```sh
@@ -207,7 +229,7 @@ completion criterion replaces the desktop parity goal.
    controls and real-world plugin compatibility beyond the tested samples.
 2. Separate hardware/editor targets, inactive-state image/title updates, alerts,
    animation, and native-reference visual validation of layout font/bar details.
-3. Windows acceptance of exported profiles, folder auto-exit, dial stacks,
+3. Windows acceptance of exported profiles, folder auto-exit, Action Trigger,
    text/hotkey-switch/audio actions, application activation, and automatic profile selection.
 4. Native Windows/macOS plugin binaries and platform-specific dependencies.
    These do not become Linux programs simply by reproducing the WebSocket API.
@@ -236,6 +258,7 @@ python tests/bundled_profiles_interop.py
 python tests/system_interop.py
 python tests/soundboard_interop.py --binary target/release/deckforge
 python tests/multi_interop.py --binary target/release/deckforge
+python tests/stack_interop.py --binary target/release/deckforge
 ```
 
 The optional installer test needs the local Windows artifacts. The sample

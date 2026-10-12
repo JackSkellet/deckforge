@@ -49,6 +49,14 @@ pub fn run(controller: Controller) -> Result<()> {
                     .insert(egui::TextStyle::Heading, egui::FontId::proportional(22.0));
             });
             let mut app = Desktop::new(controller);
+            if capture_path.is_some()
+                && std::env::var("DECKFORGE_CAPTURE_CONTROL").as_deref() == Ok("dial0")
+            {
+                app.selected = Selection {
+                    dial: true,
+                    index: 0,
+                };
+            }
             app.capture = capture_path.map(|path| Capture {
                 path,
                 started: Instant::now(),
@@ -220,6 +228,7 @@ struct PendingDelete {
     name: String,
 }
 struct Desktop {
+    stack_editor: crate::stack_editor::Editor,
     multi_editor: crate::multi_editor::Editor,
     controller: Controller,
     snapshot: Value,
@@ -242,6 +251,7 @@ impl Desktop {
     fn new(controller: Controller) -> Self {
         Self {
             multi_editor: crate::multi_editor::Editor::default(),
+            stack_editor: crate::stack_editor::Editor::default(),
             controller,
             snapshot: json!({}),
             last_poll: None,
@@ -865,6 +875,24 @@ impl Desktop {
         self.drafts.insert(selection, draft);
     }
     fn settings_editor(&mut self, ui: &mut egui::Ui, draft: &mut Draft, assigned_action: &str) {
+        if assigned_action == crate::dial_stack::UUID {
+            let parent = self.slot(self.selected).cloned().unwrap_or(json!({}));
+            let actions = self.snapshot["actions"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+            let outputs: Vec<(String, String)> =
+                serde_json::from_value(self.snapshot["audio_outputs"].clone()).unwrap_or_default();
+            for request in self.stack_editor.show(ui, &parent, &actions, &outputs) {
+                let context = string(&request, "context").to_owned();
+                let save = string(&request, "command") == "stack_save";
+                let success = self.command(request);
+                if save {
+                    self.stack_editor.saved(&context, success);
+                }
+            }
+            return;
+        }
         if matches!(
             assigned_action,
             "com.elgato.streamdeck.multiactions.routine"
