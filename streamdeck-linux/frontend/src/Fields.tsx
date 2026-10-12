@@ -219,7 +219,7 @@ const media: [number, string][] = [
   [5, "Volume up"],
   [6, "Volume down"],
 ];
-const keys: [string, number, number][] = [
+const keys: [string, number, number, number?, number?][] = [
   ...Array.from(
     { length: 26 },
     (_, i) =>
@@ -249,6 +249,57 @@ const keys: [string, number, number][] = [
   ["Down arrow", 0x01000015, 40],
   ["Page up", 0x01000016, 33],
   ["Page down", 0x01000017, 34],
+  ...([
+    ["Apostrophe", 39, 222],
+    ["Comma", 44, 188],
+    ["Minus", 45, 189],
+    ["Period", 46, 190],
+    ["Slash", 47, 191],
+    ["Semicolon", 59, 186],
+    ["Equals", 61, 187],
+    ["Left bracket", 91, 219],
+    ["Backslash", 92, 220],
+    ["Right bracket", 93, 221],
+    ["Backtick", 96, 192],
+    ["Numpad Enter", 0x01000005, 13],
+    ["Pause", 0x01000008, 19],
+    ["Print screen", 0x01000009, 44],
+    ["Caps Lock", 0x01000024, 20],
+    ["Num Lock", 0x01000025, 144],
+    ["Scroll Lock", 0x01000026, 145],
+    ["Menu", 0x01000055, 93],
+    ["AltGr", 0x01001103, 165],
+    ["Shift + Tab", 0x01000002, 9],
+    ["Right Super", 0x01000054, 92],
+    ["Compose", 0x01001120, -1],
+    ["Help", 0x01000058, -1],
+    ["Volume down", 0x01000070, 174],
+    ["Mute", 0x01000071, 173],
+    ["Volume up", 0x01000072, 175],
+    ["Media play", 0x01000080, -1],
+    ["Media stop", 0x01000081, 178],
+    ["Previous track", 0x01000082, 177],
+    ["Next track", 0x01000083, 176],
+    ["Media record", 0x01000084, -1],
+    ["Media play / pause", 0x01000086, 179],
+    ["Rewind", 0x010000c5, -1],
+    ["Fast forward", 0x01000102, -1],
+  ] as [string, number, number][]),
+  ...Array.from(
+    { length: 10 },
+    (_, i) =>
+      [`Numpad ${i}`, 48 + i, 96 + i, 0x4000, 96 + i] as [
+        string,
+        number,
+        number,
+        number,
+        number,
+      ],
+  ),
+  ["Numpad plus", 43, 107, 0x4000, 107],
+  ["Numpad minus", 45, 109, 0x4000, 109],
+  ["Numpad multiply", 42, 106, 0x4000, 106],
+  ["Numpad divide", 47, 111, 0x24000, 111],
 ];
 const modifiers: [string, string, number][] = [
   ["KeyCtrl", "Ctrl", 2],
@@ -283,16 +334,24 @@ function Hotkeys({
           return (
             <p key={index}>Imported shortcut requires advanced settings.</p>
           );
-        const selected = keys.find((k) =>
-          chord.QTKeyCode && ![0, 0x01ffffff].includes(chord.QTKeyCode)
-            ? k[1] === chord.QTKeyCode
-            : k[2] === chord.VKeyCode,
+        const identityFlags = (chord.KeyModifiers ?? 0) & ~0xf;
+        const selected = keys.findIndex(
+          (k) =>
+            k[1] === chord.QTKeyCode &&
+            (k[3] ?? 0) === identityFlags &&
+            (k[4] === undefined || k[4] === chord.NativeCode),
         );
+        const empty =
+          [undefined, -1, 0x01ffffff].includes(chord.QTKeyCode) &&
+          [undefined, -1, 0].includes(chord.VKeyCode) &&
+          [undefined, -1, 0, 146].includes(chord.NativeCode) &&
+          identityFlags === 0;
         function update(patch: RecordValue, standard = false) {
           const next = clone(entries);
           while (next.length <= index) next.push({});
           next[index] = { ...next[index], ...patch };
-          if (standard) delete next[index].NativeCode;
+          if (standard && patch.NativeCode === undefined)
+            delete next[index].NativeCode;
           set("Hotkeys", next);
         }
         return (
@@ -317,15 +376,27 @@ function Hotkeys({
             </div>
             <SelectField
               label="Key"
-              value={selected?.[1] ?? chord.QTKeyCode ?? ""}
-              options={keys.map(([name, qt]) => [qt, name])}
+              value={
+                selected >= 0
+                  ? String(selected)
+                  : empty
+                    ? "none"
+                    : "unrecognized key identity"
+              }
+              options={[
+                ["none", "No key (modifiers only)"],
+                ...keys.map(
+                  ([name], i) => [String(i), name] as [string, string],
+                ),
+              ]}
               onChange={(value) => {
-                const key = keys.find((k) => k[1] === Number(value))!;
+                const key = value === "none" ? undefined : keys[Number(value)];
                 const patch: RecordValue = {
-                  QTKeyCode: key[1],
-                  VKeyCode: key[2],
-                  KeyModifiers: 0,
+                  QTKeyCode: key?.[1] ?? 0x01ffffff,
+                  VKeyCode: key?.[2] ?? -1,
+                  KeyModifiers: key?.[3] ?? 0,
                 };
+                if (key?.[4] !== undefined) patch.NativeCode = key[4];
                 for (const [field, , bit] of modifiers) {
                   patch[field] =
                     chord[field] ?? !!((chord.KeyModifiers ?? 0) & bit);
@@ -334,6 +405,25 @@ function Hotkeys({
                 update(patch, true);
               }}
             />
+            <button
+              type="button"
+              onClick={() =>
+                update(
+                  {
+                    QTKeyCode: 0x01ffffff,
+                    VKeyCode: -1,
+                    KeyModifiers: 0,
+                    KeyCtrl: false,
+                    KeyShift: false,
+                    KeyOption: false,
+                    KeyCmd: false,
+                  },
+                  true,
+                )
+              }
+            >
+              Clear {label.toLowerCase()}
+            </button>
           </fieldset>
         );
       })}
@@ -350,8 +440,10 @@ export function SettingsFields({
   editorKey = uuid,
   mixer,
   device,
+  folderPages,
 }: {
   editorKey?: string;
+  folderPages?: [string, string][];
   device?: string;
   mixer?: MixerConfig;
   uuid: string;
@@ -457,6 +549,81 @@ export function SettingsFields({
     </button>
   );
   let special: ReactNode = null;
+  if (uuid === "com.elgato.counter.action") {
+    handled.add("count");
+    handled.add("incrementBy");
+    const increment = settings.incrementBy ?? 1;
+    const custom =
+      typeof increment !== "number" ||
+      !Number.isInteger(increment) ||
+      increment < 1 ||
+      increment > 5;
+    special = (
+      <>
+        {custom ? (
+          <>
+            <p className="hint">
+              Custom increment: {String(increment)}. This is outside the
+              sample's standard 1–5 range and is preserved.
+            </p>
+            <button type="button" onClick={() => set("incrementBy", 1)}>
+              Use standard increment
+            </button>
+          </>
+        ) : (
+          num("incrementBy", "Increment by", 1, 1, 5)
+        )}
+        <p className="hint">
+          Tap to increase the counter; hold to reset it. The count is runtime
+          data. Custom increments remain editable in Advanced settings.
+        </p>
+      </>
+    );
+  }
+  if (uuid === "com.elgato.hello-world.newstring") {
+    handled.add("language");
+    handled.add("titleKey");
+    special = (
+      <SelectField
+        label="Sample language"
+        value={settings.language ?? ""}
+        options={[
+          ["", "Host language"],
+          ["zh_CN", "简体中文"],
+          ["en", "English"],
+          ["fr", "Français"],
+          ["de", "Deutsch"],
+          ["ja", "日本語"],
+          ["ko", "한국어"],
+          ["es", "Español"],
+        ]}
+        onChange={(language) => {
+          const next = { ...settings };
+          if (language === "") delete next.language;
+          else next.language = language;
+          onChange(next);
+        }}
+      />
+    );
+  }
+  if (
+    [
+      "com.elgato.layouts.built-in-layout",
+      "com.elgato.layouts.custom-layout",
+      "com.elgato.layouts.feedback",
+    ].includes(uuid)
+  ) {
+    handled.add("value");
+    special = (
+      <p className="hint">
+        This sample has no authored settings. Turn the dial to{" "}
+        {uuid.endsWith(".feedback")
+          ? "adjust its displayed value"
+          : "change the demonstration layout"}
+        . Runtime values remain available in Advanced settings.
+      </p>
+    );
+  }
   if (
     uuid === "com.deckforge.mixer.channel" ||
     uuid === "com.deckforge.mixer.mix"
@@ -495,9 +662,9 @@ export function SettingsFields({
               "toggle_mute",
             )}
             {settings.mode === "set_volume" &&
-              num("volume", "Volume (%)", 50, 0, 100)}
+              num("volume", "Volume (%)", 50, 0, 100, 0.1)}
             {settings.mode === "change_volume" &&
-              num("delta", "Volume change (%)", 5, -100, 100)}
+              num("delta", "Volume change (%)", 5, -100, 100, 0.1)}
           </>
         )}
         <p className="hint">
@@ -508,7 +675,8 @@ export function SettingsFields({
     );
   }
 
-  if (uuid.endsWith(".system.website"))
+  if (uuid.endsWith(".system.website")) {
+    handled.add("browser");
     special = (
       <>
         {text("path", "Website address")}
@@ -521,6 +689,7 @@ export function SettingsFields({
           )}
       </>
     );
+  }
   if (uuid.endsWith(".system.open"))
     special = (
       <>
@@ -533,7 +702,16 @@ export function SettingsFields({
     );
   if (uuid.endsWith(".system.hotkey")) {
     handled.add("Hotkeys");
-    special = <Hotkeys settings={settings} set={set} controller={controller} />;
+    handled.add("Coalesce");
+    special = (
+      <>
+        <Hotkeys settings={settings} set={set} controller={controller} />
+        <p className="hint">
+          Shortcuts use Linux key positions. An empty shortcut sends no keys.
+          Imported Coalesce is retained but has no separate runtime behavior.
+        </p>
+      </>
+    );
   }
   if (uuid.endsWith(".system.multimedia"))
     special = (
@@ -554,7 +732,8 @@ export function SettingsFields({
           )}
       </>
     );
-  if (uuid === "com.elgato.streamdeck.system.keybrightness")
+  if (uuid === "com.elgato.streamdeck.system.keybrightness") {
+    handled.add("actionIdx");
     special =
       controller === "Keypad" ? (
         select(
@@ -574,13 +753,16 @@ export function SettingsFields({
       ) : (
         <p className="hint">Turn for 5% steps. Hold and turn for 1% steps.</p>
       );
+  }
   if (uuid.endsWith(".system.sleep"))
     special = text(
       "DeviceUUID",
       "Device ID",
-      "Leave empty for all connected devices.",
+      "Leave empty for the device containing this action. Other device IDs are not supported by this action.",
     );
-  if (uuid.endsWith(".soundboard.playaudio"))
+  if (uuid.endsWith(".soundboard.playaudio")) {
+    handled.add("outputType");
+    handled.add("fadeLen");
     special = (
       <>
         {text("path", "Audio file")}
@@ -614,7 +796,13 @@ export function SettingsFields({
           "linuxOutput",
           "Audio output",
           [["", "System default"], ...outputs],
-          settings.outputType === "" ? "" : undefined,
+          settings.outputType ? "unmapped imported output" : "",
+        )}
+        {settings.linuxOutput === undefined && settings.outputType && (
+          <p className="warning">
+            The imported output has no Linux mapping. Choose an audio output,
+            including System default, before playing.
+          </p>
         )}
         <button
           type="button"
@@ -626,10 +814,41 @@ export function SettingsFields({
         </button>
       </>
     );
+  }
+  if (uuid === "com.elgato.streamdeck.profile.openchild")
+    special = folderPages ? (
+      <>
+        {select("ProfileUUID", "Folder page", folderPages)}
+        {!folderPages.length && (
+          <p className="hint">
+            Create a folder or another page in this profile first.
+          </p>
+        )}
+      </>
+    ) : (
+      text(
+        "ProfileUUID",
+        "Folder page ID",
+        "Choose an existing page in this profile. Create folder here makes a new folder and its link.",
+      )
+    );
+  const noOptions: Record<string, string> = {
+    "com.elgato.streamdeck.soundboard.stopaudioplay":
+      "Stops all sounds started by Deckforge. No action-specific settings.",
+    "com.elgato.streamdeck.page.next":
+      "Moves to the next top-level page in this profile. No action-specific settings.",
+    "com.elgato.streamdeck.page.previous":
+      "Moves to the previous top-level page in this profile. No action-specific settings.",
+    "com.elgato.streamdeck.page.indicator":
+      "Displays the current page number. No action-specific settings.",
+    "com.elgato.streamdeck.profile.backtoparent":
+      "Returns from the current folder. No action-specific settings.",
+  };
+  if (noOptions[uuid]) special = <p className="hint">{noOptions[uuid]}</p>;
   if (uuid.endsWith(".page.goto"))
     special = num("PageIndex", "Page number", 1, 1);
   if (uuid.endsWith(".multiactions.delay"))
-    special = num("delay", "Delay (milliseconds)", 1000, 0);
+    special = num("delay", "Delay (milliseconds)", 1000, 0, 86_400_000);
   return (
     <div className="settings-fields" id={id}>
       {special}

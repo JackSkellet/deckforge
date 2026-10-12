@@ -237,9 +237,9 @@ it("keeps both parts of a delayed action save on device A after selecting B", as
     await screen.findByRole("textbox", { name: "Title" }),
     " local",
   );
-  const increment = screen.getByRole("spinbutton", { name: "incrementBy" });
+  const increment = screen.getByRole("spinbutton", { name: "Increment by" });
   await user.clear(increment);
-  await user.type(increment, "7");
+  await user.type(increment, "5");
   await user.click(screen.getByRole("button", { name: "Save changes" }));
   await waitFor(() =>
     expect(request).toHaveBeenCalledWith(
@@ -260,7 +260,7 @@ it("keeps both parts of a delayed action save on device A after selecting B", as
       device: "deck-A",
       context: "deck-A:fixture-0-Keypad",
       base: { count: 42, incrementBy: 1 },
-      settings: { count: 42, incrementBy: 7 },
+      settings: { count: 42, incrementBy: 5 },
     }),
   );
   expect(
@@ -271,7 +271,7 @@ it("keeps both parts of a delayed action save on device A after selecting B", as
     ).value,
   ).toBe("deck-B");
   expect(snapshots["deck-B"].slots[0].settings.incrementBy).toBe(1);
-  expect(snapshots["deck-A"].slots[0].settings.incrementBy).toBe(7);
+  expect(snapshots["deck-A"].slots[0].settings.incrementBy).toBe(5);
   expect(snapshots["deck-A"].slots[0].settings.count).toBe(44);
 });
 it("captures profile-export ownership before waiting for a native file picker", async () => {

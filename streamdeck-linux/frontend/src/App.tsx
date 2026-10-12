@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { command, pick, request } from "./bridge";
+import { mergeSettingsEdit } from "./settings";
 import {
   allowed,
   filteredActions,
@@ -306,6 +307,9 @@ export default function App() {
   const page = profile?.pages.find(
     (p) => p.id === snapshot?.library.active_page,
   );
+  const folderPages: [string, string][] = (profile?.pages ?? [])
+    .filter((candidate) => candidate.id !== profile?.pin_page)
+    .map((candidate) => [candidate.id, candidate.name]);
   const readonly = profile?.readonly ?? false;
   function openProfileCopy() {
     if (!snapshot || !profile) return;
@@ -365,13 +369,21 @@ export default function App() {
   }
   function change(patch: Partial<Draft>) {
     if (!slot) return;
-    setDrafts((prev) => ({
-      ...prev,
-      [slot.context]: editDraft(
-        prev[slot.context] ?? reconcileDraft(undefined, slot),
-        patch,
-      ),
-    }));
+    const rendered = draft ?? reconcileDraft(undefined, slot);
+    setDrafts((prev) => {
+      const latest = prev[slot.context] ?? rendered;
+      const edit = Object.hasOwn(patch, "settings")
+        ? {
+            ...patch,
+            settings: mergeSettingsEdit(
+              rendered.settings,
+              patch.settings,
+              latest.settings,
+            ),
+          }
+        : patch;
+      return { ...prev, [slot.context]: editDraft(latest, edit) };
+    });
   }
   const appearanceStale =
     !!slot &&
@@ -1396,6 +1408,7 @@ export default function App() {
                     )}
                     {isContainer(slot.uuid) ? (
                       <Sequence
+                        folderPages={folderPages}
                         encoderDisplay={hasEncoderDisplay(snapshot)}
                         device={currentDevice}
                         mixer={snapshot.mixer?.config}
@@ -1412,6 +1425,7 @@ export default function App() {
                       />
                     ) : (
                       <SettingsFields
+                        folderPages={folderPages}
                         device={currentDevice}
                         mixer={snapshot.mixer?.config}
                         editorKey={slot.context}

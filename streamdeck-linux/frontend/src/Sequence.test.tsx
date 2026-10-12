@@ -119,3 +119,99 @@ it("adding a translated action uses original records while showing its translate
     Settings: { step: 2 },
   });
 });
+
+it("edits bounded opt-in action timing and removes the invalid automatic state sentinel", async () => {
+  const user = userEvent.setup(),
+    onChange = vi.fn();
+  const entry = {
+    ActionID: "one",
+    UUID: "example",
+    Name: "Example",
+    Settings: { Future: true },
+    States: [{ Title: "Off" }, { Title: "On" }],
+    OverrideState: 1,
+    Future: "keep",
+  };
+  const raw = { Actions: [{ Actions: [entry] }, { Actions: [] }] };
+  const props = {
+    uuid: "com.elgato.streamdeck.multiactions.routine",
+    actions: [] as Action[],
+    outputs: [] as [string, string][],
+    onError: vi.fn(),
+    onChange,
+  };
+  const view = render(<Sequence {...props} raw={raw} />);
+  await user.click(screen.getByRole("button", { name: /1 Example/ }));
+  expect(onChange).not.toHaveBeenCalled();
+  expect(
+    screen.queryByRole("spinbutton", { name: "Hold duration (milliseconds)" }),
+  ).toBeNull();
+  await user.selectOptions(screen.getByRole("combobox", { name: "State" }), "");
+  expect(
+    onChange.mock.calls.at(-1)![0].Actions[0].Actions[0].OverrideState,
+  ).toBeUndefined();
+  await user.click(
+    screen.getByRole("checkbox", { name: "Custom action timing" }),
+  );
+  const changed = onChange.mock.calls.at(-1)![0];
+  expect(changed.Actions[0].Actions[0].MultiActionDelays).toEqual({
+    Delay1: 100,
+    Delay2: 100,
+  });
+  expect(changed.Actions[0].Actions[0].Future).toBe("keep");
+  changed.Actions[0].Actions[0].MultiActionDelays.FutureTiming = "preserve";
+  view.rerender(<Sequence {...props} raw={changed} />);
+  const held = screen.getByRole("spinbutton", {
+    name: "Hold duration (milliseconds)",
+  }) as HTMLInputElement;
+  expect(held.min).toBe("1");
+  expect(held.max).toBe("100");
+  await user.clear(held);
+  await user.type(held, "25");
+  expect(
+    onChange.mock.calls.at(-1)![0].Actions[0].Actions[0].MultiActionDelays,
+  ).toEqual({ Delay1: 25, Delay2: 100, FutureTiming: "preserve" });
+  await user.click(
+    screen.getByRole("checkbox", { name: "Custom action timing" }),
+  );
+  expect(
+    onChange.mock.calls.at(-1)![0].Actions[0].Actions[0].MultiActionDelays,
+  ).toBeUndefined();
+});
+
+it("forwards folder page choices into nested action editors", async () => {
+  const user = userEvent.setup(),
+    onChange = vi.fn();
+  render(
+    <Sequence
+      uuid="com.elgato.streamdeck.multiactions.routine"
+      raw={{
+        Actions: [
+          {
+            Actions: [
+              {
+                ActionID: "folder",
+                UUID: "com.elgato.streamdeck.profile.openchild",
+                Name: "Folder",
+                Settings: {},
+              },
+            ],
+          },
+        ],
+      }}
+      actions={[]}
+      outputs={[]}
+      folderPages={[["target", "Folder destination"]]}
+      onChange={onChange}
+      onError={vi.fn()}
+    />,
+  );
+  await user.click(screen.getByRole("button", { name: /1 Folder/ }));
+  await user.selectOptions(
+    screen.getByRole("combobox", { name: "Folder page" }),
+    "target",
+  );
+  expect(onChange.mock.calls.at(-1)![0].Actions[0].Actions[0].Settings).toEqual(
+    { ProfileUUID: "target" },
+  );
+});

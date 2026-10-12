@@ -9,6 +9,16 @@ import tempfile
 import zipfile
 
 
+def validate_inspector_schema(source):
+    schema = json.loads((source / 'ui/fields.json').read_text())
+    expected = ('// Generated from fields.json by tests/generate-fields.cjs.\n'
+                'window.DeckforgeDiscordFields = '
+                + json.dumps(schema, indent=2, ensure_ascii=False) + ';\n')
+    generated = source / 'ui/fields.js'
+    if not generated.is_file() or generated.read_text() != expected:
+        raise ValueError('Inspector schema is stale. Run node plugins/discord/tests/generate-fields.cjs before packaging.')
+
+
 def main():
     project = Path(__file__).resolve().parents[1]
     source = project/'plugins/discord'
@@ -16,6 +26,7 @@ def main():
     parser.add_argument('--skip-build', action='store_true', help='Package the existing release binary')
     parser.add_argument('--output', type=Path, default=project/'target/release/discord-for-deckforge.streamDeckPlugin')
     args = parser.parse_args()
+    validate_inspector_schema(source)
     if not args.skip_build:
         subprocess.run(['cargo','build','--release','--locked','--manifest-path',str(source/'Cargo.toml')],check=True)
     binary = source/'target/release/deckforge-discord'

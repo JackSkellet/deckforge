@@ -6,6 +6,7 @@ import {
   screen,
   waitFor,
   fireEvent,
+  act,
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import App from "./App";
@@ -578,6 +579,42 @@ describe("desktop interactions", () => {
         context: "counter-1",
         base: { count: 7, incrementBy: 1, Future: { keep: true } },
         settings: { count: 7, incrementBy: 5, Future: { keep: true } },
+      }),
+    );
+  });
+  it("keeps plugin updates arriving between a rendered control and its edit callback", async () => {
+    render(<App />);
+    const increment = await screen.findByRole("spinbutton", {
+      name: "incrementBy",
+    });
+    act(() => {
+      snapshot.slots[0].settings = {
+        count: 8,
+        incrementBy: 1,
+        Future: { keep: false, added: "runtime" },
+        titleKey: "clickme",
+      };
+      emit(structuredClone(snapshot));
+      fireEvent.change(increment, { target: { value: "3" } });
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() =>
+      expect(request).toHaveBeenCalledWith("command", {
+        device: "test",
+        command: "settings_patch",
+        context: "counter-1",
+        base: {
+          count: 8,
+          incrementBy: 1,
+          Future: { keep: false, added: "runtime" },
+          titleKey: "clickme",
+        },
+        settings: {
+          count: 8,
+          incrementBy: 3,
+          Future: { keep: false, added: "runtime" },
+          titleKey: "clickme",
+        },
       }),
     );
   });

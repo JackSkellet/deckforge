@@ -48,6 +48,18 @@ the connection; **Forget private credentials** removes the local saved credentia
 
 ## Current behavior
 
+All 17 actions have audited property-inspector forms. Server, channel, user and
+audio-device choices use names when Discord supplies a list, with custom-ID
+fallbacks. Changing servers clears the channel choice; Disconnect is explicit.
+Volume adjustments display signed percentages while preserving the original
+profile encoding. Input volume is capped at 100%, output/user volume at 200%.
+Actions without per-action settings say so; connection controls remain available.
+
+The local inspector loads `ui/fields.js` as a script because native WebKit cannot
+fetch the original `file://` JSON resource. `ui/fields.json` remains canonical;
+after changing it, regenerate with `node plugins/discord/tests/generate-fields.cjs`
+from the application directory. Packaging rejects a stale generated file.
+
 Implemented request routes cover mute/deafen, voice/text channels, push-to-talk
 and push-to-mute, audio-device selection, voice mode, local/user volume, soundboard,
 video and screen sharing. Some commands are documented Discord RPC; the PTT,

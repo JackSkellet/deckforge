@@ -1,0 +1,332 @@
+// Generated from fields.json by tests/generate-fields.cjs.
+window.DeckforgeDiscordFields = {
+  "com.elgato.discord.soundboard": {
+    "name": "Soundboard",
+    "fields": {
+      "guild_id": {
+        "type": "string",
+        "minLength": 1
+      },
+      "sound_id": {
+        "type": "string",
+        "minLength": 1
+      },
+      "sound_name": {
+        "type": "string",
+        "minLength": 1
+      },
+      "emoji_path": {
+        "type": "string"
+      }
+    }
+  },
+  "com.elgato.discord.mute": {
+    "name": "Mute",
+    "fields": {}
+  },
+  "com.elgato.discord.deafen": {
+    "name": "Deafen",
+    "fields": {}
+  },
+  "com.elgato.discord.channel.voice": {
+    "name": "Voice Channel",
+    "fields": {
+      "server": {
+        "type": "string",
+        "minLength": 1
+      },
+      "serverName": {
+        "type": "string"
+      },
+      "channel": {
+        "type": "string"
+      },
+      "icon": {
+        "type": "string",
+        "enum": [
+          "static",
+          "dynamic"
+        ],
+        "default": "static"
+      }
+    }
+  },
+  "com.elgato.discord.channel.text": {
+    "name": "Text Channel",
+    "fields": {
+      "server": {
+        "type": "string",
+        "minLength": 1
+      },
+      "serverName": {
+        "type": "string"
+      },
+      "channel": {
+        "type": "string",
+        "minLength": 1
+      }
+    }
+  },
+  "com.elgato.discord.pushto.talk": {
+    "name": "Push to Talk",
+    "fields": {}
+  },
+  "com.elgato.discord.pushto.mute": {
+    "name": "Push to Mute",
+    "fields": {}
+  },
+  "com.elgato.discord.setaudiodevice": {
+    "name": "Set Audio Device",
+    "fields": {
+      "mode": {
+        "type": "string",
+        "enum": [
+          "input",
+          "output",
+          "both"
+        ],
+        "default": "both"
+      },
+      "input": {
+        "type": "string",
+        "minLength": 1
+      },
+      "inputname": {
+        "type": "string"
+      },
+      "output": {
+        "type": "string",
+        "minLength": 1
+      },
+      "outputname": {
+        "type": "string"
+      }
+    }
+  },
+  "com.elgato.discord.serverstats": {
+    "name": "Server Stats",
+    "fields": {
+      "server": {
+        "type": "string",
+        "minLength": 1
+      },
+      "serverName": {
+        "type": "string"
+      },
+      "select-messages": {
+        "type": "string",
+        "enum": [
+          "nothing",
+          "display"
+        ],
+        "default": "nothing"
+      },
+      "select-users": {
+        "type": "string",
+        "enum": [
+          "nothing",
+          "online",
+          "active"
+        ],
+        "default": "nothing"
+      },
+      "select-press": {
+        "type": "string",
+        "enum": [
+          "nothing",
+          "open",
+          "clear"
+        ],
+        "default": "nothing"
+      },
+      "select-longpress": {
+        "type": "string",
+        "enum": [
+          "nothing",
+          "open",
+          "clear"
+        ],
+        "default": "nothing"
+      }
+    }
+  },
+  "com.elgato.discord.pushtotalktoggle": {
+    "name": "Voice Input Mode Toggle",
+    "fields": {}
+  },
+  "com.elgato.discord.notifications": {
+    "name": "Notifications",
+    "fields": {
+      "select-press": {
+        "type": "string",
+        "enum": [
+          "nothing",
+          "clear",
+          "open",
+          "cycle-recent",
+          "cycle-old"
+        ],
+        "default": "open"
+      },
+      "select-longpress": {
+        "type": "string",
+        "enum": [
+          "nothing",
+          "clear",
+          "open",
+          "cycle-recent",
+          "cycle-old"
+        ],
+        "default": "open"
+      }
+    }
+  },
+  "com.elgato.discord.videotoggle": {
+    "name": "Video Toggle",
+    "fields": {}
+  },
+  "com.elgato.discord.streamtoggle": {
+    "name": "Stream Toggle",
+    "fields": {}
+  },
+  "com.elgato.discord.uservolumecontrolbutton": {
+    "name": "User Volume Control",
+    "fields": {
+      "user": {
+        "type": "string",
+        "minLength": 1
+      },
+      "usernick": {
+        "type": "string",
+        "minLength": 1
+      },
+      "mode": {
+        "type": "string",
+        "enum": [
+          "mute",
+          "adjust",
+          "set"
+        ],
+        "default": "mute"
+      },
+      "muteType": {
+        "type": "string",
+        "enum": [
+          "toggle",
+          "mute",
+          "unmute"
+        ],
+        "default": "toggle"
+      },
+      "icon": {
+        "type": "string",
+        "enum": [
+          "static",
+          "dynamic_h",
+          "dynamic_v"
+        ],
+        "default": "static"
+      },
+      "volAdjustValue": {
+        "type": "integer",
+        "default": 4,
+        "minimum": -25,
+        "maximum": 24
+      },
+      "volSetValue": {
+        "type": "integer",
+        "default": 100,
+        "minimum": 0,
+        "maximum": 200
+      }
+    }
+  },
+  "com.elgato.discord.uservolumecontroldial": {
+    "name": "User Volume Control Dial",
+    "fields": {
+      "user_mode": {
+        "type": "string",
+        "enum": [
+          "specific",
+          "any"
+        ],
+        "default": "any"
+      },
+      "user": {
+        "type": "string",
+        "minLength": 1
+      },
+      "usernick": {
+        "type": "string",
+        "minLength": 1
+      },
+      "volume": {
+        "type": "integer",
+        "default": 5,
+        "minimum": 1,
+        "maximum": 5
+      }
+    }
+  },
+  "com.elgato.discord.volumecontrolbutton": {
+    "name": "Volume Control",
+    "fields": {
+      "device": {
+        "type": "string",
+        "enum": [
+          "input",
+          "output"
+        ],
+        "default": "output"
+      },
+      "mode": {
+        "type": "string",
+        "enum": [
+          "adjust",
+          "set"
+        ],
+        "default": "adjust"
+      },
+      "icon": {
+        "type": "string",
+        "enum": [
+          "static",
+          "dynamic_h",
+          "dynamic_v"
+        ],
+        "default": "static"
+      },
+      "volAdjustValue": {
+        "type": "integer",
+        "default": 4,
+        "minimum": -25,
+        "maximum": 24
+      },
+      "volSetValue": {
+        "type": "integer",
+        "default": 100,
+        "minimum": 0,
+        "maximum": 200
+      }
+    }
+  },
+  "com.elgato.discord.volumecontrol": {
+    "name": "Volume Control Dial",
+    "fields": {
+      "device": {
+        "type": "string",
+        "enum": [
+          "input",
+          "output"
+        ],
+        "default": "output"
+      },
+      "volValue": {
+        "type": "integer",
+        "default": 5,
+        "minimum": 1,
+        "maximum": 5
+      }
+    }
+  }
+};

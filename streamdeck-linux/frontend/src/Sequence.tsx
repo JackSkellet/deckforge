@@ -16,6 +16,7 @@ import {
 } from "./model";
 import {
   SettingsFields,
+  NumberField,
   Check,
   SelectField,
   JsonEditor,
@@ -35,8 +36,10 @@ export function Sequence({
   mixer,
   device,
   encoderDisplay = true,
+  folderPages,
 }: {
   scope?: string;
+  folderPages?: [string, string][];
   device?: string;
   encoderDisplay?: boolean;
   mixer?: MixerConfig;
@@ -284,6 +287,7 @@ export function Sequence({
           </Field>
           {!isContainer(selectedEntry.UUID) && (
             <SettingsFields
+              folderPages={folderPages}
               device={device}
               mixer={mixer}
               key={`settings:${selectedEntry.ActionID ?? selected}`}
@@ -300,6 +304,7 @@ export function Sequence({
           )}
           {isContainer(selectedEntry.UUID) && depth < 8 && (
             <Sequence
+              folderPages={folderPages}
               encoderDisplay={encoderDisplay}
               device={device}
               mixer={mixer}
@@ -321,28 +326,80 @@ export function Sequence({
               Use the advanced action record for deeper nesting.
             </p>
           )}
-          {isMulti(uuid) && (
-            <SelectField
-              label="State"
-              value={selectedEntry.OverrideState ?? -1}
-              options={[
-                [-1, "Automatic"],
-                ...(selectedEntry.States ?? []).map(
-                  (state: RecordValue, i: number) =>
-                    [
-                      i,
-                      `State ${i + 1}${state.Title ? ` · ${state.Title}` : ""}`,
-                    ] as [number, string],
-                ),
-              ]}
-              onChange={(value) =>
-                replace(selected!, {
-                  ...selectedEntry,
-                  OverrideState: Number(value),
-                })
-              }
-            />
-          )}
+          {isMulti(uuid) &&
+            selectedEntry.UUID !==
+              "com.elgato.streamdeck.multiactions.delay" && (
+              <>
+                <SelectField
+                  label="State"
+                  value={selectedEntry.OverrideState ?? ""}
+                  options={[
+                    ["", "Default (state 1)"],
+                    ...(selectedEntry.States ?? []).map(
+                      (state: RecordValue, i: number) =>
+                        [
+                          i,
+                          `State ${i + 1}${state.Title ? ` · ${state.Title}` : ""}`,
+                        ] as [number, string],
+                    ),
+                  ]}
+                  onChange={(value) => {
+                    const next = { ...selectedEntry };
+                    if (value === "") delete next.OverrideState;
+                    else next.OverrideState = Number(value);
+                    replace(selected!, next);
+                  }}
+                />
+                <Check
+                  label="Custom action timing"
+                  checked={selectedEntry.MultiActionDelays !== undefined}
+                  onChange={(enabled) => {
+                    const next = { ...selectedEntry };
+                    if (enabled)
+                      next.MultiActionDelays = { Delay1: 100, Delay2: 100 };
+                    else delete next.MultiActionDelays;
+                    replace(selected!, next);
+                  }}
+                />
+                {selectedEntry.MultiActionDelays !== undefined ? (
+                  <>
+                    {(
+                      [
+                        ["Delay1", "Hold duration (milliseconds)"],
+                        ["Delay2", "Wait after action (milliseconds)"],
+                      ] as const
+                    ).map(([field, label]) => (
+                      <NumberField
+                        key={field}
+                        editorKey={`${scope}/${selectedEntry.ActionID ?? selected}`}
+                        label={label}
+                        value={selectedEntry.MultiActionDelays?.[field] ?? 100}
+                        min={1}
+                        max={100}
+                        onChange={(value) =>
+                          replace(selected!, {
+                            ...selectedEntry,
+                            MultiActionDelays: {
+                              ...selectedEntry.MultiActionDelays,
+                              Delay1:
+                                selectedEntry.MultiActionDelays?.Delay1 ?? 100,
+                              Delay2:
+                                selectedEntry.MultiActionDelays?.Delay2 ?? 100,
+                              [field]: value,
+                            },
+                          })
+                        }
+                      />
+                    ))}
+                  </>
+                ) : (
+                  <p className="hint">
+                    Uses the plugin's timing when supplied, otherwise 100 ms
+                    held and 100 ms before the next action.
+                  </p>
+                )}
+              </>
+            )}
           <JsonEditor
             key={`raw:${selectedEntry.ActionID ?? selected}`}
             editorKey={`${scope}/${selectedEntry.ActionID ?? selected}`}

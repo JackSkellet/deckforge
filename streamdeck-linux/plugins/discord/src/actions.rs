@@ -55,6 +55,7 @@ pub struct ActionEngine {
     selected: Value,
     guilds: Value,
     channels: BTreeMap<String, Value>,
+    channel_servers: BTreeMap<String, String>,
     users: BTreeMap<String, Value>,
     speaker: Option<String>,
     errors: BTreeMap<String, String>,
@@ -103,6 +104,9 @@ impl ActionEngine {
         self.connected = connected;
         self.voice = Value::Null;
         self.selected = Value::Null;
+        self.guilds = Value::Null;
+        self.channels.clear();
+        self.channel_servers.clear();
         self.users.clear();
         self.speaker = None;
         self.errors.clear();
@@ -142,6 +146,8 @@ impl ActionEngine {
         if name == "willDisappear" {
             let mut cleanup = self.release(context);
             self.slots.remove(context);
+            self.channels.remove(context);
+            self.channel_servers.remove(context);
             self.errors.remove(context);
             self.subscription_errors.remove(context);
             self.pressed_stats.remove(context);
@@ -161,6 +167,16 @@ impl ActionEngine {
                     .unwrap_or(json!({}));
                 let encoder = payload["controller"].as_str() == Some("Encoder")
                     || previous.is_some_and(|s| s.encoder);
+                if name == "didReceiveSettings"
+                    && previous.is_some_and(|old| old.settings != settings)
+                    && !self.subscription_errors.contains(context)
+                {
+                    self.errors.remove(context);
+                }
+                if previous.is_some_and(|old| old.settings["server"] != settings["server"]) {
+                    self.channels.remove(context);
+                    self.channel_servers.remove(context);
+                }
                 self.slots.insert(
                     context.into(),
                     Slot {
@@ -783,6 +799,8 @@ impl ActionEngine {
                     {
                         self.channels
                             .insert(context.into(), data["channels"].clone());
+                        self.channel_servers
+                            .insert(context.into(), requested.into());
                         let channels = data["channels"]
                             .as_array()
                             .into_iter()
@@ -917,7 +935,7 @@ impl ActionEngine {
         } else {
             None
         };
-        let payload = json!({"warning":scope_warning,"missing_scopes":missing_scopes,"required_scopes":self.required_scopes(),"notificationCount":self.notifications.len(),"disabled":!self.connected,"unauthorized":!self.connected,"error":self.errors.get(context),"servers":self.guilds,"channels":self.channels.get(context),"users":users,"inputs":self.voice["input"]["available_devices"],"outputs":self.voice["output"]["available_devices"],"_currentVoice":self.selected,"voice":self.voice});
+        let payload = json!({"warning":scope_warning,"missing_scopes":missing_scopes,"required_scopes":self.required_scopes(),"notificationCount":self.notifications.len(),"disabled":!self.connected,"unauthorized":!self.connected,"error":self.errors.get(context),"servers":self.guilds,"channels":self.channels.get(context),"channels_server":self.channel_servers.get(context),"users":users,"inputs":self.voice["input"]["available_devices"],"outputs":self.voice["output"]["available_devices"],"_currentVoice":self.selected,"voice":self.voice});
         let mut out = vec![Effect::Host(
             json!({"event":"sendToPropertyInspector","context":context,"action":slot.action,"payload":payload}),
         )];
@@ -1147,6 +1165,55 @@ fn merge(target: &mut Value, source: &Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn pickers_clear_on_server_change_and_session_reset_and_keep_response_provenance() {
+        let mut engine = ready("channel.voice", json!({"server":"first"}));
+        engine.rpc_event(
+            &json!({"cmd":"GET_GUILDS","data":{"guilds":[{"id":"first","name":"Old server"}]}}),
+        );
+        engine.rpc_event(&json!({"cmd":"GET_CHANNELS","_context":"a","_args":{"guild_id":"first"},"data":{"channels":[{"id":"old","type":2}]}}));
+        assert_eq!(engine.channel_servers["a"], "first");
+        engine.host_event(&json!({"event":"didReceiveSettings","action":"com.elgato.discord.channel.voice","context":"a","payload":{"settings":{"server":"second"}}}));
+        assert!(!engine.channels.contains_key("a"));
+        assert!(!engine.channel_servers.contains_key("a"));
+        engine.rpc_event(&json!({"cmd":"GET_CHANNELS","_context":"a","_args":{"guild_id":"first"},"data":{"channels":[{"id":"late-old","type":2}]}}));
+        assert!(!engine.channels.contains_key("a"));
+        let effects = engine.rpc_event(&json!({"cmd":"GET_CHANNELS","_context":"a","_args":{"guild_id":"second"},"data":{"channels":[{"id":"new","type":2}]}}));
+        let payload = effects
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::Host(value) if value["event"] == "sendToPropertyInspector" => {
+                    Some(&value["payload"])
+                }
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(payload["channels_server"], "second");
+        assert_eq!(payload["channels"][0]["id"], "new");
+        engine.connection(false);
+        assert!(engine.guilds.is_null());
+        assert!(engine.channels.is_empty() && engine.channel_servers.is_empty());
+        engine.connection(true);
+        assert!(engine.guilds.is_null());
+        assert!(engine.channels.is_empty() && engine.channel_servers.is_empty());
+    }
+    #[test]
+    fn editing_settings_clears_obsolete_action_errors_but_keeps_subscription_failures() {
+        let mut engine = ready("serverstats", json!({}));
+        engine.errors.insert(
+            "a".into(),
+            "Choose a server in this action's settings.".into(),
+        );
+        let update = |server: &str| json!({"event":"didReceiveSettings","action":"com.elgato.discord.serverstats","context":"a","payload":{"settings":{"server":server}}});
+        engine.host_event(&update("configured"));
+        assert!(!engine.errors.contains_key("a"));
+        engine.subscription_errors.insert("a".into());
+        engine
+            .errors
+            .insert("a".into(), "Discord denied subscription".into());
+        engine.host_event(&update("other"));
+        assert!(engine.errors.contains_key("a"));
+    }
     #[test]
     fn requirements_follow_active_actions_without_starting_authorization() {
         let mut e = ActionEngine::new();

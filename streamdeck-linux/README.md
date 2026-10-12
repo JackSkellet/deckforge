@@ -80,6 +80,12 @@ control. Categories and action icons come from plugin manifests; **All**, **Keys
 and **Dials** filter the library. Incompatible assignments are disabled.
 Edit simple settings with text, numeric and checkbox controls,
 then Save changes.
+The current 44 action definitions have been audited for editable controls. Counter
+increments, sample language, shortcut choices, folder targets, audio outputs and
+sequence timing have explicit editors. Discord's property inspector includes
+named server/channel/user/device choices and mode-specific controls. See the
+[complete action control inventory](docs/ACTION_CONTROLS.md) for per-action
+coverage and remaining backend limitations.
 Right-click a control or use **Edit** to copy, cut, paste or remove it. Dragging
 between occupied controls swaps them; Ctrl-drag copies. See
 [Action editing](docs/ACTION_EDITING.md) for shortcuts, folder copies and draft
