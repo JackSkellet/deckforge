@@ -246,6 +246,32 @@ fn restored_slot(item: profile::Slot, model: Model, index: u8) -> Result<Slot> {
     serde_json::from_value(json!({"model":model,"context":new_id(),"controller":item.controller,"index":index,"uuid":item.uuid,"name":item.raw["Name"].as_str().unwrap_or(&item.uuid),"settings":item.settings,"title":item.states[state as usize]["Title"].as_str().unwrap_or(""),"state":state,"feedback":{},"layout":if item.controller=="Neo" {"$Neo"} else {"$B1"},"states":item.states,"raw":item.raw,"background":null})).context("Restore profile control")
 }
 
+pub(super) fn copied_profile(
+    original: &Profile,
+    name: &str,
+    actions: &[Action],
+) -> Result<Profile> {
+    let mut p = original.clone();
+    p.id = new_id();
+    p.name = name.to_owned();
+    p.owner_plugin = None;
+    p.readonly = false;
+    let map: HashMap<_, _> = p.pages.iter().map(|p| (p.id.clone(), new_id())).collect();
+    for page in &mut p.pages {
+        page.id = map[&page.id].clone();
+        page.manifest_path = page_path(&page.id);
+        remap_page_references(&mut page.raw, &map);
+        renew_action_ids(&mut page.raw);
+        for slot in &mut page.slots {
+            remap_page_references(&mut slot.settings, &map);
+            remap_page_references(&mut slot.raw, &map);
+            duplicate_slot_identity(slot, actions)?;
+        }
+    }
+    p.pin_page = map[&p.pin_page].clone();
+    p.page_order = p.page_order.iter().map(|id| map[id].clone()).collect();
+    Ok(p)
+}
 impl Library {
     #[cfg(test)]
     pub fn legacy(slots: Vec<Slot>, device: &str) -> Self {
@@ -310,11 +336,7 @@ impl Library {
             .profiles
             .iter()
             .find(|p| p.model.profile_compatible(model) && p.device == device)
-            .or_else(|| {
-                self.profiles
-                    .iter()
-                    .find(|p| p.model.profile_compatible(model))
-            }) {
+        {
             profile.id.clone()
         } else {
             let profile = native_profile(&format!("{} profile", model.name()), device, model);
@@ -445,8 +467,9 @@ impl Library {
     }
     pub fn snapshot(&self) -> Value {
         let active_model = self.current().ok().map(|p| p.model);
+        let active_device = self.current().ok().map(|p| p.device.as_str());
         json!({"active_profile":self.active_profile,"active_page":self.active_page,"folder_depth":self.folders.len(),
-            "profiles":self.profiles.iter().map(|p|json!({"id":p.id,"name":p.name,"device":p.device,"model":p.model,"device_name":p.model.name(),"compatible":active_model.is_some_and(|model|p.model.profile_compatible(model)),"readonly":p.readonly,"pin_page":p.pin_page,"page_order":p.page_order,
+            "profiles":self.profiles.iter().filter(|p|Some(p.device.as_str())==active_device).map(|p|json!({"id":p.id,"name":p.name,"device":p.device,"model":p.model,"device_name":p.model.name(),"compatible":active_model.is_some_and(|model|p.model.profile_compatible(model)),"readonly":p.readonly,"pin_page":p.pin_page,"page_order":p.page_order,
                 "pages":p.page_order.iter().filter_map(|id|p.pages.iter().find(|page| &page.id==id)).chain(p.pages.iter().filter(|page|page.id!=p.pin_page&&!p.page_order.contains(&page.id))).map(|page|json!({"id":page.id,"name":page_label(p,page),"folder":!p.page_order.contains(&page.id)})).collect::<Vec<_>>()})).collect::<Vec<_>>()})
     }
 }
@@ -639,6 +662,10 @@ impl Host {
             .iter()
             .find(|p| p.id == id)
             .context("Profile not found")?;
+        anyhow::ensure!(
+            target.device == self.device,
+            "This profile belongs to another device; copy it to this device first"
+        );
         anyhow::ensure!(
             target.model.profile_compatible(self.model),
             "Profile is for {}; selected device is {}",
@@ -942,6 +969,18 @@ impl Host {
         self.sync_visible();
         let command = r["command"].as_str().unwrap_or("");
         let id = r["id"].as_str().unwrap_or("");
+        if command.starts_with("profile_") && command != "profile_create" {
+            let profile = self
+                .library
+                .profiles
+                .iter()
+                .find(|p| p.id == id)
+                .context("Profile missing")?;
+            anyhow::ensure!(
+                profile.device == self.device,
+                "Profile belongs to another device"
+            );
+        }
         match command {
             "profile_create" => {
                 let p = native_profile(&valid_name(&r["name"])?, &self.device, self.model);
@@ -960,37 +999,26 @@ impl Host {
                     .name = name;
             }
             "profile_duplicate" => {
-                let mut p = self
+                let original = self
                     .library
                     .profiles
                     .iter()
                     .find(|p| p.id == id)
-                    .context("Profile missing")?
-                    .clone();
-                p.id = new_id();
-                p.name = valid_name(&r["name"])?;
-                p.owner_plugin = None;
-                p.readonly = false;
-                let map: HashMap<_, _> = p.pages.iter().map(|p| (p.id.clone(), new_id())).collect();
-                for page in &mut p.pages {
-                    page.id = map[&page.id].clone();
-                    page.manifest_path = page_path(&page.id);
-                    remap_page_references(&mut page.raw, &map);
-                    renew_action_ids(&mut page.raw);
-                    for slot in &mut page.slots {
-                        remap_page_references(&mut slot.settings, &map);
-                        remap_page_references(&mut slot.raw, &map);
-                        duplicate_slot_identity(slot, &self.actions)?;
-                    }
-                }
-                p.pin_page = map[&p.pin_page].clone();
-                p.page_order = p.page_order.iter().map(|id| map[id].clone()).collect();
+                    .context("Profile missing")?;
+                let p = copied_profile(original, &valid_name(&r["name"])?, &self.actions)?;
                 let id = p.id.clone();
                 self.library.profiles.push(p);
                 return self.select_profile(&id, None);
             }
             "profile_delete" => {
-                if self.library.profiles.len() == 1 {
+                if self
+                    .library
+                    .profiles
+                    .iter()
+                    .filter(|p| p.device == self.device)
+                    .count()
+                    == 1
+                {
                     bail!("Create another profile before deleting the last one");
                 }
                 if !self.library.profiles.iter().any(|p| p.id == id) {
@@ -1015,7 +1043,14 @@ impl Host {
                     }
                 }
                 if self.library.active_profile == id {
-                    let next = self.library.profiles[0].id.clone();
+                    let next = self
+                        .library
+                        .profiles
+                        .iter()
+                        .find(|p| p.device == self.device)
+                        .context("No remaining profile for this device")?
+                        .id
+                        .clone();
                     self.select_profile(&next, None)?;
                     self.library.previous = None;
                     return self.persist();

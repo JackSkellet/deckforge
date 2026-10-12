@@ -268,3 +268,22 @@ it("shows native fallback reasons while keeping the requested imported family", 
       .value,
   ).toBe("Missing Font");
 });
+it("captures the preview device alongside its context instead of consulting later selection", async () => {
+  request.mockResolvedValue(response("data:image/png;base64,owned"));
+  const draft = editAppearance(
+    reconcileDraft(undefined, slot),
+    slot,
+    0,
+    { title: "Owned" },
+    appearance,
+  );
+  render(<AppearanceEditor {...props(slot, draft)} device="deck-A" />);
+  await act(() => vi.advanceTimersByTimeAsync(180));
+  expect(request).toHaveBeenCalledWith("appearance_preview", {
+    device: "deck-A",
+    context: "one",
+    expected_state: 0,
+    state: 0,
+    title: "Owned",
+  });
+});

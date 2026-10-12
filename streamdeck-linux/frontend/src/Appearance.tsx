@@ -26,6 +26,7 @@ const imageUrl = (value: string) =>
   value.startsWith("data:") ? value : `data:image/png;base64,${value}`;
 export function AppearanceEditor({
   slot,
+  device,
   draft,
   userTitleEnabled = true,
   onEdit,
@@ -36,6 +37,7 @@ export function AppearanceEditor({
   fallback,
 }: {
   slot: Slot;
+  device?: string;
   draft: Draft;
   userTitleEnabled?: boolean;
   onEdit: (state: number, patch: AppearanceEdit, base: AppearanceInfo) => void;
@@ -63,6 +65,7 @@ export function AppearanceEditor({
   const generation = useRef(0);
   const [retry, setRetry] = useState(0);
   const payload = {
+    ...(device ? { device } : {}),
     context: slot.context,
     expected_state: expected,
     state,

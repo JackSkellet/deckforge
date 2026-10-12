@@ -3,6 +3,34 @@ import type { Snapshot, Action, Slot, RecordValue } from "./model";
 import { sameMixerValue } from "./Mixer";
 import { fixtureDevice } from "./fixtureDevices";
 import { validControl } from "./device";
+/** Development-only analogue of the host's atomic three-way settings merge. */
+export function applyFixtureSettingsPatch(
+  base: any,
+  edited: any,
+  latest: any,
+): any {
+  if (sameMixerValue(base, edited)) return structuredClone(latest);
+  const object = (value: any) =>
+    value !== null && typeof value === "object" && !Array.isArray(value);
+  if (!object(base) || !object(edited)) return structuredClone(edited);
+  const result = object(latest) ? structuredClone(latest) : {};
+  for (const key of Object.keys(base))
+    if (!Object.hasOwn(edited, key)) delete result[key];
+  for (const key of Object.keys(edited)) {
+    if (Object.hasOwn(base, key) && sameMixerValue(base[key], edited[key]))
+      continue;
+    const value = Object.hasOwn(base, key)
+      ? applyFixtureSettingsPatch(base[key], edited[key], result[key])
+      : structuredClone(edited[key]);
+    Object.defineProperty(result, key, {
+      value,
+      enumerable: true,
+      configurable: true,
+      writable: true,
+    });
+  }
+  return result;
+}
 const icon = (label: string, mark: string, color = "#96dfc4") =>
   "data:image/svg+xml;base64," +
   btoa(
@@ -513,6 +541,12 @@ export function installFixture(modelId?: string) {
         const slot = snapshot.slots.find((s) => s.context === payload.context);
         if (payload.command === "settings" && slot)
           slot.settings = payload.settings;
+        if (payload.command === "settings_patch" && slot)
+          slot.settings = applyFixtureSettingsPatch(
+            payload.base,
+            payload.settings,
+            slot.settings,
+          );
         if (payload.command === "appearance" && slot) {
           if (
             payload.expected_state !== undefined &&

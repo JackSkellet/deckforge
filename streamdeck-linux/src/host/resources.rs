@@ -27,13 +27,22 @@ fn resource_paths(payload: Value) -> Result<BTreeMap<String, String>> {
 }
 impl Host {
     pub(super) fn resources_event(&self, slot: &Slot, id: Option<&Value>) -> Value {
-        let mut reply = json!({"event":"didReceiveResources","action":slot.uuid,"context":slot.context,"device":self.device,"payload":action_payload(slot)});
+        let device = self
+            .context_device(&slot.context)
+            .unwrap_or_else(|| self.device.clone());
+        let mut reply = json!({"event":"didReceiveResources","action":slot.uuid,"context":slot.context,"device":device,"payload":action_payload(slot)});
         if let Some(id) = id {
             reply["id"] = id.clone();
         }
         reply
     }
     pub(super) fn set_resources(&mut self, slot: &Slot, payload: Value) -> Result<Slot> {
+        if let Some(device) = self
+            .context_device(&slot.context)
+            .filter(|device| device != &self.device)
+        {
+            return self.with_device(&device, |host| host.set_resources(slot, payload));
+        }
         let paths = resource_paths(payload)?;
         let mut changed = slot.clone();
         changed.resources = Some(paths);
@@ -95,12 +104,17 @@ impl Host {
             })
             .cloned()
             .collect();
-        for mut slot in slots {
-            match self.imported_resources(&slot) {
-                Ok(paths) => {
-                    slot.resources = Some(paths);
-                    self.store_slot(slot);
-                }
+        for slot in slots {
+            let result = if let Some(device) = self
+                .context_device(&slot.context)
+                .filter(|device| device != &self.device)
+            {
+                self.with_device(&device, |host| host.hydrate_resource_slot(slot.clone()))
+            } else {
+                self.hydrate_resource_slot(slot.clone())
+            };
+            match result {
+                Ok(()) => {}
                 Err(error) => {
                     let message = format!("Resources for {} are unavailable: {error:#}", slot.name);
                     if !self.logs.contains(&message) {
@@ -109,6 +123,11 @@ impl Host {
                 }
             }
         }
+    }
+    fn hydrate_resource_slot(&mut self, mut slot: Slot) -> Result<()> {
+        slot.resources = Some(self.imported_resources(&slot)?);
+        self.store_slot(slot);
+        Ok(())
     }
 }
 
@@ -300,5 +319,36 @@ mod archive_tests {
         fs::write(&output, b"keep this archive").unwrap();
         assert!(host.export_profile(&output).is_err());
         assert_eq!(fs::read(output).unwrap(), b"keep this archive");
+    }
+    #[test]
+    fn parked_device_resources_update_its_cached_slot_and_report_its_owner() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut host = super::super::tests::fixture(temp.path());
+        host.slots[0].index = 5;
+        host.sync_visible();
+        let a = host.slots[0].clone();
+        host.add_simulated_device("device-b", Model::Mini).unwrap();
+        host.select_device("device-b").unwrap();
+        host.assign("Keypad", 0, "test.action").unwrap();
+        let b = host.slots[0].context.clone();
+        let changed = host
+            .set_resources(&a, json!({"file":temp.path().join("resource.dat")}))
+            .unwrap();
+        assert_eq!(host.device, "device-b");
+        assert_eq!(
+            host.resources_event(&changed, Some(&json!("req")))["device"],
+            "test-device"
+        );
+        assert_eq!(
+            host.library.slot(&a.context).unwrap().resources,
+            changed.resources
+        );
+        host.with_device("test-device", |h| {
+            assert_eq!(h.slots[0].resources, changed.resources);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(host.slots[0].context, b);
+        assert_ne!(host.slots[0].resources, changed.resources);
     }
 }

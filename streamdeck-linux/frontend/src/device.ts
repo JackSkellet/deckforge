@@ -1,4 +1,4 @@
-import type { Controller, Slot, Snapshot } from "./model";
+import type { Controller, Slot, Snapshot, DeviceRecord } from "./model";
 export interface DeviceGeometry {
   columns: number;
   rows: number;
@@ -97,4 +97,42 @@ export function controlName(controller: Controller, snapshot?: Snapshot) {
       : snapshot && !hasKeyImages(snapshot)
         ? "Pedal"
         : "Key";
+}
+
+export function associatedDevices(snapshot: Snapshot) {
+  return snapshot.devices?.length
+    ? [...snapshot.devices].sort(
+        (a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id),
+      )
+    : [
+        {
+          id: snapshot.device,
+          model: snapshot.device_model ?? "plus",
+          name: deviceName(snapshot),
+          connected: snapshot.connected,
+          online: snapshot.device_online,
+          firmware: snapshot.firmware,
+          selected: true,
+        },
+      ];
+}
+
+export function deviceOptionLabel(
+  device: DeviceRecord,
+  peers: DeviceRecord[],
+  simulate = false,
+) {
+  const duplicates =
+    peers.filter((peer) => peer.name === device.name).length > 1;
+  const identity =
+    duplicates || device.id.length <= 12
+      ? device.id
+      : `…${device.id.slice(-8)}`;
+  const status =
+    simulate && device.online !== false
+      ? " · Simulated"
+      : device.connected
+        ? ""
+        : " · Offline";
+  return `${device.name} · ${identity}${status}`;
 }

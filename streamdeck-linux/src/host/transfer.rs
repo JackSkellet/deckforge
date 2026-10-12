@@ -12,6 +12,7 @@ pub(super) struct AssetSource {
 }
 #[derive(Clone)]
 struct Anchor {
+    device: String,
     profile: String,
     page: String,
     context: String,
@@ -79,6 +80,7 @@ fn capture(library: &Library, context: &str, cut: bool) -> Result<Clipboard> {
     slot.sync_children_raw();
     stamp(&mut slot, page_origin(profile, page).as_ref());
     let anchor = Anchor {
+        device: profile.device.clone(),
         profile: profile.id.clone(),
         page: page.id.clone(),
         context: slot.context.clone(),
@@ -309,6 +311,7 @@ fn transferred(
             &source.anchor.controller,
             source.anchor.index,
         );
+        library::set_slot_model(&mut outgoing, next.profiles[sp].model);
         next.profiles[sp].pages[sg].slots.push(outgoing);
         next.profiles[sp].pages.extend(pages);
     }
@@ -372,7 +375,7 @@ impl Host {
         paths
     }
     pub(super) fn clipboard_snapshot(&self) -> Value {
-        self.clipboard.as_ref().map_or(Value::Null,|c|json!({"name":c.slot.name,"uuid":c.slot.uuid,"controller":c.slot.controller,"mode":if c.cut {"cut"}else{"copy"},"context":c.anchor.context,"profile":c.anchor.profile,"page":c.anchor.page}))
+        self.clipboard.as_ref().map_or(Value::Null,|c|json!({"name":c.slot.name,"uuid":c.slot.uuid,"controller":c.slot.controller,"mode":if c.cut {"cut"}else{"copy"},"context":c.anchor.context,"profile":c.anchor.profile,"page":c.anchor.page,"device":self.library.profiles.iter().find(|p|p.id==c.anchor.profile).map(|p|p.device.as_str()).unwrap_or(&c.anchor.device)}))
     }
     pub(super) fn transfer_command(&mut self, request: &Value) -> Result<()> {
         let command = request["command"]
@@ -382,7 +385,7 @@ impl Host {
             self.clipboard = None;
             return Ok(());
         }
-        self.sync_visible();
+        self.sync_all_devices();
         if matches!(command, "slot_copy" | "slot_cut") {
             self.clipboard = Some(capture(
                 &self.library,
@@ -423,20 +426,49 @@ impl Host {
             expected,
             &self.actions,
         )?;
-        // Persist the validated graph before releasing any running action. A
-        // failed write restores both graphs and leaves the cut source intact.
+        // During graph replacement the canonical library is authoritative.
+        // Old visible projections remain only long enough to emit their scoped
+        // releases/disappearances; they must never overwrite the new graph.
+        let source_device = self
+            .library
+            .profiles
+            .iter()
+            .find(|p| p.id == source.anchor.profile)
+            .map(|p| p.device.clone());
+        let target_device = self.device.clone();
         let old_library = std::mem::replace(&mut self.library, next);
         let old_slots = std::mem::replace(&mut self.slots, self.library.visible()?);
+        let previous_mode = std::mem::replace(&mut self.canonical_graph_update, true);
         if let Err(error) = self.persist() {
             self.library = old_library;
             self.slots = old_slots;
+            self.canonical_graph_update = previous_mode;
             return Err(error);
         }
         self.slots = old_slots;
         if command == "slot_paste" && source.cut {
             self.clipboard = None;
         }
-        self.refresh_page()
+        let mut devices = vec![target_device];
+        if source.cut
+            && let Some(device) = source_device
+            && !devices.contains(&device)
+        {
+            devices.push(device);
+        }
+        let mut failure = None;
+        for device in devices {
+            if let Err(error) = self.with_device(&device, Host::refresh_page) {
+                failure.get_or_insert(error);
+            }
+        }
+        self.canonical_graph_update = previous_mode;
+        self.persist()?;
+        if let Some(error) = failure {
+            Err(error)
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -448,6 +480,160 @@ mod tests {
         let host = super::super::tests::fixture(dir.path());
         (dir, host)
     }
+    #[test]
+    fn occupied_cross_model_swap_updates_both_sdk_coordinate_systems() {
+        let (_dir, mut host) = setup();
+        let a = host.device.clone();
+        host.assign("Keypad", 5, "test.action").unwrap();
+        let source = host
+            .slots
+            .iter()
+            .find(|s| s.index == 5)
+            .unwrap()
+            .context
+            .clone();
+        host.add_simulated_device("Mini-B", Model::Mini).unwrap();
+        let target = host
+            .with_device("Mini-B", |host| {
+                host.assign("Keypad", 5, "test.action")?;
+                Ok(host.slots[0].context.clone())
+            })
+            .unwrap();
+        super::super::apply_control(&mut host,json!({"command":"slot_transfer","device":"Mini-B","context":source,"controller":"Keypad","index":5,"copy":false,"expected_target":target})).unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        host.plugins[0].sender = Some(tx);
+        for device in [&a, "Mini-B"] {
+            host.with_device(device, |host| {
+                host.input(InputEvent::Key {
+                    index: 5,
+                    pressed: true,
+                })
+            })
+            .unwrap();
+        }
+        let events: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok())
+            .filter(|event| event["event"] == "keyDown")
+            .collect();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0]["device"], a);
+        assert_eq!(
+            events[0]["payload"]["coordinates"],
+            json!({"column":1,"row":1})
+        );
+        assert_eq!(events[1]["device"], "Mini-B");
+        assert_eq!(
+            events[1]["payload"]["coordinates"],
+            json!({"column":2,"row":1})
+        );
+    }
+
+    #[test]
+    fn cross_device_cut_releases_only_source_and_persists_both_projections() {
+        let (_dir, mut host) = setup();
+        let a = host.device.clone();
+        let source = host.slots[0].context.clone();
+        host.add_simulated_device("B", Model::Plus).unwrap();
+        let b = host
+            .with_device("B", |host| {
+                host.assign("Keypad", 0, "test.action")?;
+                Ok(host.slots[0].context.clone())
+            })
+            .unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        host.plugins[0].sender = Some(tx);
+        host.input(InputEvent::Key {
+            index: 0,
+            pressed: true,
+        })
+        .unwrap();
+        host.with_device("B", |host| {
+            host.input(InputEvent::Key {
+                index: 0,
+                pressed: true,
+            })
+        })
+        .unwrap();
+        while rx.try_recv().is_ok() {}
+        super::super::apply_control(
+            &mut host,
+            json!({"command":"slot_cut","device":a,"context":source}),
+        )
+        .unwrap();
+        assert_eq!(host.clipboard_snapshot()["device"], a);
+        super::super::apply_control(&mut host,json!({"command":"slot_paste","device":"B","controller":"Keypad","index":1,"expected_target":null})).unwrap();
+        assert_eq!(host.device, a);
+        assert!(host.slots.is_empty());
+        let pasted = host
+            .with_device("B", |host| {
+                assert_eq!(host.held.get(&HeldControl::Key(0)), Some(&b));
+                assert_eq!(
+                    host.slots
+                        .iter()
+                        .find(|slot| slot.index == 0)
+                        .unwrap()
+                        .context,
+                    b
+                );
+                Ok(host
+                    .slots
+                    .iter()
+                    .find(|slot| slot.index == 1)
+                    .unwrap()
+                    .context
+                    .clone())
+            })
+            .unwrap();
+        assert_ne!(pasted, source);
+        assert!(host.library.slot(&source).is_none());
+        let mut events = vec![];
+        while let Ok(event) = rx.try_recv() {
+            events.push(event);
+        }
+        assert!(events.iter().any(|event| event["event"] == "keyUp"
+            && event["device"] == a
+            && event["context"] == source));
+        assert!(
+            !events
+                .iter()
+                .any(|event| event["event"] == "keyUp" && event["device"] == "B")
+        );
+        let saved: Saved = serde_json::from_slice(&fs::read(&host.state_path).unwrap()).unwrap();
+        assert!(saved.library.as_ref().unwrap().slot(&source).is_none());
+        assert!(saved.library.as_ref().unwrap().slot(&pasted).is_some());
+    }
+    #[test]
+    fn cross_device_failed_save_preserves_source_destination_and_cut_for_retry() {
+        let (dir, mut host) = setup();
+        let a = host.device.clone();
+        let source = host.slots[0].context.clone();
+        host.add_simulated_device("B", Model::Mini).unwrap();
+        host.with_device("B", |host| host.assign("Keypad", 0, "test.action"))
+            .unwrap();
+        let before = serde_json::to_value(&host.library).unwrap();
+        super::super::apply_control(
+            &mut host,
+            json!({"command":"slot_cut","device":a,"context":source}),
+        )
+        .unwrap();
+        let original_path = host.state_path.clone();
+        host.state_path = dir.path().join("missing/session.json");
+        let paste = json!({"command":"slot_paste","device":"B","controller":"Keypad","index":1,"expected_target":null});
+        assert!(super::super::apply_control(&mut host, paste.clone()).is_err());
+        assert_eq!(host.device, a);
+        assert!(!host.canonical_graph_update);
+        assert_eq!(serde_json::to_value(&host.library).unwrap(), before);
+        assert_eq!(host.slots[0].context, source);
+        assert!(host.clipboard.as_ref().unwrap().cut);
+        host.state_path = original_path;
+        super::super::apply_control(&mut host, paste).unwrap();
+        assert!(host.slots.is_empty());
+        assert!(host.clipboard.is_none());
+        assert_eq!(
+            host.with_device("B", |host| Ok(host.slots.len())).unwrap(),
+            2
+        );
+    }
+
     #[test]
     fn cut_is_deferred_and_uses_latest_settings_with_stale_target_guard() {
         let (_dir, mut host) = setup();

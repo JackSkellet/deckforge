@@ -280,6 +280,12 @@ impl Host {
         self.slots
             .iter()
             .find_map(|s| s.find(context))
+            .or_else(|| {
+                self.other_devices
+                    .values()
+                    .flat_map(|state| &state.slots)
+                    .find_map(|slot| slot.find(context))
+            })
             .or_else(|| self.library.slot(context))
     }
     pub(super) fn store_slot(&mut self, slot: Slot) {
@@ -289,6 +295,18 @@ impl Host {
             .find_map(|s| s.find_mut(&slot.context))
         {
             *active = slot.clone();
+        }
+        for state in self.other_devices.values_mut() {
+            if let Some(active) = state
+                .slots
+                .iter_mut()
+                .find_map(|s| s.find_mut(&slot.context))
+            {
+                *active = slot.clone();
+            }
+            for parent in &mut state.slots {
+                parent.sync_children_raw();
+            }
         }
         self.library.update(&slot);
         for parent in &mut self.slots {

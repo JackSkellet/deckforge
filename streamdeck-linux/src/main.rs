@@ -7,6 +7,7 @@ mod brightness;
 mod desktop;
 mod desktop_web;
 mod device_model;
+mod device_registry;
 mod device_session;
 mod dial_stack;
 mod feedback;

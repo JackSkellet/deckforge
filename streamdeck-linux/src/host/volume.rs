@@ -62,7 +62,14 @@ impl Host {
             .filter(|s| is_volume(s))
             .map(|s| s.context.clone())
             .collect();
-        if !contexts.is_empty() {
+        let watched_elsewhere = self.other_devices.values().any(|state| {
+            state
+                .slots
+                .iter()
+                .flat_map(Slot::visible_flatten)
+                .any(is_volume)
+        });
+        if !contexts.is_empty() || watched_elsewhere {
             self.volume_worker().watch(true);
         } else if let Some(worker) = &self.volume {
             worker.watch(false);
@@ -130,7 +137,7 @@ impl Host {
                 }
             }
         }
-        if changed && let Err(error) = self.render() {
+        if changed && let Err(error) = self.render_all_devices() {
             self.log(format!("Volume display update: {error:#}"));
         }
     }

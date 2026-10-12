@@ -25,6 +25,14 @@ the additional transports have protocol and software tests. Pedal has an
 input-only transport recovered from the original executable. See [Device models](docs/DEVICES.md) for supported USB
 identities, selection commands and remaining limits.
 
+## Multiple devices
+
+Choose a deck in the header to edit it while other decks keep running. Plugins
+remain shared; pages, assignments, controls and reconnect state belong to each
+device. Copy profiles through **Profile options → Copy to device…**, or use the
+action clipboard between compatible controls. See [Multiple devices](docs/MULTI_DEVICE.md)
+for ownership, persistence and validation boundaries.
+
 ## Native Discord plugin
 
 [Discord for Deckforge](plugins/discord/README.md) is a from-scratch Rust plugin

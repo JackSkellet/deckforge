@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, it, expect, vi } from "vitest";
-import { installFixture } from "./fixture";
+import { installFixture, applyFixtureSettingsPatch } from "./fixture";
 import type { Snapshot } from "./model";
 import { editRoute } from "./Mixer";
 beforeEach(() => installFixture());
@@ -141,4 +141,76 @@ it("models saved-action copy, swap-on-move, cut cancellation and exact destinati
   expect((await bridge.request<Snapshot>("snapshot")).slots).toEqual(
     observed.slots,
   );
+});
+
+it("three-way settings patches preserve live values, recurse objects, replace edited arrays and honor deletions", () => {
+  const base = {
+    count: 10,
+    incrementBy: 2,
+    nested: { a: 1, b: 2 },
+    array: [1, 2],
+    deleted: true,
+  };
+  const edited = {
+    count: 10,
+    incrementBy: 7,
+    nested: { a: 3, b: 2 },
+    array: [1, 2],
+  };
+  const latest = {
+    count: 12,
+    incrementBy: 2,
+    nested: { a: 1, b: 9, newField: "SDK" },
+    array: [9],
+    deleted: false,
+    added: "SDK",
+  };
+  expect(applyFixtureSettingsPatch(base, edited, latest)).toEqual({
+    count: 12,
+    incrementBy: 7,
+    nested: { a: 3, b: 9, newField: "SDK" },
+    array: [9],
+    added: "SDK",
+  });
+  expect(
+    applyFixtureSettingsPatch(
+      base,
+      { ...edited, count: 99, array: [3, 4] },
+      latest,
+    ),
+  ).toEqual({
+    count: 99,
+    incrementBy: 7,
+    nested: { a: 3, b: 9, newField: "SDK" },
+    array: [3, 4],
+    added: "SDK",
+  });
+  expect(latest.count).toBe(12);
+});
+it("the synthetic command handler merges stale drafts while legacy settings still replaces", async () => {
+  const bridge = window.deckforge!;
+  const initial = await bridge.request<Snapshot>("snapshot");
+  const slot = initial.slots[0];
+  const base = structuredClone(slot.settings);
+  await bridge.request("command", {
+    command: "settings",
+    context: slot.context,
+    settings: { ...base, count: 99, sdkField: true },
+  });
+  await bridge.request("command", {
+    command: "settings_patch",
+    context: slot.context,
+    base,
+    settings: { ...base, incrementBy: 7 },
+  });
+  const saved = (await bridge.request<Snapshot>("snapshot")).slots[0].settings;
+  expect(saved).toEqual({ ...base, count: 99, incrementBy: 7, sdkField: true });
+  await bridge.request("command", {
+    command: "settings",
+    context: slot.context,
+    settings: { count: 0 },
+  });
+  expect(
+    (await bridge.request<Snapshot>("snapshot")).slots[0].settings,
+  ).toEqual({ count: 0 });
 });

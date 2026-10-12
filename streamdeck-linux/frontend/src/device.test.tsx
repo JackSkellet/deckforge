@@ -17,6 +17,8 @@ import {
   validControl,
   acceptsInput,
   outsideControls,
+  associatedDevices,
+  deviceOptionLabel,
 } from "./device";
 import { importFormDrafts, importTextDrafts } from "./transient";
 import type { Snapshot } from "./model";
@@ -78,6 +80,7 @@ it("assigns and copies key31 on XL without a fixed eight-key limit", async () =>
   await waitFor(() =>
     expect(request).toHaveBeenCalledWith("command", {
       command: "assign",
+      device: "simulated-streamdeck-xl",
       controller: "Keypad",
       index: 31,
       uuid: "com.elgato.streamdeck.system.website",
@@ -90,6 +93,7 @@ it("assigns and copies key31 on XL without a fixed eight-key limit", async () =>
   await waitFor(() =>
     expect(request).toHaveBeenCalledWith("command", {
       command: "slot_copy",
+      device: "simulated-streamdeck-xl",
       context: "fixture-31-Keypad",
     }),
   );
@@ -109,6 +113,7 @@ it("renders key35 and assigns/copies dial5 on Plus XL", async () => {
   await waitFor(() =>
     expect(request).toHaveBeenCalledWith("command", {
       command: "assign",
+      device: "simulated-streamdeck-plus-xl",
       controller: "Encoder",
       index: 5,
       uuid: "com.elgato.streamdeck.system.multimedia",
@@ -118,6 +123,7 @@ it("renders key35 and assigns/copies dial5 on Plus XL", async () => {
   await waitFor(() =>
     expect(request).toHaveBeenCalledWith("command", {
       command: "slot_copy",
+      device: "simulated-streamdeck-plus-xl",
       context: "fixture-5-Encoder",
     }),
   );
@@ -129,6 +135,7 @@ it("renders key35 and assigns/copies dial5 on Plus XL", async () => {
   await waitFor(() =>
     expect(request).toHaveBeenCalledWith("command", {
       command: "slot_paste",
+      device: "simulated-streamdeck-plus-xl",
       controller: "Encoder",
       index: 4,
       expected_target: null,
@@ -145,7 +152,7 @@ it("does not offer dials or encoder-only actions on Mini", async () => {
   expect(
     screen.queryByRole("button", { name: "Assign System volume" }),
   ).toBeNull();
-  expect(screen.getByText("Simulated Stream Deck Mini")).toBeTruthy();
+  expect(screen.getByRole("option", { name: /Stream Deck Mini/ })).toBeTruthy();
 });
 it("makes the Neo infobar configurable without a Test input and exposes page sensors", async () => {
   const request = setup("neo");
@@ -164,6 +171,7 @@ it("makes the Neo infobar configurable without a Test input and exposes page sen
   await waitFor(() =>
     expect(request).toHaveBeenCalledWith("command", {
       command: "assign",
+      device: "simulated-streamdeck-neo",
       controller: "Neo",
       index: 1,
       uuid: "fixture.neo.infobar",
@@ -172,6 +180,7 @@ it("makes the Neo infobar configurable without a Test input and exposes page sen
   await user.click(screen.getByRole("button", { name: "Next page" }));
   expect(request).toHaveBeenCalledWith("command", {
     command: "page_step",
+    device: "simulated-streamdeck-neo",
     direction: 1,
   });
 });
@@ -246,7 +255,7 @@ it("reports retained out-of-layout records and disables foreign profile activati
 it("models Classic 2017 as fifteen display keys with no dials or unsupported sleep controls", async () => {
   setup("classic-2017");
   render(<App />);
-  await screen.findByText("Simulated Stream Deck (2017)");
+  await screen.findByRole("option", { name: /Stream Deck \(2017\)/ });
   expect(screen.getAllByRole("button", { name: /^Key \d+:/ })).toHaveLength(15);
   expect(screen.queryByRole("button", { name: /^Dial \d+:/ })).toBeNull();
   const model = fixtureDevice("classic-2017");
@@ -340,4 +349,38 @@ it("uses authoritative folder navigation flags and retains older snapshot fallba
     (screen.getByRole("button", { name: "Next page" }) as HTMLButtonElement)
       .disabled,
   ).toBe(false);
+});
+
+it("keeps the device picker order stable when the backend emits the selected device first", () => {
+  const a = {
+    id: "A",
+    name: "Stream Deck +",
+    model: "plus",
+    connected: true,
+    firmware: "1",
+    selected: false,
+  };
+  const b = { ...a, id: "B", selected: true };
+  const snapshot = { devices: [b, a] } as Snapshot;
+  expect(associatedDevices(snapshot).map((value) => value.id)).toEqual([
+    "A",
+    "B",
+  ]);
+  expect(snapshot.devices?.[0].id).toBe("B");
+});
+
+it("disambiguates same-name devices even when their shortened ID suffixes collide", () => {
+  const a = {
+    id: "source-A-12345678",
+    name: "Stream Deck Mini",
+    model: "mini",
+    connected: true,
+    firmware: "1",
+    selected: true,
+  };
+  const b = { ...a, id: "target-B-12345678", selected: false };
+  const peers = [a, b];
+  expect(deviceOptionLabel(a, peers)).toContain(a.id);
+  expect(deviceOptionLabel(b, peers)).toContain(b.id);
+  expect(deviceOptionLabel(a, peers)).not.toBe(deviceOptionLabel(b, peers));
 });

@@ -9,6 +9,7 @@ import {
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import App from "./App";
+import { applyFixtureSettingsPatch } from "./fixture";
 import { importTextDrafts, importFormDrafts } from "./transient";
 import type { Snapshot, Slot, Action } from "./model";
 const counter = {
@@ -108,6 +109,12 @@ beforeEach(() => {
       snapshot.clipboard = null;
     if (method === "command" && payload.command === "settings")
       snapshot.slots[0].settings = payload.settings;
+    if (method === "command" && payload.command === "settings_patch")
+      snapshot.slots[0].settings = applyFixtureSettingsPatch(
+        payload.base,
+        payload.settings,
+        snapshot.slots[0].settings,
+      );
     if (method === "command" && payload.command === "appearance")
       snapshot.slots[0].title = payload.title;
     return null;
@@ -150,6 +157,7 @@ describe("desktop interactions", () => {
     await user.click(screen.getByRole("button", { name: "Save changes" }));
     await waitFor(() =>
       expect(request).toHaveBeenCalledWith("command", {
+        device: "test",
         command: "appearance",
         context: "counter-1",
         expected_state: 0,
@@ -186,6 +194,7 @@ describe("desktop interactions", () => {
     fireEvent.click(copy);
     await waitFor(() =>
       expect(request).toHaveBeenCalledWith("command", {
+        device: "test",
         command: "slot_copy",
         context: "second",
       }),
@@ -268,6 +277,7 @@ describe("desktop interactions", () => {
     fireEvent.keyDown(source, { key: "c", ctrlKey: true });
     await waitFor(() =>
       expect(request).toHaveBeenCalledWith("command", {
+        device: "test",
         command: "slot_copy",
         context: "counter-1",
       }),
@@ -282,6 +292,7 @@ describe("desktop interactions", () => {
     fireEvent.keyDown(source, { key: "c", ctrlKey: true });
     await waitFor(() =>
       expect(request).toHaveBeenCalledWith("command", {
+        device: "test",
         command: "slot_copy",
         context: "counter-1",
       }),
@@ -294,6 +305,7 @@ describe("desktop interactions", () => {
     fireEvent.keyDown(target, { key: "v", ctrlKey: true });
     await waitFor(() =>
       expect(request).toHaveBeenCalledWith("command", {
+        device: "test",
         command: "slot_paste",
         controller: "Keypad",
         index: 1,
@@ -348,6 +360,7 @@ describe("desktop interactions", () => {
     fireEvent.keyDown(source, { key: "Escape" });
     await waitFor(() =>
       expect(request).toHaveBeenCalledWith("command", {
+        device: "test",
         command: "slot_clipboard_clear",
       }),
     );
@@ -375,6 +388,7 @@ describe("desktop interactions", () => {
     fireEvent.drop(target, { dataTransfer: transfer, ctrlKey: false });
     await waitFor(() =>
       expect(request).toHaveBeenCalledWith("command", {
+        device: "test",
         command: "slot_transfer",
         context: "counter-1",
         controller: "Keypad",
@@ -398,6 +412,7 @@ describe("desktop interactions", () => {
     fireEvent(target, dropEvent);
     await waitFor(() =>
       expect(request).toHaveBeenCalledWith("command", {
+        device: "test",
         command: "slot_transfer",
         context: "counter-1",
         controller: "Keypad",
@@ -512,8 +527,10 @@ describe("desktop interactions", () => {
     await user.click(screen.getByRole("button", { name: "Save changes" }));
     await waitFor(() =>
       expect(request).toHaveBeenCalledWith("command", {
-        command: "settings",
+        device: "test",
+        command: "settings_patch",
         context: "counter-1",
+        base: { count: 7, incrementBy: 1, Future: { keep: true } },
         settings: { count: 7, incrementBy: 5, Future: { keep: true } },
       }),
     );
@@ -552,6 +569,7 @@ describe("desktop interactions", () => {
     );
     await waitFor(() =>
       expect(request).toHaveBeenCalledWith("command", {
+        device: "test",
         command: "assign",
         controller: "Encoder",
         index: 0,
@@ -576,6 +594,7 @@ describe("desktop interactions", () => {
       await screen.findByRole("button", { name: "Plugin settings ↗" }),
     );
     expect(request).toHaveBeenCalledWith("command", {
+      device: "test",
       command: "open_inspector",
       context: "counter-1",
     });
@@ -593,6 +612,7 @@ describe("desktop interactions", () => {
     await user.click(screen.getByRole("button", { name: /^Save$/ }));
     await waitFor(() =>
       expect(request).toHaveBeenCalledWith("command", {
+        device: "test",
         command: "profile_rename",
         id: "p",
         name: "Broadcast",

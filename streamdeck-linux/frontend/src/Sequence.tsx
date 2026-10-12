@@ -33,8 +33,10 @@ export function Sequence({
   runtime,
   run,
   mixer,
+  device,
 }: {
   scope?: string;
+  device?: string;
   mixer?: MixerConfig;
   runtime?: Slot;
   run?: (p: RecordValue) => Promise<boolean>;
@@ -271,6 +273,7 @@ export function Sequence({
           </Field>
           {!isContainer(selectedEntry.UUID) && (
             <SettingsFields
+              device={device}
               mixer={mixer}
               key={selectedEntry.ActionID ?? selected}
               editorKey={`${scope}/${selectedEntry.ActionID ?? selected}`}
@@ -286,6 +289,7 @@ export function Sequence({
           )}
           {isContainer(selectedEntry.UUID) && depth < 8 && (
             <Sequence
+              device={device}
               mixer={mixer}
               key={selectedEntry.ActionID ?? selected}
               scope={`${scope}/${selectedEntry.ActionID ?? selected}`}

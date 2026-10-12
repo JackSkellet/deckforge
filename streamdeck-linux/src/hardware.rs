@@ -13,6 +13,7 @@ use image::{
     codecs::{bmp::BmpEncoder, jpeg::JpegEncoder},
     imageops::FilterType,
 };
+use std::ffi::{CStr, CString};
 
 const VENDOR: u16 = 0x0fd9;
 const REPORT_SIZE: usize = 1024;
@@ -21,6 +22,7 @@ const IMAGE_CHUNK_SIZE: usize = REPORT_SIZE - 8;
 #[derive(Debug, Clone)]
 pub struct DeviceInfo {
     pub path: String,
+    pub raw_path: CString,
     pub serial: Option<String>,
     pub product: Option<String>,
     pub model: Model,
@@ -59,6 +61,7 @@ impl InputState {
 
 pub struct Deck {
     device: HidDevice,
+    path: CString,
     serial: String,
     model: Model,
     legacy_firmware: Option<legacy2017::Firmware>,
@@ -152,6 +155,7 @@ impl Deck {
             .filter(|d| d.vendor_id() == VENDOR && Model::from_product(d.product_id()).is_some())
             .map(|d| DeviceInfo {
                 path: d.path().to_string_lossy().into_owned(),
+                raw_path: d.path().to_owned(),
                 serial: d
                     .serial_number()
                     .filter(|serial| !serial.is_empty())
@@ -186,50 +190,85 @@ impl Deck {
             .map(|d| d.serial_number().filter(|s| !s.is_empty()))
             .collect();
         select_candidate(serial, &serials, |index| {
-            let info = devices[index];
-            let model = Model::from_product(info.product_id()).unwrap();
-            let device = info
-                .open_device(&api)
-                .context("open Stream Deck; check hidraw permissions")?;
-            let serial = match serials[index] {
-                Some(serial) => serial.to_owned(),
-                None => {
-                    let mut report = [0u8; 32];
-                    report[0] = if matches!(model, Model::Mini | Model::Classic2017) {
-                        0x03
-                    } else {
-                        0x06
-                    };
-                    let size = device
-                        .get_feature_report(&mut report)
-                        .context("read Stream Deck serial")?;
-                    ensure!(size <= report.len(), "oversized serial response");
-                    decode_serial(model, &report[..size])?
-                }
-            };
-            let legacy_firmware = if model == Model::Classic2017 {
+            Self::open_info(&api, devices[index])
+        })
+    }
+
+    /// Open only the exact enumerated interface. No other device is probed.
+    /// Identity checks are performed before returning the handle to its owner.
+    pub fn connect_path(path: &CStr, serial: Option<&str>, model: Option<Model>) -> Result<Self> {
+        let api = HidApi::new().context("initialize HID")?;
+        let info = api
+            .device_list()
+            .find(|d| {
+                d.path() == path
+                    && d.vendor_id() == VENDOR
+                    && Model::from_product(d.product_id())
+                        .is_some_and(|m| model.is_none_or(|wanted| m == wanted))
+            })
+            .context("selected Stream Deck path is unavailable or model changed")?;
+        if let (Some(wanted), Some(found)) =
+            (serial, info.serial_number().filter(|s| !s.is_empty()))
+        {
+            ensure!(
+                wanted == found,
+                "device serial does not match selected path"
+            );
+        }
+        let (found, deck) = Self::open_info(&api, info)?;
+        ensure!(
+            serial.is_none_or(|wanted| wanted == found),
+            "device serial does not match selected path"
+        );
+        Ok(deck)
+    }
+    pub fn path(&self) -> &CStr {
+        &self.path
+    }
+    fn open_info(api: &HidApi, info: &hidapi::DeviceInfo) -> Result<(String, Self)> {
+        let model = Model::from_product(info.product_id()).unwrap();
+        let device = info
+            .open_device(api)
+            .context("open Stream Deck; check hidraw permissions")?;
+        let serial = match info.serial_number().filter(|s| !s.is_empty()) {
+            Some(serial) => serial.to_owned(),
+            None => {
                 let mut report = [0u8; 32];
-                report[0] = 4;
+                report[0] = if matches!(model, Model::Mini | Model::Classic2017) {
+                    0x03
+                } else {
+                    0x06
+                };
                 let size = device
                     .get_feature_report(&mut report)
-                    .context("read original 2017 firmware")?;
-                ensure!(size <= report.len(), "oversized 2017 firmware response");
-                Some(legacy2017::decode_firmware(&report[..size])?)
-            } else {
-                None
-            };
-            Ok((
-                serial.clone(),
-                Self {
-                    device,
-                    serial,
-                    model,
-                    legacy_firmware,
-                    input: InputState::new(model),
-                    trace: std::env::var_os("DECKFORGE_TRACE_HID").is_some(),
-                },
-            ))
-        })
+                    .context("read Stream Deck serial")?;
+                ensure!(size <= report.len(), "oversized serial response");
+                decode_serial(model, &report[..size])?
+            }
+        };
+        let legacy_firmware = if model == Model::Classic2017 {
+            let mut report = [0u8; 32];
+            report[0] = 4;
+            let size = device
+                .get_feature_report(&mut report)
+                .context("read original 2017 firmware")?;
+            ensure!(size <= report.len(), "oversized 2017 firmware response");
+            Some(legacy2017::decode_firmware(&report[..size])?)
+        } else {
+            None
+        };
+        Ok((
+            serial.clone(),
+            Self {
+                device,
+                path: info.path().to_owned(),
+                serial,
+                model,
+                legacy_firmware,
+                input: InputState::new(model),
+                trace: std::env::var_os("DECKFORGE_TRACE_HID").is_some(),
+            },
+        ))
     }
 
     pub fn model(&self) -> Model {

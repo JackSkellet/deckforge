@@ -20,6 +20,29 @@ export function request<T = any>(
     );
   return window.deckforge.request<T>(method, payload);
 }
-export const command = (payload: RecordValue) => request("command", payload);
+export const command = (payload: RecordValue, capturedDevice?: string) =>
+  request("command", scopedCommand(payload, capturedDevice));
 export const pick = (kind: string) =>
   request<string | null>("pick_file", { kind });
+
+const globalCommands = new Set([
+  "device_select",
+  "device_add",
+  "install_plugin",
+  "restart_plugin",
+  "reference_app",
+  "mixer_refresh",
+  "mixer_config",
+]);
+/** The caller passes the device captured by its UI event. Never read a mutable current-device global here. */
+export function scopedCommand(
+  payload: RecordValue,
+  capturedDevice?: string,
+): RecordValue {
+  if (globalCommands.has(payload.command) || !capturedDevice) return payload;
+  if (payload.device !== undefined && payload.device !== capturedDevice)
+    throw new Error(
+      "This command belongs to a different device. Return to its editor and retry.",
+    );
+  return { ...payload, device: capturedDevice };
+}

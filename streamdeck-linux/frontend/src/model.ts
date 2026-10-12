@@ -75,13 +75,25 @@ export interface Profile {
   pages: { id: string; name: string; folder: boolean }[];
 }
 export interface Clipboard {
+  device?: string;
   name: string;
   uuid: string;
   controller: Controller;
   mode: "copy" | "cut";
   context: string;
 }
+export interface DeviceRecord {
+  profile_compatible?: boolean;
+  id: string;
+  model: string;
+  name: string;
+  connected: boolean;
+  firmware: string;
+  selected: boolean;
+  online?: boolean;
+}
 export interface Snapshot {
+  devices?: DeviceRecord[];
   page_navigation?: { previous: boolean; next: boolean };
   device_model?: string;
   device_name?: string;
@@ -387,12 +399,35 @@ export function saveRequests(
       context: slot.context,
       raw: draft.raw,
     });
-  else if (!isContainer(slot.uuid) && draft.settingsEdited)
-    requests.push({
-      command: "settings",
-      context: slot.context,
-      settings: draft.settings,
-    });
+  else if (!isContainer(slot.uuid) && draft.settingsEdited) {
+    let base: RecordValue | undefined;
+    try {
+      const source = JSON.parse(draft.source);
+      if (
+        Array.isArray(source) &&
+        source[0] !== null &&
+        typeof source[0] === "object" &&
+        !Array.isArray(source[0])
+      )
+        base = source[0];
+    } catch {
+      /* Older retained drafts may not have a parseable baseline. */
+    }
+    requests.push(
+      base === undefined
+        ? {
+            command: "settings",
+            context: slot.context,
+            settings: draft.settings,
+          }
+        : {
+            command: "settings_patch",
+            context: slot.context,
+            base,
+            settings: draft.settings,
+          },
+    );
+  }
   return requests;
 }
 export function filteredActions(

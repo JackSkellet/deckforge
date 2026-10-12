@@ -217,27 +217,12 @@ impl Host {
             .parent()
             .context("Missing plugin state directory")?
             .to_owned();
-        let unaffected: HashSet<_> = self
-            .slots
-            .iter()
-            .flat_map(Slot::visible_flatten)
-            .filter(|slot| {
-                !self
-                    .actions
-                    .iter()
-                    .any(|action| action.uuid == slot.uuid && action.plugin == id)
-            })
-            .map(|slot| slot.context.clone())
-            .collect();
-        self.cancel_departing_inputs(&unaffected);
-        let inspectors: Vec<_> = self
-            .inspectors
-            .iter()
-            .filter(|(_, inspector)| inspector.plugin == index)
-            .map(|(id, _)| id.clone())
-            .collect();
-        for inspector in inspectors {
-            self.close_inspector(&inspector);
+        for device in self.device_ids() {
+            self.with_device(&device, |host| {
+                host.prepare_plugin_restart(index, id);
+                host.sync_visible();
+                Ok(())
+            })?;
         }
         self.plugins[index].sender = None;
         self.plugins[index].runtime.session = None;
@@ -265,23 +250,24 @@ impl Host {
             self.actions.extend(incoming);
             plugin.runtime.load_failed = false;
             self.plugins[index] = plugin;
-            self.hydrate_library_children();
-            self.slots = self.library.visible()?;
-            for index in 0..self.slots.len() {
-                if self.slots[index].background.is_none() {
-                    let slot = self.slots[index].clone();
-                    self.slots[index].background = self.resolve_state_image(&slot, slot.state);
-                }
+            for device in self.device_ids() {
+                self.with_device(&device, |host| {
+                    host.sync_visible();
+                    host.hydrate_library_children();
+                    host.slots = host.library.visible()?;
+                    for index in 0..host.slots.len() {
+                        if host.slots[index].background.is_none() {
+                            let slot = host.slots[index].clone();
+                            host.slots[index].background =
+                                host.resolve_state_image(&slot, slot.state);
+                        }
+                    }
+                    host.render()?;
+                    host.persist()
+                })?;
             }
-            self.render()?;
-            self.persist()?;
-            launch_plugin(
-                &mut self.plugins[index],
-                &self.device,
-                self.model,
-                self.port,
-                &state,
-            )
+            let devices = self.registration_devices();
+            launch_plugin(&mut self.plugins[index], &devices, self.port, &state)
         })();
         if let Err(error) = &result {
             self.plugins[index].runtime.fail(format!("{error:#}"));
@@ -290,6 +276,41 @@ impl Host {
             redraw();
         }
         result
+    }
+    fn prepare_plugin_restart(&mut self, index: usize, id: &str) {
+        // Revoke only this plugin's action instances and container runs that
+        // include them, while the old sender can still receive balanced releases.
+        let owned: HashSet<_> = self
+            .actions
+            .iter()
+            .filter(|action| action.plugin == id)
+            .map(|action| action.uuid.as_str())
+            .collect();
+        let unaffected: HashSet<_> = self
+            .slots
+            .iter()
+            .flat_map(Slot::visible_flatten)
+            .filter(|slot| {
+                !slot
+                    .flatten()
+                    .iter()
+                    .any(|child| owned.contains(child.uuid.as_str()))
+            })
+            .map(|slot| slot.context.clone())
+            .collect();
+        self.cancel_departing_triggers(&unaffected);
+        self.cancel_departing_stacks(&unaffected);
+        self.cancel_departing_multi(&unaffected);
+        self.cancel_departing_inputs(&unaffected);
+        let inspectors: Vec<_> = self
+            .inspectors
+            .iter()
+            .filter(|(_, inspector)| inspector.plugin == index)
+            .map(|(registration, _)| registration.clone())
+            .collect();
+        for inspector in inspectors {
+            self.close_inspector(&inspector);
+        }
     }
     pub(super) fn monitor_plugins(&mut self) {
         let mut exited = Vec::new();
@@ -472,5 +493,101 @@ mod tests {
                 .contains("15 seconds")
         );
         assert!(host.plugins[0].child.is_some()); // No automatic restart or timeout kill.
+    }
+    #[test]
+    fn failed_restart_cleans_owned_holds_and_inspectors_on_every_device() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut host = crate::host::tests::fixture(temp.path());
+        let a = host.slots[0].context.clone();
+        host.add_simulated_device("device-b", Model::Mini).unwrap();
+        let b = host
+            .with_device("device-b", |h| {
+                h.assign("Keypad", 0, "test.action")?;
+                Ok(h.slots[0].context.clone())
+            })
+            .unwrap();
+        let (other_sender, mut other_events) = mpsc::unbounded_channel();
+        host.plugins.push(Plugin {
+            id: "other.plugin".into(),
+            name: "Other".into(),
+            root: temp.path().join("other.sdPlugin"),
+            manifest: json!({}),
+            registration: "other-registration".into(),
+            runtime: Runtime::default(),
+            child: None,
+            sender: Some(other_sender),
+        });
+        host.actions.push(Action {
+            uuid: "other.action".into(),
+            name: "Other".into(),
+            controllers: vec!["Keypad".into()],
+            plugin: "other.plugin".into(),
+            raw: json!({"States":[{}]}),
+        });
+        let other = host
+            .with_device("device-b", |h| {
+                h.assign("Keypad", 1, "other.action")?;
+                let context = h
+                    .slots
+                    .iter()
+                    .find(|s| s.index == 1)
+                    .unwrap()
+                    .context
+                    .clone();
+                h.button_input(HeldControl::Key(1), true)?;
+                Ok(context)
+            })
+            .unwrap();
+        while other_events.try_recv().is_ok() {}
+        let (sender, mut events) = mpsc::unbounded_channel();
+        host.plugins[0].sender = Some(sender);
+        for (device, context, registration) in
+            [("test-device", &a, "pi-a"), ("device-b", &b, "pi-b")]
+        {
+            host.with_device(device, |h| {
+                let (tx, _rx) = mpsc::unbounded_channel();
+                h.inspectors.insert(
+                    registration.into(),
+                    Inspector {
+                        context: context.clone(),
+                        plugin: 0,
+                        child: None,
+                        sender: Some(tx),
+                    },
+                );
+                h.button_input(HeldControl::Key(0), true)
+            })
+            .unwrap();
+        }
+        while events.try_recv().is_ok() {}
+        host.select_device("device-b").unwrap();
+        assert!(host.restart_plugin("test.plugin").is_err()); // Missing manifest; no process launched.
+        assert_eq!(host.device, "device-b");
+        assert!(host.inspector_device("pi-a").is_none());
+        assert!(host.inspector_device("pi-b").is_none());
+        let events: Vec<_> = std::iter::from_fn(|| events.try_recv().ok()).collect();
+        for (device, context) in [("test-device", a), ("device-b", b)] {
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|e| e["event"] == "keyUp"
+                        && e["device"] == device
+                        && e["context"] == context)
+                    .count(),
+                1
+            );
+            host.with_device(device, |h| {
+                assert!(!h.held.contains_key(&HeldControl::Key(0)));
+                if device == "device-b" {
+                    assert_eq!(h.held.get(&HeldControl::Key(1)), Some(&other));
+                }
+                Ok(())
+            })
+            .unwrap();
+        }
+        assert!(other_events.try_recv().is_err());
+        assert!(host.plugins[1].sender.is_some());
+        assert!(host.plugins[0].sender.is_none());
+        assert_eq!(host.plugins[0].runtime.status, "failed");
     }
 }

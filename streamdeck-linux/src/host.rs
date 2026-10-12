@@ -22,7 +22,7 @@ use image::{DynamicImage, GenericImage, Rgb, RgbImage};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
     fs::{self, File},
     io::Cursor,
     path::{Path, PathBuf},
@@ -37,6 +37,7 @@ mod audio;
 mod brightness;
 mod children;
 mod device;
+mod device_pool;
 mod display;
 mod export;
 mod feedback;
@@ -48,6 +49,7 @@ mod multiaction;
 mod plugins;
 mod resources;
 mod screensaver;
+mod settings;
 mod stack;
 mod transfer;
 mod trigger;
@@ -110,29 +112,24 @@ impl Controller {
         }
         if request["command"] == "screensaver" {
             let (device, previous, path) = {
-                let host = self.shared.lock().unwrap();
-                if !host.running {
-                    bail!("Host has stopped");
-                }
-                if let Some(expected) = request.get("device") {
-                    anyhow::ensure!(
-                        expected.as_str() == Some(host.device.as_str()),
-                        "Selected device changed; try again"
-                    );
-                }
-                (
-                    host.device.clone(),
-                    host.saver_preferences(),
-                    host.state_path.clone(),
-                )
+                let mut host = self.shared.lock().unwrap();
+                let device = request["device"]
+                    .as_str()
+                    .unwrap_or(&host.device)
+                    .to_owned();
+                host.with_device(&device, |host| {
+                    anyhow::ensure!(host.running, "Host has stopped");
+                    Ok((
+                        host.device.clone(),
+                        host.saver_preferences(),
+                        host.state_path.clone(),
+                    ))
+                })?
             };
             let prepared = screensaver::prepare(&request, &previous, &path)?;
             let mut host = self.shared.lock().unwrap();
-            anyhow::ensure!(
-                host.running && host.device == device,
-                "Selected device changed or host stopped while loading"
-            );
-            return host.apply_saver(prepared);
+            anyhow::ensure!(host.running, "Host stopped while loading");
+            return host.with_device(&device, |host| host.apply_saver(prepared));
         }
         let mut host = self.shared.lock().unwrap();
         if !host.running {
@@ -328,6 +325,12 @@ mod image_serde {
 #[derive(Serialize, Deserialize, Default)]
 struct Saved {
     #[serde(default)]
+    devices: Vec<device_pool::Record>,
+    #[serde(default)]
+    active_scope: Option<String>,
+    #[serde(default)]
+    selected_scope: Option<String>,
+    #[serde(default)]
     model: Model,
     #[serde(default)]
     mixer: crate::mixer::Config,
@@ -353,6 +356,13 @@ enum HeldControl {
     Dial(u8),
 }
 struct Host {
+    registry_routes: HashMap<crate::device_registry::Key, String>,
+    canonical_graph_update: bool,
+    scope: String,
+    selected_scope: String,
+    other_devices: BTreeMap<String, device_pool::DeviceRuntime>,
+    transport_generation: Option<u64>,
+    pending_hardware: Option<std::sync::mpsc::Sender<Draw>>,
     model: Model,
     mixer_config: crate::mixer::Config,
     mixer: Option<crate::mixer::Worker>,
@@ -452,10 +462,15 @@ impl Host {
         }
     }
     fn persist(&mut self) -> Result<()> {
-        self.sync_visible();
+        if !self.canonical_graph_update {
+            self.sync_all_devices();
+        }
         let pending = self.state_path.with_extension("tmp");
         #[derive(Serialize)]
         struct View<'a> {
+            devices: Vec<device_pool::Record>,
+            active_scope: &'a str,
+            selected_scope: &'a str,
             model: Model,
             mixer: &'a crate::mixer::Config,
             reference_app: &'a Option<PathBuf>,
@@ -468,6 +483,9 @@ impl Host {
             globals: &'a HashMap<String, Value>,
         }
         let data = serde_json::to_vec_pretty(&View {
+            devices: self.device_records(),
+            active_scope: &self.scope,
+            selected_scope: &self.selected_scope,
             model: self.model,
             mixer: &self.mixer_config,
             reference_app: &self.reference_app,
@@ -1076,23 +1094,34 @@ impl Host {
             .map(|worker| worker.drain())
             .unwrap_or_default();
         for report in reports {
-            if report.prepared_keyboard {
-                self.multi_keyboard_prepared(report.result.is_ok());
-                self.trigger_keyboard_prepared(report.result.is_ok());
+            let owner = self.context_device(&report.context);
+            if report.prepared_keyboard && owner.is_none() {
+                continue;
             }
-            let name = self
-                .slots
-                .iter()
-                .find(|s| s.context == report.context)
-                .or_else(|| self.library.slot(&report.context))
-                .map(|s| s.name.as_str())
-                .unwrap_or("System action");
-            self.system_status = match report.result {
-                Ok(message) => format!("{name}: {message}"),
-                Err(error) => format!("{name} failed: {error:#}"),
-            };
-            self.log(self.system_status.clone());
+            let device = owner.unwrap_or_else(|| self.device.clone());
+            let _ = self.with_device(&device, |host| {
+                host.system_action_report(report);
+                Ok(())
+            });
         }
+    }
+    fn system_action_report(&mut self, report: crate::system_actions::Report) {
+        if report.prepared_keyboard {
+            self.multi_keyboard_prepared(report.result.is_ok());
+            self.trigger_keyboard_prepared(report.result.is_ok());
+        }
+        let name = self
+            .slots
+            .iter()
+            .find(|s| s.context == report.context)
+            .or_else(|| self.library.slot(&report.context))
+            .map(|s| s.name.as_str())
+            .unwrap_or("System action");
+        self.system_status = match report.result {
+            Ok(message) => format!("{name}: {message}"),
+            Err(error) => format!("{name} failed: {error:#}"),
+        };
+        self.log(self.system_status.clone());
     }
     fn input(&mut self, event: InputEvent) -> Result<()> {
         if self.saver_input(&event)? {
@@ -1192,6 +1221,30 @@ impl Host {
         Ok(())
     }
     fn plugin_message(&mut self, plugin_index: usize, message: Value) -> Result<()> {
+        let context = message["context"].as_str().unwrap_or("");
+        let target = if message["event"] == "switchToProfile" {
+            Some(
+                message["device"]
+                    .as_str()
+                    .context("Profile switching requires a target device")?
+                    .to_owned(),
+            )
+        } else {
+            self.context_device(context)
+        };
+        if let Some(target) = target {
+            if message["event"] != "switchToProfile"
+                && let Some(requested) = message.get("device").and_then(Value::as_str)
+            {
+                anyhow::ensure!(requested == target, "Action belongs to another device");
+            }
+            return self.with_device(&target, |host| {
+                host.plugin_message_local(plugin_index, message)
+            });
+        }
+        self.plugin_message_local(plugin_index, message)
+    }
+    fn plugin_message_local(&mut self, plugin_index: usize, message: Value) -> Result<()> {
         if !self.running {
             return Ok(());
         }
@@ -1518,7 +1571,7 @@ fn action_snapshot(host: &Host, action: &Action) -> Value {
     })
 }
 fn snapshot(host: &Host) -> Value {
-    json!({"page_navigation":host.page_navigation(),"device_model":host.model,"device_name":host.model.name(),"overflow_slots":host.overflow_slots(),"device_capabilities":host.model.capabilities(),"device_geometry":{"columns":host.model.columns(),"rows":host.model.rows(),"keys":host.model.key_count(),"dials":host.model.dial_count(),"key_width":host.model.key_width(),"key_height":host.model.key_height(),"strip_width":host.model.strip_width(),"strip_height":host.model.strip_height()},"clipboard":host.clipboard_snapshot(),"mixer":host.mixer_snapshot(),"screensaver":{"supported":host.model==Model::Plus,"active":host.saver.active,"reason":host.saver.reason,"generation":host.saver.generation,"preferences":host.saver_preferences(),"preview":host.saver.preview,"error":host.saver.error,"frames":host.saver.animation.as_ref().map(|animation|animation.len())},"session":host.session_state,"device_settings":{"desired":host.configured_controls(),"applied":host.controls_observed,"error":host.controls_error},"library":host.library.snapshot(),"running":host.running,"device":host.device,"firmware":host.firmware,"simulate":host.simulate,"connected":host.connected && !host.simulate,"device_online":host.connected,"connection_error":host.connection_error,
+    json!({"devices":host.devices_snapshot(),"page_navigation":host.page_navigation(),"device_model":host.model,"device_name":host.model.name(),"overflow_slots":host.overflow_slots(),"device_capabilities":host.model.capabilities(),"device_geometry":{"columns":host.model.columns(),"rows":host.model.rows(),"keys":host.model.key_count(),"dials":host.model.dial_count(),"key_width":host.model.key_width(),"key_height":host.model.key_height(),"strip_width":host.model.strip_width(),"strip_height":host.model.strip_height()},"clipboard":host.clipboard_snapshot(),"mixer":host.mixer_snapshot(),"screensaver":{"supported":host.model==Model::Plus,"active":host.saver.active,"reason":host.saver.reason,"generation":host.saver.generation,"preferences":host.saver_preferences(),"preview":host.saver.preview,"error":host.saver.error,"frames":host.saver.animation.as_ref().map(|animation|animation.len())},"session":host.session_state,"device_settings":{"desired":host.configured_controls(),"applied":host.controls_observed,"error":host.controls_error},"library":host.library.snapshot(),"running":host.running,"device":host.device,"firmware":host.firmware,"simulate":host.simulate,"connected":host.connected && !host.simulate,"device_online":host.connected,"connection_error":host.connection_error,
         "volume":host.volume_state,"volume_error":host.volume_error,"multi_runs":host.multi.snapshot(),"multi_pending":host.multi_pending.len(),"audio_outputs":host.audio_outputs,"audio_active":host.audio_active,"system_status":host.system_status,"slots":host.slots.iter().map(|s|slot_snapshot(host,s)).collect::<Vec<_>>(),
         "reference_app":host.reference_app,"inspectors":host.inspectors.values().map(|i|json!({"context":i.context,"plugin":host.plugins[i.plugin].id,"connected":i.sender.is_some()})).collect::<Vec<_>>(),
         "actions":host.actions.iter().map(|action|action_snapshot(host,action)).collect::<Vec<_>>(),
@@ -1561,6 +1614,58 @@ async fn control(
     }
 }
 fn apply_control(host: &mut Host, r: Value) -> Result<()> {
+    let command = r["command"].as_str().context("Command missing")?;
+    if command == "device_select" {
+        return host.select_device(r["device"].as_str().context("Device missing")?);
+    }
+    if command == "device_add" {
+        anyhow::ensure!(
+            host.simulate && host.diagnostics,
+            "Device fixtures require simulated diagnostic mode"
+        );
+        return host.add_simulated_device(
+            r["device"].as_str().context("Device missing")?,
+            serde_json::from_value(r["model"].clone())?,
+        );
+    }
+    let global = matches!(
+        command,
+        "install_plugin"
+            | "restart_plugin"
+            | "reference_app"
+            | "mixer_config"
+            | "mixer_refresh"
+            | "soundboard_refresh"
+            | "soundboard_stop"
+    );
+    let requested = r.get("device").and_then(Value::as_str);
+    let owner = r
+        .get("context")
+        .and_then(Value::as_str)
+        .and_then(|context| host.context_device(context));
+    if command != "slot_transfer"
+        && let (Some(requested), Some(owner)) = (requested, owner.as_deref())
+    {
+        anyhow::ensure!(requested == owner, "Action belongs to another device");
+    }
+    let target = if global {
+        None
+    } else if command == "slot_transfer" {
+        requested
+            .map(str::to_owned)
+            .or_else(|| Some(host.device.clone()))
+    } else {
+        owner.or_else(|| requested.map(str::to_owned))
+    };
+    if let Some(target) = target {
+        return host.with_device(&target, |host| apply_control_local(host, r));
+    }
+    apply_control_local(host, r)
+}
+fn apply_control_local(host: &mut Host, r: Value) -> Result<()> {
+    if r["command"] == "profile_copy_to_device" {
+        return host.copy_profile_to_device(&r);
+    }
     let command = r["command"].as_str().context("Missing command")?;
     if matches!(
         r["command"].as_str(),
@@ -1709,8 +1814,7 @@ fn apply_control(host: &mut Host, r: Value) -> Result<()> {
             if !plugins[0].runtime.load_failed
                 && let Err(error) = launch_plugin(
                     &mut plugins[0],
-                    &host.device,
-                    host.model,
+                    &host.registration_devices(),
                     host.port,
                     &state_dir,
                 )
@@ -1722,7 +1826,9 @@ fn apply_control(host: &mut Host, r: Value) -> Result<()> {
             }
             host.plugins.extend(plugins);
             host.actions.extend(actions);
-            host.install_bundled_profiles(true)?;
+            for device in host.device_ids() {
+                host.with_device(&device, |host| host.install_bundled_profiles(true))?;
+            }
             host.persist()
         }
         "device_event" => {
@@ -1853,7 +1959,7 @@ fn apply_control(host: &mut Host, r: Value) -> Result<()> {
             }
             Ok(())
         }
-        "settings" => {
+        "settings" | "settings_patch" => {
             host.editable()?;
             let context = r["context"].as_str().context("Missing context")?;
             let mut slot = host
@@ -1863,7 +1969,11 @@ fn apply_control(host: &mut Host, r: Value) -> Result<()> {
             if !r["settings"].is_object() {
                 bail!("Settings must be an object");
             }
-            slot.settings = r["settings"].clone();
+            slot.settings = if r["command"] == "settings_patch" {
+                settings::patch(&slot.settings, &r["base"], &r["settings"])?
+            } else {
+                r["settings"].clone()
+            };
             host.store_slot(slot.clone());
             host.persist()?;
             host.emit(&slot, "didReceiveSettings", json!({}));
@@ -1903,9 +2013,6 @@ async fn socket_session(socket: WebSocket, state: Shared) {
             }) else {
                 return;
             };
-            if host.connected {
-                let _=sender.send(json!({"event":"deviceDidConnect","device":host.device,"deviceInfo":device::info(host.model)}));
-            }
             let launch = host.plugins[index].registration.clone();
             let session = uuid::Uuid::new_v4().to_string();
             host.plugins[index].sender = Some(sender);
@@ -1915,13 +2022,18 @@ async fn socket_session(socket: WebSocket, state: Shared) {
             host.hydrate_resources();
             let id = host.plugins[index].id.clone();
             host.log(format!("Plugin connected: {id}"));
-            for slot in host.slots.iter().flat_map(Slot::visible_flatten) {
-                if host
-                    .actions
-                    .iter()
-                    .any(|a| a.uuid == slot.uuid && a.plugin == id)
-                {
-                    host.emit(slot, "willAppear", json!({}));
+            for device in host.device_ids() {
+                let result=host.with_device(&device,|host| {
+                    if host.connected && let Some(sender)=&host.plugins[index].sender {
+                        let _=sender.send(json!({"event":"deviceDidConnect","device":host.device,"deviceInfo":device::info(host.model)}));
+                    }
+                    for slot in host.slots.iter().flat_map(Slot::visible_flatten) {
+                        if host.actions.iter().any(|a|a.uuid==slot.uuid&&a.plugin==id) {host.emit(slot,"willAppear",json!({}));}
+                    }
+                    Ok(())
+                });
+                if let Err(error) = result {
+                    host.log(format!("Device replay failed: {error:#}"));
                 }
             }
             Client::Plugin {
@@ -1933,18 +2045,28 @@ async fn socket_session(socket: WebSocket, state: Shared) {
             let Some(registration) = frame["uuid"].as_str() else {
                 return;
             };
-            let Some(inspector) = host.inspectors.get_mut(registration) else {
+            let Some(device) = host.inspector_device(registration) else {
                 return;
             };
-            if inspector.sender.is_some() {
+            if host
+                .with_device(&device, |host| {
+                    let inspector = host
+                        .inspectors
+                        .get_mut(registration)
+                        .context("Inspector session expired")?;
+                    anyhow::ensure!(inspector.sender.is_none(), "Inspector already connected");
+                    inspector.sender = Some(sender);
+                    let context = inspector.context.clone();
+                    if let Some(slot) = host.visible_slot(&context) {
+                        host.emit(slot, "propertyInspectorDidAppear", json!({}));
+                    }
+                    host.log(format!("Property inspector connected: {context}"));
+                    Ok(())
+                })
+                .is_err()
+            {
                 return;
             }
-            inspector.sender = Some(sender);
-            let context = inspector.context.clone();
-            if let Some(slot) = host.visible_slot(&context) {
-                host.emit(slot, "propertyInspectorDidAppear", json!({}));
-            }
-            host.log(format!("Property inspector connected: {context}"));
             Client::Inspector(registration.to_owned())
         } else {
             return;
@@ -1996,12 +2118,13 @@ fn load_plugins(
     plugins::load(paths, reference)
 }
 fn launch_plugins(host: &mut Host, port: u16, state_dir: &Path) {
+    let devices = host.registration_devices();
     let mut failures = Vec::new();
     for plugin in &mut host.plugins {
         if plugin.runtime.load_failed {
             continue;
         }
-        if let Err(error) = launch_plugin(plugin, &host.device, host.model, port, state_dir) {
+        if let Err(error) = launch_plugin(plugin, &devices, port, state_dir) {
             failures.push(format!("Plugin {} could not start: {error:#}", plugin.id));
         }
     }
@@ -2011,8 +2134,7 @@ fn launch_plugins(host: &mut Host, port: u16, state_dir: &Path) {
 }
 fn launch_plugin(
     plugin: &mut Plugin,
-    device: &str,
-    model: Model,
+    devices: &[Value],
     port: u16,
     state_dir: &Path,
 ) -> Result<()> {
@@ -2032,7 +2154,7 @@ fn launch_plugin(
             },
             plugin.registration
         )));
-        launch_plugin_process(plugin, device, model, port, state_dir, entry)
+        launch_plugin_process(plugin, devices, port, state_dir, entry)
     })();
     if let Err(error) = &result {
         plugin.runtime.fail(format!("{error:#}"));
@@ -2040,8 +2162,8 @@ fn launch_plugin(
     result
 }
 
-fn registration_info(plugin: &Plugin, device: &str, model: Model) -> Value {
-    json!({"application":{"font":"DejaVu Sans","language":"en","platform":"linux","platformVersion":std::env::consts::OS,"version":"7.6.0"},"plugin":{"uuid":plugin.id,"version":plugin.manifest["Version"]},"devicePixelRatio":1,"colors":{"buttonMouseOverBackgroundColor":"#303030","buttonPressedBackgroundColor":"#303030","buttonPressedBorderColor":"#505050","buttonPressedTextColor":"#ffffff","highlightColor":"#4bd3b0"},"devices":[{"id":device,"type":model.sdk_type(),"name":model.name(),"size":{"columns":model.columns(),"rows":model.rows()}}]})
+fn registration_info(plugin: &Plugin, devices: &[Value]) -> Value {
+    json!({"application":{"font":"DejaVu Sans","language":"en","platform":"linux","platformVersion":std::env::consts::OS,"version":"7.6.0"},"plugin":{"uuid":plugin.id,"version":plugin.manifest["Version"]},"devicePixelRatio":1,"colors":{"buttonMouseOverBackgroundColor":"#303030","buttonPressedBackgroundColor":"#303030","buttonPressedBorderColor":"#505050","buttonPressedTextColor":"#ffffff","highlightColor":"#4bd3b0"},"devices":devices})
 }
 #[allow(clippy::too_many_arguments)]
 fn spawn_webview(
@@ -2085,13 +2207,12 @@ fn spawn_webview(
 }
 fn launch_plugin_process(
     plugin: &mut Plugin,
-    device: &str,
-    model: Model,
+    devices: &[Value],
     port: u16,
     state_dir: &Path,
     entry: crate::plugin_entry::Entry,
 ) -> Result<()> {
-    let info = registration_info(plugin, device, model);
+    let info = registration_info(plugin, devices);
     match entry.kind {
         crate::plugin_entry::Kind::Html => {
             plugin.runtime.runtime_path = Some(std::env::current_exe()?);
@@ -2209,6 +2330,7 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
         .context("Editor port is in use; choose another --port")?;
     let port = listener.local_addr()?.port();
     let state_path = state_dir.join("session.json");
+    let fresh_session = !state_path.exists();
     let saved = if state_path.exists() {
         serde_json::from_slice::<Saved>(&fs::read(&state_path)?)
             .context("Invalid saved session; preserved without overwriting")?
@@ -2265,40 +2387,61 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
             raw: json!({"States":[{"Title":if uuid==crate::system_actions::OPEN {"Open"} else if uuid==crate::brightness::UUID {"Brightness"} else {name}}],"Encoder":{"layout":"$X1"}}),
         });
     }
+    if state_path.exists() && saved.devices.is_empty() {
+        let backup = state_path.with_extension("before-multi-device.json");
+        if !backup.exists() {
+            fs::copy(&state_path, backup)?;
+        }
+    }
+    let saved_records = saved.devices.clone();
+    let saved_scope = saved
+        .active_scope
+        .clone()
+        .unwrap_or_else(|| "primary".into());
+    let selected_scope = saved.selected_scope.clone();
+    let has_pool = !saved_records.is_empty();
+    let requested_serial = serial.clone();
     let remembered = device::Config::remembered(&saved);
     let selected_model =
         device::selected_model(remembered.as_ref(), serial.as_deref(), requested_model);
-    let mut model = selected_model.unwrap_or(saved.model);
-    let previous_device = remembered.as_ref().map(|config| config.id.clone());
-    let mut device_config = device::Config::select(remembered, serial);
-    device_config.validate()?;
-    let (events_tx, mut events_rx) = mpsc::unbounded_channel::<DeviceEvent>();
-    let (draw_tx, draw_rx) = std::sync::mpsc::channel();
-    let (initial, mut connection_error) = if simulate {
-        (None, None)
+    let model = if has_pool {
+        saved.model
     } else {
-        match device_session::connect_model(device_config.serial.as_deref(), selected_model) {
-            Ok(connection) => (Some(connection), None),
-            Err(error) => (None, Some(format!("{error:#}"))),
-        }
+        selected_model.unwrap_or(saved.model)
     };
-    if !simulate && initial.is_none() && selected_model.is_none() {
-        let note = format!(
-            "Offline editor uses {}. Use --model <family> when selecting a different device family offline; reconnect or relaunch with that explicit model.",
-            model.name()
-        );
-        connection_error =
-            Some(connection_error.map_or(note.clone(), |reason| format!("{reason}. {note}")));
-    }
-    if let Some(connection) = &initial {
-        device_config.id = connection.deck.serial().to_owned();
-        device_config.serial = Some(device_config.id.clone());
-        device_config.firmware = connection.firmware.clone();
-        model = connection.deck.model();
-    }
+    let previous_device = remembered.as_ref().map(|config| config.id.clone());
+    let serial_filter = serial.clone();
+    let mut device_config = if has_pool {
+        let record = saved_records
+            .iter()
+            .find(|r| r.scope == saved_scope)
+            .context("Saved active device missing")?;
+        remembered.unwrap_or_else(|| device::Config {
+            model: record.model,
+            id: record.device.clone(),
+            serial: None,
+            firmware: record.firmware.clone(),
+        })
+    } else {
+        device::Config::select(remembered, serial)
+    };
+    device_config.validate()?;
+    let registry_filter = crate::device_registry::Filter {
+        serial: serial_filter,
+        model: requested_model,
+    };
+    let (events_tx, mut events_rx) = mpsc::unbounded_channel::<crate::device_registry::Event>();
+    let connection_error = (!simulate).then(|| "Waiting for device discovery".into());
     device_config.model = model;
-    let connected = simulate || initial.is_some();
-    let device = if simulate {
+    let connected = simulate;
+    let device = if has_pool {
+        saved_records
+            .iter()
+            .find(|record| record.scope == saved_scope)
+            .context("Saved active device missing")?
+            .device
+            .clone()
+    } else if simulate {
         if model == Model::Plus {
             "simulated-streamdeck-plus".into()
         } else {
@@ -2331,7 +2474,7 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
         };
         Library::for_model(saved.slots, &device, legacy_model)
     };
-    if !simulate {
+    if !simulate && !has_pool {
         for profile in &mut library.profiles {
             if profile.device == "simulated-streamdeck-plus"
                 || profile.device.starts_with("offline-streamdeck-plus-")
@@ -2362,6 +2505,13 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
         controls.insert(device.clone(), previous_controls);
     }
     let mut host = Host {
+        registry_routes: HashMap::new(),
+        canonical_graph_update: false,
+        scope: saved_scope.clone(),
+        selected_scope: saved_scope,
+        other_devices: BTreeMap::new(),
+        transport_generation: None,
+        pending_hardware: None,
         model,
         mixer_config: saved.mixer,
         mixer: None,
@@ -2420,11 +2570,7 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
         slots,
         globals: saved.globals,
         renderer: Renderer::new()?,
-        hardware: if simulate {
-            None
-        } else {
-            Some(draw_tx.clone())
-        },
+        hardware: None,
         device,
         firmware,
         token: uuid::Uuid::new_v4().to_string(),
@@ -2437,7 +2583,15 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
         released: HashSet::new(),
         retired: VecDeque::new(),
     };
-    host.install_bundled_profiles(profile_path.is_none())?;
+    host.restore_device_records(saved_records, selected_scope)?;
+    if has_pool {
+        host.startup_device_selection(requested_serial.as_deref(), requested_model)?;
+    }
+    let selected_device = host.device.clone();
+    for device in host.device_ids() {
+        let activate = profile_path.is_none() || device != selected_device;
+        host.with_device(&device, |host| host.install_bundled_profiles(activate))?;
+    }
     if host.mixer_config.enabled
         && let Err(error) = host.ensure_mixer()
     {
@@ -2446,7 +2600,7 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
     }
     if let Some(path) = profile_path {
         host.import_profile(&path)?;
-    } else if host.slots.is_empty() {
+    } else if host.slots.is_empty() && fresh_session {
         let key = host
             .actions
             .iter()
@@ -2468,13 +2622,13 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
         if let Some(uuid) = key {
             host.assign("Keypad", 0, &uuid)?;
         }
-        if let Some(uuid) = dial.filter(|_| model.dial_count() > 0) {
+        if let Some(uuid) = dial.filter(|_| host.model.dial_count() > 0) {
             host.assign("Encoder", 0, &uuid)?;
         }
     }
     let mut occupied = std::collections::HashSet::new();
     for slot in &mut host.slots {
-        if !device::valid_slot(model, &slot.controller, slot.index) {
+        if !device::valid_slot(host.model, &slot.controller, slot.index) {
             bail!("Saved session contains invalid slot coordinates");
         }
         if !occupied.insert((slot.controller.clone(), slot.index)) {
@@ -2492,17 +2646,49 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
     }
     // Validate and start plugins before writing any hardware image.
     launch_plugins(&mut host, port, &state_dir);
-    let worker = if simulate {
-        None
-    } else {
-        Some(device_session::spawn_model(
-            initial,
-            device_config.serial.clone(),
-            Some(model),
-            draw_rx,
-            events_tx,
-        ))
-    };
+    let (registry_stop, registry_wait) = std::sync::mpsc::channel::<()>();
+    let registry_records = host.device_records();
+    let registry_worker = (!simulate).then(|| {
+        std::thread::spawn(move || {
+            let mut registry =
+                crate::device_registry::Registry::new(events_tx.clone(), registry_filter.clone());
+            for record in registry_records {
+                if let Some(config) = record.config
+                    && let Some(serial) = config.serial
+                {
+                    let allowed = registry_filter
+                        .serial
+                        .as_ref()
+                        .is_none_or(|filter| filter == &serial)
+                        && registry_filter
+                            .model
+                            .is_none_or(|model| model == record.model);
+                    // A new serial with no known family must be discovered before a
+                    // fixed-model worker is created. Existing identities can retry offline.
+                    if allowed
+                        && (config.firmware != "unknown" || registry_filter.model.is_some())
+                        && let Err(error) = registry.watch(serial, record.model)
+                    {
+                        let _ = events_tx.send(crate::device_registry::Event::Diagnostic {
+                            error: format!("{error:#}"),
+                        });
+                    }
+                }
+            }
+            loop {
+                if let Err(error) = registry.refresh() {
+                    let _ = events_tx.send(crate::device_registry::Event::Diagnostic {
+                        error: format!("{error:#}"),
+                    });
+                }
+                match registry_wait.recv_timeout(Duration::from_secs(1)) {
+                    Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                }
+            }
+            registry.shutdown()
+        })
+    });
     host.send_device_controls();
     host.sync_visible();
     host.hydrate_library_children();
@@ -2530,8 +2716,8 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
             .is_err()
         {
             stop_plugins(&mut shared.lock().unwrap());
-            let _ = draw_tx.send(Draw::Stop);
-            if let Some(worker) = worker {
+            let _ = registry_stop.send(());
+            if let Some(worker) = registry_worker {
                 let _ = worker.join();
             }
             bail!("Desktop startup was cancelled");
@@ -2544,7 +2730,7 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
     let event_task = tokio::spawn(async move {
         while let Some(event) = events_rx.recv().await {
             let mut host = events_state.lock().unwrap();
-            if let Err(error) = host.device_event(event) {
+            if let Err(error) = host.registry_event(event) {
                 host.system_status = format!("Device/action failed: {error:#}");
                 let message = host.system_status.clone();
                 host.log(message);
@@ -2589,20 +2775,29 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
                 if !host.running {
                     break;
                 }
-                host.poll_multi();
-                host.poll_triggers();
-                host.poll_feedback();
-                host.poll_brightness();
-                host.poll_saver();
-                host.multi
-                    .next_due()
-                    .into_iter()
-                    .chain(host.triggers.repeater.next_due())
-                    .chain(host.next_feedback())
-                    .chain(host.next_brightness())
-                    .chain(host.next_saver())
-                    .min()
-                    .map(|deadline| deadline.saturating_sub(host.multi_clock.elapsed()))
+                let mut earliest = None;
+                for device in host.device_ids() {
+                    let due = host.with_device(&device, |host| {
+                        host.poll_multi();
+                        host.poll_triggers();
+                        host.poll_feedback();
+                        host.poll_brightness();
+                        host.poll_saver();
+                        Ok(host
+                            .multi
+                            .next_due()
+                            .into_iter()
+                            .chain(host.triggers.repeater.next_due())
+                            .chain(host.next_feedback())
+                            .chain(host.next_brightness())
+                            .chain(host.next_saver())
+                            .min())
+                    });
+                    if let Ok(Some(due)) = due {
+                        earliest = Some(earliest.map_or(due, |old: Duration| old.min(due)));
+                    }
+                }
+                earliest.map(|deadline| deadline.saturating_sub(host.multi_clock.elapsed()))
             };
             tokio::select! {
                 _=multi_notify.notified()=>{},
@@ -2654,47 +2849,56 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
         stop_plugins(&mut host);
         host.persist()?;
     }
-    let _ = draw_tx.send(Draw::Stop);
+    let _ = registry_stop.send(());
+    if let Some(worker) = registry_worker {
+        worker
+            .join()
+            .map_err(|_| anyhow::anyhow!("Device registry panicked"))??;
+    }
     event_task.abort();
     monitor_task.abort();
     multi_task.abort();
-    if let Some(worker) = worker {
-        let _ = worker.join();
-    }
     result?;
     Ok(())
 }
 
 fn stop_plugins(host: &mut Host) {
+    if !host.running {
+        return;
+    }
     if let Some(worker) = &host.volume {
         worker.cancel();
     }
-    host.cancel_departing_triggers(&HashSet::new());
-    host.cancel_all_multi();
+    for device in host.device_ids() {
+        let result = host.with_device(&device, |host| {
+            host.cancel_departing_triggers(&HashSet::new());
+            host.cancel_all_multi();
+            host.release_device_holds();
+            if host.model == Model::Plus && !host.saver.locked {
+                host.wake_device()?;
+            }
+            host.brightness_repeats.clear();
+            if !host.badges.is_empty() {
+                host.badges.clear();
+                host.render()?;
+            }
+            host.close_inspectors(None);
+            Ok(())
+        });
+        if let Err(error) = result {
+            host.log(format!("Device shutdown: {error:#}"));
+        }
+    }
     if let Some(worker) = &host.audio {
         worker.cancel();
     }
-
     if let Some(worker) = &host.system_actions {
         worker.cancel();
     }
-    if !host.saver.locked
-        && let Err(error) = host.wake_device()
-    {
-        host.log(format!("Restore display on shutdown: {error:#}"));
-    }
-    host.brightness_repeats.clear();
     host.running = false;
     if let Some(redraw) = &host.redraw {
         redraw();
     }
-    if !host.badges.is_empty() {
-        host.badges.clear();
-        if let Err(error) = host.render() {
-            host.log(format!("Restore display on shutdown: {error:#}"));
-        }
-    }
-    host.close_inspectors(None);
     for plugin in &mut host.plugins {
         plugin.sender = None;
         plugin.runtime.session = None;
@@ -2782,6 +2986,13 @@ mod tests {
     }
     pub(super) fn fixture(root: &Path) -> Host {
         let mut host = Host {
+            registry_routes: HashMap::new(),
+            canonical_graph_update: false,
+            scope: "primary".into(),
+            selected_scope: "primary".into(),
+            other_devices: BTreeMap::new(),
+            transport_generation: None,
+            pending_hardware: None,
             model: Model::Plus,
             mixer_config: crate::mixer::Config::default(),
             mixer: None,

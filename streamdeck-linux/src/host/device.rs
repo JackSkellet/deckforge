@@ -157,7 +157,7 @@ impl Host {
         }
         Ok(())
     }
-    fn device_broadcast(&self, event: Value) {
+    pub(super) fn device_broadcast(&self, event: Value) {
         for plugin in &self.plugins {
             if let Some(sender) = &plugin.sender {
                 let _ = sender.send(event.clone());
@@ -230,6 +230,11 @@ impl Host {
                 firmware,
                 model,
             } => {
+                ensure!(
+                    self.device_scope(&serial)
+                        .is_none_or(|scope| scope == self.scope),
+                    "Device identity is already owned by another runtime"
+                );
                 let config = Config {
                     model,
                     id: serial.clone(),

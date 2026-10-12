@@ -32,6 +32,24 @@ const slot = {
   multi_children: [],
 } as Slot;
 describe("action drafts", () => {
+  it("falls back to legacy replacement only without a usable captured settings baseline", () => {
+    const edited = editDraft(reconcileDraft(undefined, slot), {
+      settings: { count: 99 },
+    });
+    expect(
+      saveRequests(slot, { ...edited, source: "invalid old source" }),
+    ).toEqual([
+      { command: "settings", context: slot.context, settings: { count: 99 } },
+    ]);
+    expect(saveRequests(slot, edited)).toEqual([
+      {
+        command: "settings_patch",
+        context: slot.context,
+        base: slot.settings,
+        settings: { count: 99 },
+      },
+    ]);
+  });
   it("does not freeze a live plugin title when only settings change", () => {
     const initial = reconcileDraft(undefined, slot);
     const edited = editDraft(initial, {
@@ -40,7 +58,12 @@ describe("action drafts", () => {
     const live = { ...slot, title: "Plugin changed", state: 1 };
     expect(reconcileDraft(edited, live)).toBe(edited);
     expect(saveRequests(live, edited)).toEqual([
-      { command: "settings", context: slot.context, settings: edited.settings },
+      {
+        command: "settings_patch",
+        context: slot.context,
+        base: slot.settings,
+        settings: edited.settings,
+      },
     ]);
   });
   it("keeps per-state appearance intent and never writes untouched settings or other state records", () => {
@@ -114,7 +137,8 @@ describe("action drafts", () => {
       ),
     ).toEqual([
       {
-        command: "settings",
+        command: "settings_patch",
+        base: slot.settings,
         context: slot.context,
         settings: { ...slot.settings, count: 2 },
       },
@@ -149,7 +173,8 @@ describe("action drafts", () => {
         title: "Changed",
       },
       {
-        command: "settings",
+        command: "settings_patch",
+        base: slot.settings,
         context: "counter-1",
         settings: { ...slot.settings, count: 2 },
       },

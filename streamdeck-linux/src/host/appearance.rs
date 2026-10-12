@@ -381,39 +381,52 @@ impl Controller {
         let (slot, actions, path, device) = {
             let mut host = self.shared.lock().unwrap();
             ensure!(host.running, "Host has stopped");
-            if save {
-                host.editable()?;
-            }
-            let mut slot = host
-                .visible_slot(
-                    request["context"]
-                        .as_str()
-                        .context("Missing action context")?,
-                )
-                .context("Action is not visible")?
-                .clone();
-            migrate(&mut slot, &host.actions);
-            check(request, &slot, &host.actions)?;
-            if let Some(target) = request["state"].as_u64().filter(|s| *s != slot.state) {
-                slot.state = target;
-                slot.title = title(&slot, &host.actions);
-                slot.background = host.resolve_state_image(&slot, target);
-            }
-            if request["reset_image"] == true || request.get("image_path") == Some(&Value::Null) {
-                if let Some(current) = slot.appearances.get_mut(&slot.state) {
-                    if current.user_image.is_none() && current.imported_image {
-                        current.image_reset = true;
-                    }
-                    current.user_pixels = None;
+            let context = request["context"]
+                .as_str()
+                .context("Missing action context")?;
+            let owner = host
+                .context_device(context)
+                .context("Unknown action device")?;
+            ensure!(
+                request.get("device").is_none_or(|id| id == &owner),
+                "Action belongs to another device"
+            );
+            host.with_device(&owner, |host| {
+                if save {
+                    host.editable_context(context)?;
                 }
-                slot.background = host.resolve_state_image(&slot, slot.state);
-            }
-            (
-                slot,
-                host.actions.clone(),
-                host.state_path.clone(),
-                host.device.clone(),
-            )
+                let mut slot = host
+                    .visible_slot(
+                        request["context"]
+                            .as_str()
+                            .context("Missing action context")?,
+                    )
+                    .context("Action is not visible")?
+                    .clone();
+                migrate(&mut slot, &host.actions);
+                check(request, &slot, &host.actions)?;
+                if let Some(target) = request["state"].as_u64().filter(|s| *s != slot.state) {
+                    slot.state = target;
+                    slot.title = title(&slot, &host.actions);
+                    slot.background = host.resolve_state_image(&slot, target);
+                }
+                if request["reset_image"] == true || request.get("image_path") == Some(&Value::Null)
+                {
+                    if let Some(current) = slot.appearances.get_mut(&slot.state) {
+                        if current.user_image.is_none() && current.imported_image {
+                            current.image_reset = true;
+                        }
+                        current.user_pixels = None;
+                    }
+                    slot.background = host.resolve_state_image(&slot, slot.state);
+                }
+                Ok((
+                    slot,
+                    host.actions.clone(),
+                    host.state_path.clone(),
+                    host.device.clone(),
+                ))
+            })?
         };
         let prepared = prepare(request, slot, &actions, &path, save)?;
         if save {
@@ -427,19 +440,21 @@ impl Controller {
     pub fn appearance_preview(&self, request: Value) -> Result<Value> {
         let (prepared, device) = self.appearance_prepare(&request, false)?;
         let (actions, root) = {
-            let host = self.shared.lock().unwrap();
-            ensure!(host.device == device, "Selected device changed");
-            let current = host
-                .visible_slot(&prepared.slot.context)
-                .context("Action is no longer visible")?;
-            check(&request, current, &host.actions)?;
-            let root = host
-                .actions
-                .iter()
-                .find(|a| a.uuid == prepared.slot.uuid)
-                .and_then(|a| host.plugins.iter().find(|p| p.id == a.plugin))
-                .map(|p| p.root.clone());
-            (host.actions.clone(), root)
+            let mut host = self.shared.lock().unwrap();
+            host.with_device(&device, |host| {
+                ensure!(host.running, "Host stopped");
+                let current = host
+                    .visible_slot(&prepared.slot.context)
+                    .context("Action is no longer visible")?;
+                check(&request, current, &host.actions)?;
+                let root = host
+                    .actions
+                    .iter()
+                    .find(|a| a.uuid == prepared.slot.uuid)
+                    .and_then(|a| host.plugins.iter().find(|p| p.id == a.plugin))
+                    .map(|p| p.root.clone());
+                Ok((host.actions.clone(), root))
+            })?
         };
         let mut slot = prepared.slot;
         let renderer = Renderer::new()?;
@@ -466,11 +481,12 @@ impl Controller {
     pub(super) fn appearance_command(&self, request: Value) -> Result<()> {
         let (prepared, device) = self.appearance_prepare(&request, true)?;
         let mut host = self.shared.lock().unwrap();
+        host.with_device(&device,|host| {
         ensure!(
-            host.running && host.device == device,
-            "Selected device changed or host stopped"
+            host.running,
+            "Host stopped"
         );
-        host.editable()?;
+        host.editable_context(&prepared.slot.context)?;
         let current = host
             .visible_slot(&prepared.slot.context)
             .context("Action is no longer visible")?;
@@ -533,6 +549,7 @@ impl Controller {
             host.emit(&edited,"titleParametersDidChange",json!({"title":edited.title,"titleParameters":event_style(&edited,&host.actions),"state":state}));
         }
         host.render()
+        })
     }
 }
 

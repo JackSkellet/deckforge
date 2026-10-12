@@ -35,8 +35,15 @@ import {
   outsideControls,
   acceptsInput,
   controlName,
+  associatedDevices,
+  deviceOptionLabel,
 } from "./device";
 import { Modal, Plugins, Preferences } from "./Panels";
+import {
+  ProfileCopyDialog,
+  eligibleProfileTargets,
+  type ProfileCopyDraft,
+} from "./ProfileCopy";
 import {
   exportTextDrafts,
   importTextDrafts,
@@ -74,14 +81,21 @@ function ActionIcon({ action }: { action: Action | undefined }) {
     </span>
   );
 }
+const defaultSelection = { controller: "Keypad" as Controller, index: 0 };
 export default function App() {
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
-  const [selected, setSelected] = useState<{
-    controller: Controller;
-    index: number;
-  }>({ controller: "Keypad", index: 0 });
+  const currentDevice = snapshot?.device ?? "";
+  const [selections, setSelections] = useState<
+    Record<string, { controller: Controller; index: number }>
+  >({});
+  const selected = selections[currentDevice] ?? defaultSelection;
+  function setSelected(value: { controller: Controller; index: number }) {
+    const owner = currentDevice;
+    setSelections((previous) => ({ ...previous, [owner]: value }));
+  }
+  const [selectingDevice, setSelectingDevice] = useState(false);
   const [drafts, setDrafts] = useState<Record<string, Draft>>({});
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<Controller | "All">("All");
@@ -90,10 +104,14 @@ export default function App() {
   >(null);
   const [libraryEdit, setLibraryEdit] = useState<{
     kind: "profile" | "page";
+    device?: string;
     id?: string;
     name: string;
     operation: "create" | "rename" | "delete" | "duplicate";
   } | null>(null);
+  const [copyProfile, setCopyProfile] = useState<ProfileCopyDraft | null>(null);
+  const profileCopySerial = useRef(0);
+  const [copyingProfile, setCopyingProfile] = useState(false);
   const [saving, setSaving] = useState(false);
   const [editBusy, setEditBusy] = useState(false);
   const [editMenuRequest, setEditMenuRequest] = useState<{
@@ -138,7 +156,9 @@ export default function App() {
         if (!live) return;
         if (state) {
           if (state.drafts) setDrafts(state.drafts);
-          if (state.selected) setSelected(state.selected);
+          if (state.selections) setSelections(state.selections);
+          else if (state.selected)
+            setSelections({ [s.device]: state.selected });
           if (typeof state.search === "string") setSearch(state.search);
           if (["All", "Keypad", "Encoder", "Neo"].includes(state.filter))
             setFilter(state.filter);
@@ -146,7 +166,12 @@ export default function App() {
           importFormDrafts(state.formDrafts);
           if (["plugins", "preferences", "logs", "mixer"].includes(state.panel))
             setPanel(state.panel);
-          if (state.libraryEdit) setLibraryEdit(state.libraryEdit);
+          if (state.copyProfile) setCopyProfile(state.copyProfile);
+          if (state.libraryEdit)
+            setLibraryEdit({
+              ...state.libraryEdit,
+              device: state.libraryEdit.device ?? s.device,
+            });
         }
         ready = true;
         accept(latest ?? s);
@@ -169,24 +194,28 @@ export default function App() {
   const uiState = {
     drafts,
     selected,
+    selections,
     search,
     filter,
     textDrafts: exportTextDrafts(),
     formDrafts: exportFormDrafts(),
     panel,
     libraryEdit,
+    copyProfile,
   };
   useEffect(() => {
     if (booted) void request("ui_state_set", { state: uiState }).catch(onError);
   }, [
     drafts,
     selected,
+    selections,
     search,
     filter,
     booted,
     textRevision,
     panel,
     libraryEdit,
+    copyProfile,
     onError,
   ]);
   async function hide() {
@@ -198,10 +227,10 @@ export default function App() {
     }
   }
   const run = useCallback(
-    async (payload: RecordValue) => {
+    async (payload: RecordValue, capturedDevice = currentDevice) => {
       try {
         setError("");
-        await command(payload);
+        await command(payload, capturedDevice);
         accept(await request<Snapshot>("snapshot"));
         return true;
       } catch (e) {
@@ -209,8 +238,17 @@ export default function App() {
         return false;
       }
     },
-    [accept, onError],
+    [accept, onError, currentDevice],
   );
+  async function selectDevice(device: string) {
+    if (device === currentDevice || selectingDevice) return;
+    setSelectingDevice(true);
+    try {
+      await run({ command: "device_select", device });
+    } finally {
+      setSelectingDevice(false);
+    }
+  }
   const slot = snapshot?.slots.find(
     (s): s is Slot & { controller: Controller } =>
       isAssignableSlot(s) &&
@@ -232,6 +270,7 @@ export default function App() {
     if (filter !== "All" && !supportedControllers(snapshot).includes(filter))
       setFilter("All");
   }, [
+    snapshot?.device,
     snapshot?.device_model,
     snapshot?.device_geometry?.keys,
     snapshot?.device_geometry?.dials,
@@ -250,6 +289,62 @@ export default function App() {
     (p) => p.id === snapshot?.library.active_page,
   );
   const readonly = profile?.readonly ?? false;
+  function openProfileCopy() {
+    if (!snapshot || !profile) return;
+    const devices = associatedDevices(snapshot).map((device) => ({
+      ...device,
+    }));
+    setError("");
+    setCopyProfile({
+      operation_id: String(++profileCopySerial.current),
+      device: currentDevice,
+      profile: profile.id,
+      source_name: profile.name,
+      devices,
+      target_device:
+        eligibleProfileTargets(devices, currentDevice)[0]?.id ?? "",
+      name: `${profile.name} copy`,
+      simulate: snapshot.simulate,
+    });
+  }
+  async function submitProfileCopy() {
+    if (
+      !copyProfile ||
+      copyingProfile ||
+      !eligibleProfileTargets(copyProfile.devices, copyProfile.device).some(
+        (device) => device.id === copyProfile.target_device,
+      )
+    )
+      return;
+    const captured = copyProfile;
+    setCopyingProfile(true);
+    try {
+      if (
+        await run(
+          {
+            command: "profile_copy_to_device",
+            device: captured.device,
+            profile: captured.profile,
+            target_device: captured.target_device,
+            ...(captured.name.trim() ? { name: captured.name.trim() } : {}),
+          },
+          captured.device,
+        )
+      ) {
+        setCopyProfile((current) =>
+          current?.operation_id === captured.operation_id ? null : current,
+        );
+        const target = captured.devices.find(
+          (device) => device.id === captured.target_device,
+        );
+        setNotice(
+          `Copied ${captured.source_name} to ${target?.name ?? captured.target_device}`,
+        );
+      }
+    } finally {
+      setCopyingProfile(false);
+    }
+  }
   function change(patch: Partial<Draft>) {
     if (!slot) return;
     setDrafts((prev) => ({
@@ -756,13 +851,29 @@ export default function App() {
           title={snapshot.connection_error || snapshot.device}
         >
           <span className={"dot " + (snapshot.connected ? "online" : "")} />
-          <span>
-            {snapshot.simulate
-              ? `Simulated ${deviceName(snapshot)}`
-              : snapshot.connected
-                ? `${deviceName(snapshot)} connected`
-                : `Waiting for ${deviceName(snapshot)}`}
-          </span>
+          <label className="device-picker">
+            <span className="sr-only">Selected device</span>
+            <select
+              value={snapshot.device}
+              disabled={selectingDevice}
+              onChange={(event) => void selectDevice(event.target.value)}
+              title={`${deviceName(snapshot)} · ${snapshot.device}`}
+            >
+              {associatedDevices(snapshot).map((device) => (
+                <option
+                  key={device.id}
+                  value={device.id}
+                  title={`${device.name} · ${device.id}`}
+                >
+                  {deviceOptionLabel(
+                    device,
+                    associatedDevices(snapshot),
+                    snapshot.simulate,
+                  )}
+                </option>
+              ))}
+            </select>
+          </label>
         </div>
         <div className="header-tools">
           <button onClick={() => setPanel("mixer")}>Audio mixer</button>
@@ -796,6 +907,7 @@ export default function App() {
               title="New profile"
               onClick={() =>
                 setLibraryEdit({
+                  device: currentDevice,
                   kind: "profile",
                   name: "New profile",
                   operation: "create",
@@ -851,6 +963,13 @@ export default function App() {
             <details>
               <summary>Profile options</summary>
               <div className="menu-stack">
+                <button
+                  type="button"
+                  disabled={!profile}
+                  onClick={openProfileCopy}
+                >
+                  Copy to device…
+                </button>
                 {(["rename", "duplicate", "delete"] as const).map(
                   (operation) => (
                     <button
@@ -860,6 +979,7 @@ export default function App() {
                       }
                       onClick={() =>
                         setLibraryEdit({
+                          device: currentDevice,
                           kind: "profile",
                           id: profile!.id,
                           name:
@@ -913,6 +1033,7 @@ export default function App() {
                 disabled={readonly}
                 onClick={() =>
                   setLibraryEdit({
+                    device: currentDevice,
                     kind: "page",
                     name: "New page",
                     operation: "create",
@@ -939,6 +1060,7 @@ export default function App() {
                       disabled={!page || readonly}
                       onClick={() =>
                         setLibraryEdit({
+                          device: currentDevice,
                           kind: "page",
                           id: page!.id,
                           name:
@@ -1155,6 +1277,7 @@ export default function App() {
                     <AppearanceEditor
                       key={`appearance:${snapshot.device}:${snapshot.device_model}:${slot.context}`}
                       slot={slot}
+                      device={currentDevice}
                       draft={draft}
                       userTitleEnabled={action?.user_title_enabled !== false}
                       fallback={<ActionIcon action={action} />}
@@ -1218,6 +1341,7 @@ export default function App() {
                     )}
                     {isContainer(slot.uuid) ? (
                       <Sequence
+                        device={currentDevice}
                         mixer={snapshot.mixer?.config}
                         scope={slot.context}
                         runtime={slot}
@@ -1232,6 +1356,7 @@ export default function App() {
                       />
                     ) : (
                       <SettingsFields
+                        device={currentDevice}
                         mixer={snapshot.mixer?.config}
                         editorKey={slot.context}
                         key={slot.context}
@@ -1508,6 +1633,16 @@ export default function App() {
           )}
         </Modal>
       )}
+      {copyProfile && (
+        <ProfileCopyDialog
+          draft={copyProfile}
+          busy={copyingProfile}
+          error={error}
+          onChange={setCopyProfile}
+          onSubmit={() => void submitProfileCopy()}
+          onClose={() => setCopyProfile(null)}
+        />
+      )}
       {libraryEdit && (
         <Modal
           title={`${libraryEdit.operation[0].toUpperCase() + libraryEdit.operation.slice(1)} ${libraryEdit.kind}`}
@@ -1517,11 +1652,14 @@ export default function App() {
             onSubmit={async (e) => {
               e.preventDefault();
               if (
-                await run({
-                  command: `${libraryEdit.kind}_${libraryEdit.operation}`,
-                  id: libraryEdit.id,
-                  name: libraryEdit.name.trim(),
-                })
+                await run(
+                  {
+                    command: `${libraryEdit.kind}_${libraryEdit.operation}`,
+                    id: libraryEdit.id,
+                    name: libraryEdit.name.trim(),
+                  },
+                  libraryEdit.device ?? currentDevice,
+                )
               )
                 setLibraryEdit(null);
             }}

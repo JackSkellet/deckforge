@@ -2310,3 +2310,56 @@ dialog.mixer-dialog {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+.device-status {
+  display: flex;
+  min-width: 0;
+}
+.device-status > .dot {
+  flex-shrink: 0;
+}
+.device-picker {
+  display: block;
+  min-width: 0;
+  max-width: 350px;
+  flex: 1;
+}
+.device-picker select {
+  font-size: 12px;
+  padding: 7px 9px;
+  max-width: 100%;
+  color: #bfd9d4;
+  background: #203039;
+  border-color: #405861;
+}
+.clipboard-source {
+  display: block;
+  font-size: 9px;
+  color: #89a9b6;
+  margin-top: 4px;
+  overflow-wrap: anywhere;
+}
+@media (max-width: 1050px) {
+  .device-picker select {
+    font-size: 11px;
+    padding: 6px 7px;
+  }
+  .device-picker {
+    max-width: 290px;
+  }
+}
+@media (max-width: 800px) {
+  .device-status {
+    display: flex;
+  }
+  .device-picker select {
+    font-size: 10px;
+    padding: 5px;
+  }
+}
+.profile-copy-fields {
+  border: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}

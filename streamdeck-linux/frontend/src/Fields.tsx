@@ -349,8 +349,10 @@ export function SettingsFields({
   onError,
   editorKey = uuid,
   mixer,
+  device,
 }: {
   editorKey?: string;
+  device?: string;
   mixer?: MixerConfig;
   uuid: string;
   controller: Controller;
@@ -617,7 +619,7 @@ export function SettingsFields({
         <button
           type="button"
           onClick={() =>
-            command({ command: "soundboard_refresh" }).catch(onError)
+            command({ command: "soundboard_refresh" }, device).catch(onError)
           }
         >
           Refresh outputs

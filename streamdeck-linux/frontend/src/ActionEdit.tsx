@@ -154,6 +154,11 @@ export function ActionEdit({
           {clipboard
             ? `${clipboard.mode === "cut" ? "Cut" : "Copied"}: ${clipboard.name} · ${clipboard.controller === "Keypad" ? "Key" : clipboard.controller === "Neo" ? "Infobar" : "Dial"}`
             : "Action clipboard is empty"}
+          {clipboard?.device && (
+            <span className="clipboard-source">
+              Source device: {clipboard.device}
+            </span>
+          )}
         </p>
       </div>
     </details>

@@ -163,3 +163,38 @@ Neo sensor button availability follows the host’s `page_navigation.previous` a
 `page_navigation.next` flags, including folder contexts. Older snapshots without
 those flags keep the previous enabled-button behavior. The synthetic fixture
 models first/last-page boundaries without wrapping.
+
+## Multiple devices
+
+The header picker uses `snapshot.devices`, including associated offline devices,
+and falls back to the selected device for older snapshots. Switching sends only
+`device_select`; it does not restart plugins or stop another device's runtime.
+Picker order stays stable even when the host lists the selected device first.
+
+Action contexts are globally unique, so editor drafts remain in the existing
+flat context map. Control selection is remembered per device in `selections`,
+while the current `selected` and `drafts` aliases remain available to native
+window-state consumers. Returning to a device restores its selection and drafts.
+
+Every device mutation is bound to the device captured by its UI event. This
+includes operations that await a file picker, multi-step saves, profile dialogs,
+context settings, nested soundboard refresh and appearance previews. An explicit
+conflicting device tag is rejected. Device selection and shared plugin/mixer
+commands stay global. Tests exercise delayed saves and external device changes
+with isolated synthetic snapshots; no physical-device writes are involved.
+
+Settings drafts with a valid captured baseline use the host's atomic
+`settings_patch` command. The host applies only edited fields to the latest
+plugin settings, so changing an increment does not roll back a counter updated
+in the background. Nested object changes and deletions are explicit; edited
+arrays/scalars replace their values. An explicit count edit remains effective.
+Legacy retained drafts without a parseable baseline keep replacement semantics.
+
+**Profiles → Profile options → Copy to device…** opens a target/name dialog.
+Eligible destinations come only from the backend's `profile_compatible` flag;
+offline associated devices remain usable targets. The source device, profile and
+eligibility list are captured when the dialog opens, so a later editor selection
+change cannot retarget the request. Copying activates the new profile on the
+destination without switching this editor or changing the original profile.
+When no other compatible device exists, the dialog explains that and disables
+Copy. Devices sharing a model name show their full IDs in both selectors.

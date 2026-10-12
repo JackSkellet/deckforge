@@ -78,19 +78,38 @@ pub fn connect(serial: Option<&str>) -> Result<Connection> {
     connect_model(serial, None)
 }
 
+#[cfg(test)]
 pub fn connect_model(serial: Option<&str>, model: Option<Model>) -> Result<Connection> {
     let deck = Deck::connect_with_model(serial, model)?;
     let firmware = deck.firmware_version()?;
     Ok(Connection { deck, firmware })
 }
 
-pub fn spawn_model(
+/// Event delivery seam for tagged registries; plain senders retain existing behavior.
+pub trait EventSink: Send {
+    fn is_closed(&self) -> bool;
+    fn send(&self, event: Event) -> bool;
+}
+impl EventSink for UnboundedSender<Event> {
+    fn is_closed(&self) -> bool {
+        UnboundedSender::is_closed(self)
+    }
+    fn send(&self, event: Event) -> bool {
+        UnboundedSender::send(self, event).is_ok()
+    }
+}
+pub fn spawn_with_connector<E, F>(
     initial: Option<Connection>,
     serial: Option<String>,
     expected_model: Option<Model>,
     draw_rx: Receiver<Draw>,
-    events: UnboundedSender<Event>,
-) -> JoinHandle<()> {
+    events: E,
+    mut open: F,
+) -> JoinHandle<()>
+where
+    E: EventSink + 'static,
+    F: FnMut(Option<&str>) -> Result<Connection> + Send + 'static,
+{
     thread::spawn(move || {
         worker_model(
             initial.map(|c| (c.deck, c.firmware)),
@@ -98,8 +117,8 @@ pub fn spawn_model(
             expected_model,
             draw_rx,
             events,
-            |serial| connect_model(serial, expected_model).map(|c| (c.deck, c.firmware)),
-        );
+            move |serial| open(serial).map(|c| (c.deck, c.firmware)),
+        )
     })
 }
 
@@ -774,7 +793,7 @@ fn worker_model<T: Transport>(
     serial: Option<String>,
     expected_model: Option<Model>,
     draw_rx: Receiver<Draw>,
-    events: UnboundedSender<Event>,
+    events: impl EventSink,
     mut open: impl FnMut(Option<&str>) -> Result<(T, String)>,
 ) {
     let start = Instant::now();
@@ -808,7 +827,7 @@ fn worker_model<T: Transport>(
             session.next_retry = start.elapsed() + RETRY;
         }
         for event in outgoing {
-            if events.send(event).is_err() {
+            if !events.send(event) {
                 return;
             }
         }

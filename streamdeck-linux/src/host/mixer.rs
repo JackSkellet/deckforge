@@ -53,7 +53,7 @@ impl Host {
             self.persist()?;
             return Err(error);
         }
-        self.render()
+        self.render_all_devices()
     }
 
     pub(super) fn poll_mixer(&mut self) {
@@ -66,7 +66,7 @@ impl Host {
                     self.log(format!("Audio mixer: {error}"));
                 }
                 self.mixer_state = state;
-                if let Err(error) = self.render() {
+                if let Err(error) = self.render_all_devices() {
                     self.log(format!("Mixer display update: {error:#}"));
                 }
             }

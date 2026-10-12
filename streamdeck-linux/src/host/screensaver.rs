@@ -360,6 +360,13 @@ impl Host {
         }
     }
     pub(super) fn session_update(&mut self, state: session_activity::State) -> Result<()> {
+        if self.model != Model::Plus {
+            if let Some(locked) = state.locked {
+                self.saver.locked = locked;
+            }
+            self.session_state = Some(state);
+            return Ok(());
+        }
         if let Some(locked) = state.locked {
             let changed = self.saver.locked != locked;
             self.saver.locked = locked;
@@ -386,8 +393,13 @@ impl Host {
             .map(|monitor| monitor.drain())
             .unwrap_or_default();
         for state in reports {
-            if let Err(error) = self.session_update(state) {
-                self.saver.error = Some(format!("Session: {error:#}"));
+            for device in self.device_ids() {
+                let _ = self.with_device(&device, |host| {
+                    if let Err(error) = host.session_update(state.clone()) {
+                        host.saver.error = Some(format!("Session: {error:#}"));
+                    }
+                    Ok(())
+                });
             }
         }
     }

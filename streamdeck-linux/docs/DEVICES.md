@@ -22,8 +22,9 @@ not establish that another model works on hardware.
 The module products in the table use the matching documented family. The
 original 2017 Stream Deck uses its own firmware-aware BMP transport, documented
 in [Original HID](LEGACY_HID.md). Studio, Mobile, virtual decks and
-Network Dock remain separate work. One host currently owns one selected device;
-concurrent device management is unfinished.
+Network Dock remain separate work. The [multi-device manager](MULTI_DEVICE.md) maintains independent device runtimes
+and shared plugin processes. Two simultaneous physical devices have not yet been
+validated.
 
 ## Selection
 
