@@ -365,3 +365,10 @@ are checked; independently drawn marker changes stay inside [160,8,26,26].
 The common child store also migrates earlier Multi Action sessions without
 changing their contexts or SDK meaning. Native rendering is captured from an
 isolated session; no physical stack gesture is claimed by simulation tests.
+
+This stack checkpoint passes 143 non-injection tests plus the gated-keyboard
+no-op path and strict Clippy. Ten integration suites passed; Stack, Layouts,
+samples and Multi Actions were rerun after the selected-child icon fix. Native
+capture and hashes are in `../../evidence/dial-stacks/`. The prior user session
+is backed up; its existing settings match the running session, which also has
+a new Media control. Physical stack acceptance remains pending.
