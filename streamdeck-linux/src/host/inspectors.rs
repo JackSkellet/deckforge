@@ -99,6 +99,7 @@ impl Host {
             .context("Missing state directory")?;
         let child = spawn_webview(
             &html,
+            &plugin.root,
             self.port,
             &registration,
             "registerPropertyInspector",

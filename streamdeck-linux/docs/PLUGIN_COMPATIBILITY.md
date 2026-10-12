@@ -25,9 +25,9 @@ keys or decrypted manifest files are embedded in or written by Deckforge.
 
 The unchanged package's authenticated manifest SHA-256 is
 `038c015493d11a665e7c561b993afc6f6933ad9db0ec926e1d0c6e50c33bae25`.
-It declares 17 actions and 179 file-integrity records. The latter hash algorithm
-remains unresolved, so the installer still refuses the protected package without
-creating partial files. Manifest authentication alone is not package validation.
+It declares 17 actions and 179 file-integrity records. Required-file integrity uses the recovered BLAKE3 contract and is checked on
+installation and loading. See [protected packages](PROTECTED_PACKAGES.md) for
+static reference import and the distinction between verification and execution.
 
 At the user's request, Discord execution uses a new [native Rust plugin](../plugins/discord/README.md).
 It preserves the original action/settings identities and supplies its own settings
@@ -38,9 +38,39 @@ Physical action acceptance remains open. An empty Discord application redirect
 list caused the reported RPC 5000 error; registering a redirect and saving the
 same value in the plugin resolved that authorization failure.
 
+## Home Assistant 3.8.4.66
+
+The unchanged `de.perdoctus.streamdeck.homeassistant` HTML backend and property
+inspector register in the native Linux helper. Its entry pages use JavaScript
+modules. Loading them as `file://` documents prevented the modules from defining
+`connectElgatoStreamDeckSocket`, so the helper exited with status 1.
+
+HTML helpers now serve the authorized plugin folder through a dedicated
+`deckforge-plugin` origin. Local module imports, dynamic imports and JSON fetches
+work with MIME-typed responses. WebKit enables CORS requests for this custom
+scheme before loading the document. This does not disable browser security or
+grant cross-origin network access. Asset reads remain inside the plugin root;
+external symlinks, traversal, special files and files over 32 MiB are rejected.
+
+The helper also waits up to ten seconds for the connection callback, because a
+module graph or framework mount can complete after the main-document load
+notification. Registration runs once and only on the original entry document.
+Plugin files and their integrity records remain unchanged.
+
+`tests/html_module_interop.py` reproduces the old failure and checks module
+imports, fetch, delayed callback readiness, bounded missing-callback failure,
+and optionally the original Home Assistant backend and inspector. A full
+isolated host check also loaded the protected manifest, assigned an action and
+connected both runtimes with empty settings. No Home Assistant server,
+credentials or physical entity controls were used. Live server authorization
+and action behavior remain unverified.
+
+The existing native HTML contract, popup, official Counter inspector and
+unchanged shipped tutorial checks also pass with scoped asset loading.
+
 ## Remaining runtime work
 
-- Protected Marketplace packages and their validation contract.
+- More protected-package/reference versions beyond the verified 7.6 contract.
 - Windows/macOS executable plugins and OS-specific native dependencies.
 - Broader runtime/version selection and updates. Portable generic scripts and unambiguous Windows/macOS script entries now work, including `.cjs`; Node paths are searched deterministically.
-- Enable/disable, replacement/rollback and uninstall with retained profile data.
+- Replacement/rollback and uninstall with retained profile data. Persistent Enable/Disable is implemented.

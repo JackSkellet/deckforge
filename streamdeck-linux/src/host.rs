@@ -2294,6 +2294,7 @@ fn registration_info(plugin: &Plugin, devices: &[Value], language: &str) -> Valu
 #[allow(clippy::too_many_arguments)]
 fn spawn_webview(
     path: &Path,
+    root: &Path,
     port: u16,
     uuid: &str,
     event: &str,
@@ -2310,6 +2311,8 @@ fn spawn_webview(
         .arg("webview")
         .arg("--path")
         .arg(path)
+        .arg("--root")
+        .arg(root)
         .arg("--port")
         .arg(port.to_string())
         .arg("--uuid")
@@ -2345,6 +2348,7 @@ fn launch_plugin_process(
             plugin.runtime.runtime_path = Some(std::env::current_exe()?);
             plugin.child = Some(spawn_webview(
                 &entry.path,
+                &plugin.root,
                 port,
                 &plugin.registration,
                 "registerPlugin",

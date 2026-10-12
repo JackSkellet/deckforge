@@ -5,7 +5,8 @@
 //! The caller authorizes the plugin path and owns this process's lifetime.
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::Value;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+use std::time::{Duration, Instant};
 use tao::{
     dpi::LogicalSize,
     event::{Event, WindowEvent},
@@ -19,6 +20,7 @@ use wry::{PageLoadEvent, WebViewBuilder};
 pub struct WebviewOptions {
     /// The host must first check that this is under the authorized plugin root.
     pub path: PathBuf,
+    pub root: Option<PathBuf>,
     pub port: u16,
     pub uuid: String,
     pub register_event: String,
@@ -36,8 +38,24 @@ enum BrowserEvent {
 /// Run on this helper process's main thread. Closing a visible inspector returns
 /// normally; the parent terminates a hidden plugin helper when stopping its host.
 pub fn run(options: WebviewOptions) -> Result<()> {
-    let url = local_html_url(&options.path)?;
+    let path = options
+        .path
+        .canonicalize()
+        .context("Resolve plugin HTML path")?;
+    let root = options
+        .root
+        .as_deref()
+        .or_else(|| path.parent())
+        .context("Plugin HTML directory missing")?;
+    let assets = crate::webview_assets::Assets::new(root, &path)?;
+    let url = assets.url().clone();
     let script = registration_script(&options)?;
+    // Check again inside the document on every readiness probe. A navigation
+    // between a load notification and evaluation must not receive SDK identity.
+    let script = format!(
+        "(() => {{ const page = new URL(location.href); page.hash = ''; if (page.href !== {}) return {{ok:false,error:'Plugin navigated before registration'}}; return {script}; }})()",
+        serde_json::to_string(url.as_str())?
+    );
     let mut event_loop = EventLoopBuilder::<BrowserEvent>::with_user_event().build();
     let window = WindowBuilder::new()
         .with_title(if options.visible {
@@ -56,7 +74,9 @@ pub fn run(options: WebviewOptions) -> Result<()> {
     let load_proxy = event_loop.create_proxy();
     let expected_url = url.clone();
     let builder = WebViewBuilder::new()
-        .with_url(url.as_str())
+        .with_custom_protocol(crate::webview_assets::SCHEME.into(), move |_, request| {
+            assets.respond(request)
+        })
         .with_background_color((19, 23, 29, 255))
         .with_focused(options.visible)
         // Wry creates related native browser windows, preserving window.opener.
@@ -86,20 +106,33 @@ pub fn run(options: WebviewOptions) -> Result<()> {
     let webview = builder.build(&window).context("Create plugin browser")?;
 
     #[cfg(target_os = "linux")]
-    if options.register_event == "registerPlugin" {
-        use webkit2gtk::{SettingsExt, WebViewExt};
+    {
+        use webkit2gtk::{SecurityManagerExt, SettingsExt, WebContextExt, WebViewExt};
         use wry::WebViewExtUnix;
         // A physical deck press arrives over WebSocket, not as a DOM gesture.
         // The authorized HTML backend must still be able to open its own native
-        // action windows (the bundled tutorial does this). File-origin rules
-        // and the user's ordinary browser preferences remain intact.
+        // action windows (the bundled tutorial does this).
         if let Some(settings) = webview.webview().settings() {
-            settings.set_javascript_can_open_windows_automatically(true);
+            settings.set_javascript_can_open_windows_automatically(
+                options.register_event == "registerPlugin",
+            );
         }
+        // Wry marks custom schemes secure but does not enable their CORS fetch
+        // path. Register only this scoped asset scheme before the first load;
+        // normal cross-origin network and file-access restrictions stay intact.
+        webview
+            .webview()
+            .context()
+            .and_then(|context| context.security_manager())
+            .context("Plugin browser security manager unavailable")?
+            .register_uri_scheme_as_cors_enabled(crate::webview_assets::SCHEME);
     }
+    webview.load_url(url.as_str()).context("Load plugin HTML")?;
 
     let result_proxy = event_loop.create_proxy();
     let mut invoked = false;
+    let mut registration_deadline = None;
+    let mut retry_at = None;
     let mut failure = None;
     let exit_code = event_loop.run_return(|event, _, flow| {
         *flow = ControlFlow::Wait;
@@ -107,6 +140,7 @@ pub fn run(options: WebviewOptions) -> Result<()> {
             Event::UserEvent(BrowserEvent::PageReady) if !invoked => {
                 // A document can emit multiple load notifications. Register once.
                 invoked = true;
+                registration_deadline = Some(Instant::now() + Duration::from_secs(10));
                 let proxy = result_proxy.clone();
                 if let Err(error) = webview.evaluate_script_with_callback(&script, move |result| {
                     let _ = proxy.send_event(BrowserEvent::RegistrationResult(result));
@@ -116,8 +150,27 @@ pub fn run(options: WebviewOptions) -> Result<()> {
                 }
             }
             Event::UserEvent(BrowserEvent::RegistrationResult(result)) => {
-                if let Err(error) = registration_result(&result) {
+                let pending = serde_json::from_str::<Value>(&result)
+                    .is_ok_and(|value| value["pending"] == true);
+                if pending
+                    && registration_deadline.is_some_and(|deadline| Instant::now() < deadline)
+                {
+                    // WebKit may finish the main document before a custom-URI
+                    // module graph or a framework's mount callback has settled.
+                    // Probe availability; invoke the real callback only once.
+                    retry_at = Some(Instant::now() + Duration::from_millis(25));
+                } else if let Err(error) = registration_result(&result) {
                     failure = Some(error.to_string());
+                    *flow = ControlFlow::Exit;
+                }
+            }
+            Event::MainEventsCleared if retry_at.is_some_and(|at| Instant::now() >= at) => {
+                retry_at = None;
+                let proxy = result_proxy.clone();
+                if let Err(error) = webview.evaluate_script_with_callback(&script, move |result| {
+                    let _ = proxy.send_event(BrowserEvent::RegistrationResult(result));
+                }) {
+                    failure = Some(format!("Invoke plugin registration callback: {error}"));
                     *flow = ControlFlow::Exit;
                 }
             }
@@ -127,6 +180,11 @@ pub fn run(options: WebviewOptions) -> Result<()> {
                 ..
             } if window_id == window.id() => *flow = ControlFlow::Exit,
             _ => {}
+        }
+        if !matches!(*flow, ControlFlow::ExitWithCode(_))
+            && let Some(at) = retry_at
+        {
+            *flow = ControlFlow::WaitUntil(at);
         }
     });
     drop(webview);
@@ -140,13 +198,6 @@ pub fn run(options: WebviewOptions) -> Result<()> {
         "Plugin browser event loop exited with code {exit_code}"
     );
     Ok(())
-}
-
-fn local_html_url(path: &Path) -> Result<Url> {
-    let path = path.canonicalize().context("Resolve plugin HTML path")?;
-    ensure!(path.is_file(), "Plugin HTML path is not a file");
-    Url::from_file_path(&path)
-        .map_err(|()| anyhow::anyhow!("Cannot convert plugin HTML path to a file URL"))
 }
 
 fn same_document(expected: &Url, loaded: &str) -> bool {
@@ -199,7 +250,7 @@ fn registration_script(options: &WebviewOptions) -> Result<String> {
         try {{
             const connect = window.connectElgatoStreamDeckSocket;
             if (typeof connect !== "function") {{
-                return {{ok: false, error: "Plugin HTML did not define connectElgatoStreamDeckSocket"}};
+                return {{ok: false, pending: true, error: "Plugin HTML did not define connectElgatoStreamDeckSocket within 10 seconds"}};
             }}
             connect.apply(window, {args});
             return {{ok: true}};
@@ -229,6 +280,7 @@ mod tests {
     fn options() -> WebviewOptions {
         WebviewOptions {
             path: PathBuf::from("unused.html"),
+            root: None,
             port: 12345,
             uuid: "plugin-id".into(),
             register_event: "registerPlugin".into(),
@@ -243,13 +295,13 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let file = root.path().join("plugin settings æ #100%.html");
         std::fs::write(&file, "<!doctype html>").unwrap();
-        let url = local_html_url(&file).unwrap();
-        assert_eq!(url.to_file_path().unwrap(), file.canonicalize().unwrap());
+        let assets = crate::webview_assets::Assets::new(root.path(), &file).unwrap();
+        let url = assets.url();
         assert!(url.as_str().contains("%20"));
         assert!(url.as_str().contains("%23"));
         assert!(url.as_str().contains("%25"));
-        assert!(same_document(&url, &(url.to_string() + "#settings")));
-        assert!(!same_document(&url, "https://example.com/"));
+        assert!(same_document(url, &(url.to_string() + "#settings")));
+        assert!(!same_document(url, "https://example.com/"));
     }
 
     #[test]

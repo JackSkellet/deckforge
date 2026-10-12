@@ -44,6 +44,7 @@ mod tray;
 mod trigger_editor;
 mod volume;
 mod webview;
+mod webview_assets;
 mod window;
 
 use anyhow::Result;
@@ -70,6 +71,8 @@ enum Command {
     Webview {
         #[arg(long)]
         path: PathBuf,
+        #[arg(long)]
+        root: Option<PathBuf>,
         #[arg(long)]
         port: u16,
         #[arg(long)]
@@ -222,6 +225,7 @@ fn main() -> Result<()> {
     match command {
         Command::Webview {
             path,
+            root,
             port,
             uuid,
             register_event,
@@ -231,6 +235,7 @@ fn main() -> Result<()> {
         } => {
             webview::run(webview::WebviewOptions {
                 path,
+                root,
                 port,
                 uuid,
                 register_event,
