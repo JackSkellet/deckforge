@@ -1,3 +1,4 @@
+import { MixerPatchbay } from "./MixerPatchbay";
 import { newId } from "./ids";
 import {
   meterReading,
@@ -710,7 +711,7 @@ export function AudioMixer({
     );
   });
   const [navigation, setNavigation] = useState<{
-    view: "mixer" | "setup";
+    view: "mixer" | "setup" | "advanced";
     mix: string;
   }>(
     () => getFormDraft("audio-mixer-navigation") ?? { view: "mixer", mix: "" },
@@ -1009,6 +1010,15 @@ export function AudioMixer({
           >
             Routing setup
           </button>
+          <button
+            type="button"
+            aria-pressed={navigation.view === "advanced"}
+            onClick={() =>
+              setNavigation((current) => ({ ...current, view: "advanced" }))
+            }
+          >
+            Advanced routing
+          </button>
         </div>
         <span className={"status " + (snapshot.active ? "good" : "")}>
           {snapshot.pending
@@ -1098,6 +1108,25 @@ export function AudioMixer({
                       </option>
                     );
                   })}
+                </select>
+              </Field>
+              <Field label="Listen to mix">
+                <select
+                  disabled={snapshot.revision === undefined}
+                  value={monitoring.mix ?? ""}
+                  onChange={(e) =>
+                    control(
+                      { kind: "monitor" },
+                      { mix: e.target.value || null },
+                    )
+                  }
+                >
+                  <option value="">No mix — listening off</option>
+                  {snapshot.config.mixes.map((mix) => (
+                    <option key={mix.id} value={mix.id}>
+                      {mix.name}
+                    </option>
+                  ))}
                 </select>
               </Field>
               <span className="hint" role="status">
@@ -1498,6 +1527,13 @@ export function AudioMixer({
               </aside>
             )}
           </section>
+        ) : navigation.view === "advanced" ? (
+          <MixerPatchbay
+            config={config}
+            snapshot={snapshot}
+            onChange={change}
+            onSetup={showSetup}
+          />
         ) : (
           <section className="mixer-setup" aria-label="Routing setup">
             <div className="mixer-toolbar">

@@ -220,3 +220,45 @@ The compact matrix, app-first creation and All audio exclusion rule are grounded
 in the user's Wave Link 3.3 screenshots and shipped resources. See
 [Wave Link 3.3 reference investigation](WAVE_LINK_REFERENCE.md) for artifact identity,
 REA evidence and the distinction between recovered declarations and inferred code.
+
+## Advanced routing graph
+
+The Advanced routing tab exposes Deckforge's existing routing configuration as
+applications/audio inputs → channels → mixes → output devices and recording
+inputs. Click ports or drag between compatible ports to connect them. Select a
+cable with a click or Enter/Space to inspect and disconnect it. Escape cancels an
+unfinished connection. Zoom and a scrolling canvas keep larger graphs usable.
+Changes share the normal retained mixer draft and require **Apply routes**.
+
+Application assignments and microphone inputs transfer between channels rather
+than creating duplicate ownership. All other audio can belong to one channel.
+Connecting a mix to the selected listening device changes its listening mix;
+other device connections are fixed mix outputs. Recording inputs are automatic
+and have dashed cables. The main mixer also has an explicit **Listen to mix**
+selector beside **Listen on**; selecting only a device does not select a mix.
+
+The graph reports channels without routes or an audible device path, unavailable
+inputs, and observed playback still attached to a removed channel. Recording-only
+mixes are supported: an absent audible path does not imply their recording input
+is broken. This is a graph of Deckforge routing, not an unrestricted editor for
+other applications' PipeWire/JACK ports. Effects remain deferred.
+
+Carla's external patchbay was inspected as a behavior reference. Its
+[`CarlaEngineJack::patchbayConnect` and `restorePatchbayConnection`](https://github.com/falkTX/Carla/blob/main/source/backend/engine/CarlaEngineJack.cpp)
+resolve named ports, connect through JACK, and check existing connections when
+restoring. Deckforge continues to use its independently written Rust mixer and
+Pulse-compatible PipeWire routing. No Carla implementation was copied.
+
+The reported physical silent-output case is still unconfirmed. A read-only
+inspection found a voice playback stream on a muted, removed Deckforge channel,
+with no retained original-stream move record. That establishes its current
+silent destination, not the cause of the earlier routing failure. A private
+mono-source → channel → mix → listening-output PCM test passed, including
+recording-source identity and output switching. The user will retry the failing
+configuration after the advanced view is installed.
+
+`frontend/src/MixerPatchbay.test.tsx` covers connection/disconnection, source/app
+ownership transfers, drag/cancel, silent-path diagnostics and shared draft/Apply
+behavior. `frontend/tests/native_mixer_patchbay_interop.py` verifies native port
+controls, keyboard cable selection, view switching and saving a disabled graph.
+It does not enable routing, capture audio, or open a USB device.
