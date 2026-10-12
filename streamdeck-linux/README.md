@@ -34,8 +34,26 @@ simple settings with text, numeric and checkbox controls, then Save changes.
 Use **Plugin settings…** to open an action's original HTML property inspector
 when its manifest provides one. Advanced JSON editing remains available. Draft changes survive periodic refresh
 and switching between controls. The native window also has plugin/profile file
-pickers, title editing, removal and input testing. Closing the window currently
-stops this host and its plugin processes; tray/background mode remains unfinished.
+pickers, title editing, removal and input testing. Closing or hiding the editor
+keeps the device and plugins running. Open Deckforge again from the launcher or
+tray to restore the editor, including unsaved drafts. **Quit** in the editor or
+tray stops the host and its plugin processes.
+
+The tray uses Linux StatusNotifierItem. If your desktop has no tray, reopening
+the launcher still restores the editor through a private local socket. This
+works by closing and recreating the actual native window, including on Wayland.
+Compositor focus policy may prevent it from taking keyboard focus automatically.
+
+```sh
+deckforge desktop --background
+deckforge window show
+deckforge window quit
+```
+
+These commands use the default application state; add `--state /path/to/state`
+for a separate session. Opening the same state again activates its existing
+process. Startup flags such as `--plugin` and `--profile` apply only when starting
+a new host. Login autostart is not enabled or configured by this build.
 
 Build and install an updated native executable:
 
@@ -108,7 +126,7 @@ choose one or the desktop default. An unavailable explicit output produces an
 error instead of silently using another device.
 
 **Stop audio** and the native **Stop soundboard** button stop only Deckforge's
-soundboard voices. Page changes preserve ongoing playback; closing the app stops
+soundboard voices. Page changes and closing the editor preserve ongoing playback; quitting Deckforge stops
 it. The Rust mixer streams mono/stereo audio at 48 kHz, using generic Rodio/Symphonia
 codec libraries and a nonblocking native PulseAudio connection. It does not invoke
 an external player. Mixing is limited to 32 voices, eight per action.
@@ -444,3 +462,15 @@ The HTML suite now proves generated popup child-document execution and preserved
 window.opener communication; exact tutorial page visuals are still not established.
 Native SIGTERM/SIGINT shutdown and session reuse are tested in actual windows.
 Evidence for this update is retained in `../evidence/html-layout/`.
+
+### Native background lifecycle checks
+
+`python tests/window_interop.py --binary target/release/deckforge` uses isolated
+simulation state and a generated plugin to verify background operation, window
+recreation, same-process relaunch, plugin continuity, explicit quit and signal
+cleanup. `python tests/tray_interop.py --binary target/release/deckforge` checks
+an available session-bus watcher and invokes only the test-owned tray item's
+Activate/Open/Quit methods. Neither test injects desktop input or opens USB.
+The tray test needs a running StatusNotifier watcher and `busctl`. The window
+test needs the separately obtained official Counter sample dependencies.
+Native title-bar input and compositor focus still need direct desktop acceptance.

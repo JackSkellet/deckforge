@@ -56,6 +56,9 @@ pub struct Controller {
     shared: Shared,
 }
 impl Controller {
+    pub fn is_running(&self) -> bool {
+        self.shared.lock().unwrap().running
+    }
     pub fn on_redraw(&self, callback: impl Fn() + Send + Sync + 'static) {
         self.shared.lock().unwrap().redraw = Some(Box::new(callback));
     }
@@ -2089,6 +2092,9 @@ fn stop_plugins(host: &mut Host) {
         worker.cancel();
     }
     host.running = false;
+    if let Some(redraw) = &host.redraw {
+        redraw();
+    }
     if !host.badges.is_empty() {
         host.badges.clear();
         if let Err(error) = host.render() {

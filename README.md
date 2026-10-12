@@ -12,7 +12,7 @@ Work in progress. **This is not feature complete yet.** Existing Elgato profiles
 
 Current working areas include:
 
-- An always-dark native Rust editor, offline editing, USB recovery, and Stream Deck+ controls.
+- An always-dark native Rust editor, tray/background operation, offline editing, USB recovery, and Stream Deck+ controls.
 - Profiles, pages, folders, pinned actions, and original-format profile import/export.
 - Node and HTML plugins, native property inspectors, portable plugin resources, and feedback layouts.
 - Multi Actions, Dial Stacks, Action Triggers, Linux desktop actions, and a native soundboard.

@@ -17,59 +17,106 @@ use std::{
 const POLL: Duration = Duration::from_millis(200);
 const ACCENT: Color32 = Color32::from_rgb(108, 218, 187);
 
-pub fn run(controller: Controller) -> Result<()> {
+pub fn run(controller: Controller, state: &std::path::Path, background: bool) -> Result<()> {
+    let window = crate::window::Window::new(!background);
+    let endpoint_window = window.clone();
+    // The host already owns session.lock. Keep IPC alive until the GUI exits,
+    // so relaunch can reopen the editor even on desktops without a tray.
+    let _instance = crate::instance::spawn(
+        state,
+        Arc::new(move |command| Ok(endpoint_window.request(command))),
+    )?;
+    let tray_window = window.clone();
+    let _tray = match crate::tray::spawn(Arc::new(move |event| tray_window.tray(event))) {
+        Ok(tray) => Some(tray),
+        Err(error) => {
+            window.tray(crate::tray::Event::Error(error.to_string()));
+            None
+        }
+    };
     let capture_path = std::env::var_os("DECKFORGE_CAPTURE").map(PathBuf::from);
     let capture_result = Arc::new(Mutex::new(None));
     let outcome = capture_result.clone();
     let capture_requested = capture_path.is_some();
-    let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title("Deckforge · Stream Deck+")
-            .with_app_id("deckforge")
-            .with_inner_size([1180.0, 850.0])
-            .with_min_inner_size([760.0, 620.0]),
-        ..Default::default()
-    };
-    eframe::run_native(
-        "Deckforge",
-        options,
-        Box::new(move |cc| {
-            eprintln!("Native editor ready");
-            cc.egui_ctx.set_visuals(egui::Visuals::dark());
-            cc.egui_ctx.style_mut_of(egui::Theme::Dark, |s| {
-                s.spacing.item_spacing = Vec2::new(10.0, 10.0);
-                s.spacing.button_padding = Vec2::new(12.0, 8.0);
-                s.visuals.panel_fill = Color32::from_rgb(19, 23, 29);
-                s.visuals.selection.bg_fill = Color32::from_rgb(35, 79, 68);
-                s.visuals.selection.stroke = egui::Stroke::new(2.0, ACCENT);
-                s.text_styles
-                    .insert(egui::TextStyle::Body, egui::FontId::proportional(16.0));
-                s.text_styles
-                    .insert(egui::TextStyle::Button, egui::FontId::proportional(14.0));
-                s.text_styles
-                    .insert(egui::TextStyle::Small, egui::FontId::proportional(12.0));
-                s.text_styles
-                    .insert(egui::TextStyle::Heading, egui::FontId::proportional(22.0));
-            });
-            let mut app = Desktop::new(controller, cc.egui_ctx.clone());
-            if capture_path.is_some()
-                && std::env::var("DECKFORGE_CAPTURE_CONTROL").as_deref() == Ok("dial0")
-            {
-                app.selected = Selection {
-                    dial: true,
-                    index: 0,
+    ensure!(
+        !background || !capture_requested,
+        "A screenshot requires a visible editor"
+    );
+    let saved: Arc<Mutex<Option<Desktop>>> = Arc::new(Mutex::new(None));
+    eprintln!("Native background host ready");
+    loop {
+        if !controller.is_running() || window.quitting() {
+            break;
+        }
+        if !window.wait() {
+            continue;
+        }
+        let options = eframe::NativeOptions {
+            viewport: egui::ViewportBuilder::default()
+                .with_title("Deckforge · Stream Deck+")
+                .with_app_id("deckforge")
+                .with_inner_size([1180.0, 850.0])
+                .with_min_inner_size([760.0, 620.0]),
+            ..Default::default()
+        };
+        let saved_app = saved.clone();
+        let current_window = window.clone();
+        let controller = controller.clone();
+        let capture_path = capture_path.clone();
+        let capture_result = capture_result.clone();
+        // eframe reuses its event loop across run_native calls. Closing a real
+        // window works on Wayland too; winit's set_visible(false) does not.
+        eframe::run_native(
+            "Deckforge",
+            options,
+            Box::new(move |cc| {
+                cc.egui_ctx.set_visuals(egui::Visuals::dark());
+                cc.egui_ctx.style_mut_of(egui::Theme::Dark, |s| {
+                    s.spacing.item_spacing = Vec2::new(10.0, 10.0);
+                    s.spacing.button_padding = Vec2::new(12.0, 8.0);
+                    s.visuals.panel_fill = Color32::from_rgb(19, 23, 29);
+                    s.visuals.selection.bg_fill = Color32::from_rgb(35, 79, 68);
+                    s.visuals.selection.stroke = egui::Stroke::new(2.0, ACCENT);
+                    s.text_styles
+                        .insert(egui::TextStyle::Body, egui::FontId::proportional(16.0));
+                    s.text_styles
+                        .insert(egui::TextStyle::Button, egui::FontId::proportional(14.0));
+                    s.text_styles
+                        .insert(egui::TextStyle::Small, egui::FontId::proportional(12.0));
+                    s.text_styles
+                        .insert(egui::TextStyle::Heading, egui::FontId::proportional(22.0));
+                });
+                let mut app = match saved_app.lock().unwrap().take() {
+                    Some(mut app) => {
+                        app.attach(cc.egui_ctx.clone());
+                        app
+                    }
+                    None => Desktop::new(controller, cc.egui_ctx.clone(), current_window),
                 };
-            }
-            app.capture = capture_path.map(|path| Capture {
-                path,
-                started: Instant::now(),
-                requested: false,
-                result: capture_result,
-            });
-            Ok(Box::new(app))
-        }),
-    )
-    .map_err(|e| anyhow::anyhow!("Native window failed: {e}"))?;
+                if capture_path.is_some()
+                    && std::env::var("DECKFORGE_CAPTURE_CONTROL").as_deref() == Ok("dial0")
+                {
+                    app.selected = Selection {
+                        dial: true,
+                        index: 0,
+                    };
+                }
+                app.capture = capture_path.map(|path| Capture {
+                    path,
+                    started: Instant::now(),
+                    requested: false,
+                    result: capture_result,
+                });
+                eprintln!("Native editor ready");
+                Ok(Box::new(EditorWindow {
+                    app: Some(app),
+                    saved: saved_app,
+                }))
+            }),
+        )
+        .map_err(|error| anyhow::anyhow!("Native window failed: {error}"))?;
+        window.detach();
+    }
     if capture_requested {
         let result = outcome
             .lock()
@@ -354,6 +401,8 @@ fn nested_container_target(parent: &Value, context: &str) -> Option<NestedContai
 }
 
 struct Desktop {
+    closing: bool,
+    window: crate::window::Window,
     redraw_pending: Arc<AtomicBool>,
     stack_editor: crate::stack_editor::Editor,
     multi_editor: crate::multi_editor::Editor,
@@ -377,14 +426,18 @@ struct Desktop {
     capture: Option<Capture>,
 }
 impl Desktop {
-    fn new(controller: Controller, context: egui::Context) -> Self {
+    fn new(controller: Controller, context: egui::Context, window: crate::window::Window) -> Self {
+        window.attach(context);
         let redraw_pending = Arc::new(AtomicBool::new(true));
         let pending = redraw_pending.clone();
+        let redraw_window = window.clone();
         controller.on_redraw(move || {
             pending.store(true, Ordering::Release);
-            context.request_repaint();
+            redraw_window.repaint();
         });
         Self {
+            closing: false,
+            window,
             redraw_pending,
             multi_editor: crate::multi_editor::Editor::default(),
             trigger_editor: crate::trigger_editor::Editor::default(),
@@ -410,6 +463,13 @@ impl Desktop {
             pending_delete: None,
             capture: None,
         }
+    }
+    fn attach(&mut self, context: egui::Context) {
+        self.previews.clear();
+        self.last_poll = None;
+        self.closing = false;
+        self.redraw_pending.store(true, Ordering::Release);
+        self.window.attach(context);
     }
     fn capture_if_requested(&mut self, ctx: &egui::Context) {
         let Some(capture) = &mut self.capture else {
@@ -440,11 +500,11 @@ impl Desktop {
             *capture.result.lock().unwrap() = Some(result);
             self.capture = None;
             // Normal event-loop exit lets the parent stop the host and its plugins.
-            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            self.window.request(crate::instance::Command::Quit);
         } else if capture.started.elapsed() > Duration::from_secs(10) {
             *capture.result.lock().unwrap() = Some(Err("Native screenshot timed out".into()));
             self.capture = None;
-            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            self.window.request(crate::instance::Command::Quit);
         } else if !capture.requested && capture.started.elapsed() >= Duration::from_millis(500) {
             capture.requested = true;
             ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
@@ -545,6 +605,20 @@ impl Desktop {
     fn toolbar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.heading("Deckforge");
+            if ui
+                .button("Hide")
+                .on_hover_text("Keep the deck running. Reopen from the launcher or tray.")
+                .clicked()
+            {
+                self.window.request(crate::instance::Command::Hide);
+            }
+            if ui
+                .button("Quit")
+                .on_hover_text("Stop Deckforge and its plugins.")
+                .clicked()
+            {
+                self.window.request(crate::instance::Command::Quit);
+            }
             ui.label(RichText::new("STREAM DECK +").small().color(Color32::GRAY));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.colored_label(
@@ -1387,12 +1461,52 @@ impl Desktop {
     }
 }
 
+// Retain application drafts across actual native window destruction. Textures
+// belong to the old renderer and must be released before eframe destroys it.
+struct EditorWindow {
+    app: Option<Desktop>,
+    saved: Arc<Mutex<Option<Desktop>>>,
+}
+impl Drop for EditorWindow {
+    fn drop(&mut self) {
+        if let Some(mut app) = self.app.take() {
+            app.previews.clear();
+            app.window.detach();
+            *self.saved.lock().unwrap() = Some(app);
+        }
+    }
+}
+impl eframe::App for EditorWindow {
+    fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        self.app.as_mut().unwrap().logic(ctx, frame);
+    }
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        self.app.as_mut().unwrap().ui(ui, frame);
+    }
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.app.as_mut().unwrap().previews.clear();
+    }
+}
 impl eframe::App for Desktop {
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if !self.controller.is_running() {
+            self.window.request(crate::instance::Command::Quit);
+        }
+        if ctx.input(|input| input.viewport().close_requested()) && !self.closing {
+            self.window.request(crate::instance::Command::Hide);
+        }
+        self.closing |= self.window.apply(ctx);
+        if self.closing && self.capture.is_some() {
+            // A user/tray hide during capture must return an explicit failure,
+            // not leave the capture process waiting in background forever.
+            self.window.request(crate::instance::Command::Quit);
+        }
+    }
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.capture_if_requested(ui.ctx());
         self.refresh(ui.ctx());
         if self.snapshot["running"] == false {
-            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+            self.window.request(crate::instance::Command::Quit);
             return;
         }
         ui.ctx().request_repaint_after(POLL);
@@ -1447,6 +1561,59 @@ impl eframe::App for Desktop {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn editor_window_recreation_preserves_unsaved_drafts_and_selection() {
+        let state = tempfile::tempdir().unwrap();
+        let running = crate::host::start(crate::host::HostOptions {
+            serial: None,
+            plugins: vec![],
+            profile: None,
+            state_dir: state.path().to_owned(),
+            port: 0,
+            simulate: true,
+            seconds: None,
+        })
+        .unwrap();
+        let window = crate::window::Window::new(true);
+        let mut app = Desktop::new(
+            running.controller.clone(),
+            egui::Context::default(),
+            window.clone(),
+        );
+        app.selected = Selection {
+            dial: true,
+            index: 2,
+        };
+        let mut draft = Draft::from_slot(None);
+        draft.title = "Unsaved title".into();
+        draft.raw = "{unfinished".into();
+        draft.raw_dirty = true;
+        draft.dirty = true;
+        app.drafts.insert(app.selected, draft);
+        app.plugin_path = "/pending/plugin".into();
+        let saved = Arc::new(Mutex::new(None));
+        drop(EditorWindow {
+            app: Some(app),
+            saved: saved.clone(),
+        });
+        assert_eq!(
+            window.request(crate::instance::Command::Status)["window_open"],
+            false
+        );
+        assert!(running.controller.is_running());
+        let mut app = saved.lock().unwrap().take().unwrap();
+        app.attach(egui::Context::default());
+        let draft = app.drafts.get(&app.selected).unwrap();
+        assert_eq!(draft.title, "Unsaved title");
+        assert_eq!(draft.raw, "{unfinished");
+        assert!(draft.dirty && draft.raw_dirty);
+        assert_eq!(app.plugin_path, "/pending/plugin");
+        assert_eq!(
+            window.request(crate::instance::Command::Status)["editor_generation"],
+            2
+        );
+    }
+
     #[test]
     fn nested_multi_navigation_resolves_runtime_snapshots_without_following_raw_data() {
         let parent = json!({"context":"trigger","uuid":"com.elgato.streamdeck.keys.adaptor",

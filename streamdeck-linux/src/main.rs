@@ -6,6 +6,7 @@ mod dial_stack;
 mod feedback;
 mod hardware;
 mod host;
+mod instance;
 mod layout;
 mod multi;
 mod multi_editor;
@@ -19,9 +20,11 @@ mod stack_editor;
 mod system_actions;
 mod system_editor;
 mod system_keyboard;
+mod tray;
 mod trigger_editor;
 mod volume;
 mod webview;
+mod window;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -59,6 +62,13 @@ enum Command {
     },
     /// Open the native Rust desktop application. This is also the default.
     Desktop(DesktopArgs),
+    /// Control the existing native application for this state directory.
+    Window {
+        #[arg(value_parser = ["show", "hide", "close", "quit", "status"])]
+        command: String,
+        #[arg(long)]
+        state: Option<PathBuf>,
+    },
     /// Enumerate Stream Deck+ devices without changing them.
     Devices,
     /// Read firmware and input events; never changes displays.
@@ -99,6 +109,9 @@ enum Command {
 
 #[derive(clap::Args, Default)]
 struct DesktopArgs {
+    /// Start with the editor hidden; reopen it from the launcher or tray.
+    #[arg(long)]
+    background: bool,
     #[arg(long)]
     serial: Option<String>,
     #[arg(long)]
@@ -144,17 +157,52 @@ fn main() -> Result<()> {
                 visible,
             })?;
         }
+        Command::Window { command, state } => {
+            let command = serde_json::from_value(serde_json::Value::String(command))?;
+            let response = instance::request(&state.unwrap_or_else(desktop_state), command)?
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "No native Deckforge instance is running for this state directory"
+                    )
+                })?;
+            println!("{}", serde_json::to_string(&response)?);
+        }
         Command::Desktop(options) => {
-            let running = host::start(host::HostOptions {
+            let state = options.state.unwrap_or_else(desktop_state);
+            std::fs::create_dir_all(&state)?;
+            let activation = if options.background {
+                instance::Command::Status
+            } else {
+                instance::Command::Show
+            };
+            if instance::request(&state, activation)?.is_some() {
+                println!("Existing Deckforge instance activated");
+                return Ok(());
+            }
+            let running = match host::start(host::HostOptions {
                 serial: options.serial,
                 plugins: options.plugin,
                 profile: options.profile,
-                state_dir: options.state.unwrap_or_else(desktop_state),
+                state_dir: state.clone(),
                 port: options.port,
                 simulate: options.simulate,
                 seconds: None,
-            })?;
-            desktop::run(running.controller.clone())?;
+            }) {
+                Ok(running) => running,
+                Err(error) => {
+                    // A simultaneous launcher can own the session lock before
+                    // its window endpoint is ready. Never remove that lock.
+                    for _ in 0..10 {
+                        std::thread::sleep(Duration::from_millis(100));
+                        if instance::request(&state, activation)?.is_some() {
+                            println!("Existing Deckforge instance activated");
+                            return Ok(());
+                        }
+                    }
+                    return Err(error);
+                }
+            };
+            desktop::run(running.controller.clone(), &state, options.background)?;
             drop(running);
         }
         Command::Devices => {
