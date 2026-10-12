@@ -66,6 +66,46 @@ position. Removing one plugin therefore cannot redirect another plugin's
 messages. Remaining inspector indices are updated for every device while the
 host mutex is held.
 
+## Update from a package and restore a previous version
+
+Managed plugins have **Update from package**. Deckforge validates and stages the
+package while the current plugin keeps running. It checks the plugin UUID,
+action collisions, protected-file integrity where applicable, and availability
+of the declared Linux/portable runtime and default dial layouts. The review shows current and incoming
+versions, including downgrades or same-version replacement, plus added and
+removed actions. Applying requires that review's explicit confirmation. A
+restart, enable/disable change or removal invalidates an old review.
+
+The replacement exchanges the two directories atomically on the same filesystem.
+Only the selected plugin stops; other plugins keep their processes and sessions.
+Disabled plugins stay disabled. Profile assignments, current settings and
+host-managed plugin data stay at their existing identities. Removed action UUIDs
+remain assigned but unavailable. Derived icons and layouts refresh across all
+profiles and devices; custom/imported artwork and authored settings remain.
+
+The previous directory is retained under private `plugin-updates` storage.
+**Restore version** validates and reviews it before exchanging the directories
+back. An immediate process-spawn failure restores the preceding files and attempts
+to reload that runtime automatically. Later crashes or failure to register are
+reported normally and can be handled with Restore; successful spawning is not a
+health guarantee. Restoration keeps current profile edits instead of reverting
+the session to an old snapshot. A valid previous version remains available even
+if the current manifest is damaged and the plugin appears as unavailable.
+
+A journal written before the exchange identifies the two directories. Normal
+restart and process-crash checks recover the predecessor after a completed swap;
+uncommitted candidates are never advertised as a previous version. Startup also
+repairs unsaved derived image/layout changes before rendering devices. These are
+process-recovery checks, not a power-loss durability claim for every filesystem.
+At most four reviews can wait simultaneously; unused reviews expire after ten
+minutes and their uncommitted staging files are cleaned up. Retained versions
+are not deleted automatically.
+
+External/developer folders are not overwritten by package updates. Update those
+files yourself and use **Restart**, which reloads their metadata and derived
+assets. Marketplace account integration and automatic update discovery remain
+separate unfinished work.
+
 ## Validation
 
 `tests/plugin_enable_interop.py --require-wire-cleanup` uses a cooperative probe
@@ -92,3 +132,13 @@ action contexts. Native removal confirmations, managed archiving, external
 detachment and retained editor drafts are checked by
 `frontend/tests/native_plugin_remove_interop.py` using temporary plugins.
 Component tests also cover Cancel/Escape, stale confirmation and busy/error states.
+
+`tests/plugin_update_interop.py` runs successive package versions and a separate
+unchanged Counter backend. It checks review/cancel/stale-request behavior,
+version markers from the actual processes, two-device settings, disabled-state
+retention, missing-action recovery, immediate executable failure recovery and
+restart-time Restore discovery. `frontend/tests/native_plugin_update_interop.py`
+checks the native review/Cancel/Confirm Restore flow and retained editor drafts;
+component tests cover the package chooser flow. Filesystem and host tests cover
+journal orientation, recovery boundaries, private storage, failed saves,
+changed reviews and derived asset recovery before startup rendering.

@@ -61,6 +61,8 @@ mod system_events;
 mod transfer;
 mod transport;
 mod trigger;
+mod update_assets;
+mod updates;
 mod volume;
 use crate::device_model::Model;
 use inspectors::Inspector;
@@ -97,9 +99,7 @@ impl Controller {
                         .plugins
                         .iter()
                         .find(|plugin| plugin.id == action.plugin)?;
-                    if generation.is_some_and(|expected| {
-                        plugin.child.as_ref().map(|child| u64::from(child.id())) != Some(expected)
-                    }) {
+                    if generation.is_some_and(|expected| plugin.asset_generation != expected) {
                         return None;
                     }
                     Some((plugin.root.clone(), icon.to_owned()))
@@ -115,6 +115,13 @@ impl Controller {
         )))
     }
     pub fn command(&self, request: Value) -> Result<()> {
+        if request["command"] == "plugin_update_cancel" {
+            return self.cancel_plugin_update(
+                request["ticket"]
+                    .as_str()
+                    .context("Update ticket missing")?,
+            );
+        }
         if request["command"] == "appearance" {
             return self.appearance_command(request);
         }
@@ -264,6 +271,7 @@ struct Action {
     raw: Value,
 }
 struct Plugin {
+    asset_generation: u64,
     id: String,
     name: String,
     root: PathBuf,
@@ -345,6 +353,8 @@ mod image_serde {
 #[derive(Serialize, Deserialize, Default)]
 struct Saved {
     #[serde(default)]
+    plugin_asset_ids: HashMap<PathBuf, (u64, u64)>,
+    #[serde(default)]
     disabled_plugins: BTreeSet<PathBuf>,
     #[serde(default = "localization::default_preference")]
     plugin_language: String,
@@ -382,6 +392,9 @@ enum HeldControl {
     Dial(u8),
 }
 struct Host {
+    plugin_asset_ids: HashMap<PathBuf, (u64, u64)>,
+    pending_updates: HashMap<String, updates::Pending>,
+    previous_plugins: HashMap<PathBuf, updates::Previous>,
     disabled_plugins: BTreeSet<PathBuf>,
     plugin_language: String,
     language: &'static str,
@@ -512,6 +525,7 @@ impl Host {
         let pending = self.state_path.with_extension("tmp");
         #[derive(Serialize)]
         struct View<'a> {
+            plugin_asset_ids: &'a HashMap<PathBuf, (u64, u64)>,
             devices: Vec<device_pool::Record>,
             active_scope: &'a str,
             selected_scope: &'a str,
@@ -530,6 +544,7 @@ impl Host {
             disabled_plugins: Vec<&'a Path>,
         }
         let data = serde_json::to_vec_pretty(&View {
+            plugin_asset_ids: &self.plugin_asset_ids,
             devices: self.device_records(),
             active_scope: &self.scope,
             selected_scope: &self.selected_scope,
@@ -1674,7 +1689,7 @@ fn action_snapshot(host: &Host, action: &Action) -> Value {
         "plugin_name":plugin_name,
         "category":plugin.map(|p|p.manifest["Category"].as_str().unwrap_or(plugin_name)).unwrap_or(category),
         "icon":action.raw["Icon"],"plugin_root":plugin.map(|p|p.root.as_path()),
-        "icon_generation":plugin.and_then(|p|p.child.as_ref().map(Child::id)),
+        "icon_generation":plugin.map(|p|p.asset_generation),
         "tooltip":presentation["Tooltip"],"user_title_enabled":action.raw["UserTitleEnabled"]!=false,
         "visible":action.raw["VisibleInActionsList"]!=false,"controllers":action.controllers,
         "states":presentation["States"],
@@ -1708,7 +1723,7 @@ async fn control(
     }
     let result = if matches!(
         request["command"].as_str(),
-        Some("screensaver" | "appearance")
+        Some("screensaver" | "appearance" | "plugin_update_apply" | "plugin_update_cancel")
     ) {
         tokio::task::spawn_blocking(move || Controller { shared: state }.command(request))
             .await
@@ -1721,6 +1736,29 @@ async fn control(
         Err(e) => (
             StatusCode::BAD_REQUEST,
             Json(json!({"error":e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+async fn prepare_update(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    Json(request): Json<Value>,
+) -> Response {
+    if !authorize(&headers, &state.lock().unwrap()) {
+        return (StatusCode::FORBIDDEN, "Invalid editor token").into_response();
+    }
+    let rollback = request["kind"] == "rollback";
+    let result = tokio::task::spawn_blocking(move || {
+        Controller { shared: state }.prepare_plugin_update(request, rollback)
+    })
+    .await
+    .unwrap_or_else(|error| Err(anyhow::anyhow!("Package inspection failed: {error}")));
+    match result {
+        Ok(value) => Json(value).into_response(),
+        Err(error) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error":error.to_string()})),
         )
             .into_response(),
     }
@@ -1755,6 +1793,8 @@ fn apply_control(host: &mut Host, r: Value) -> Result<()> {
             | "plugin_language"
             | "plugin_enabled"
             | "uninstall_plugin"
+            | "plugin_update_apply"
+            | "plugin_update_cancel"
             | "restart_plugin"
             | "reference_app"
             | "mixer_config"
@@ -1915,6 +1955,12 @@ fn apply_control_local(host: &mut Host, r: Value) -> Result<()> {
         "plugin_language" => host.save_plugin_language(&r),
         "plugin_enabled" => host.set_plugin_enabled(&r),
         "uninstall_plugin" => host.uninstall_plugin(&r),
+        "plugin_update_apply" => host.apply_plugin_update(&r),
+        "plugin_update_cancel" => {
+            host.pending_updates
+                .remove(r["ticket"].as_str().context("Update ticket missing")?);
+            Ok(())
+        }
         "install_plugin" => {
             let state_dir = host
                 .state_path
@@ -1970,6 +2016,7 @@ fn apply_control_local(host: &mut Host, r: Value) -> Result<()> {
             host.plugins.extend(plugins);
             host.actions.extend(actions);
             host.refresh_localizations();
+            host.refresh_previous_plugins();
             for device in host.device_ids() {
                 host.with_device(&device, |host| host.install_bundled_profiles(true))?;
             }
@@ -2668,6 +2715,9 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
         controls.insert(device.clone(), previous_controls);
     }
     let mut host = Host {
+        plugin_asset_ids: saved.plugin_asset_ids,
+        pending_updates: HashMap::new(),
+        previous_plugins: HashMap::new(),
         pending_links: VecDeque::new(),
         registry_routes: HashMap::new(),
         registry_commands: None,
@@ -2762,6 +2812,8 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
         retired: VecDeque::new(),
     };
     host.refresh_localizations();
+    host.refresh_previous_plugins();
+    host.recover_updated_plugin_assets()?;
     host.restore_device_records(saved_records, selected_scope)?;
     if has_pool {
         host.startup_device_selection(requested_serial.as_deref(), requested_model)?;
@@ -2930,6 +2982,7 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
     if diagnostics {
         app = app
             .route("/api/state", get(dashboard))
+            .route("/api/plugin-update/prepare", post(prepare_update))
             .route("/api/control", post(control));
     }
     let app = app
@@ -2999,18 +3052,24 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
         let mut interval = tokio::time::interval(Duration::from_millis(250));
         loop {
             interval.tick().await;
-            let mut host = monitor_state.lock().unwrap();
-            if !host.running {
-                break;
+            let expired = {
+                let mut host = monitor_state.lock().unwrap();
+                if !host.running {
+                    break;
+                }
+                host.monitor_children();
+                host.poll_system_actions();
+                host.poll_session();
+                host.poll_system_resume();
+                host.poll_applications();
+                host.poll_audio();
+                host.poll_volume();
+                host.poll_mixer();
+                host.take_expired_updates()
+            };
+            if !expired.is_empty() {
+                let _ = tokio::task::spawn_blocking(move || drop(expired)).await;
             }
-            host.monitor_children();
-            host.poll_system_actions();
-            host.poll_session();
-            host.poll_system_resume();
-            host.poll_applications();
-            host.poll_audio();
-            host.poll_volume();
-            host.poll_mixer();
         }
     });
     let stop = async move {
@@ -3185,6 +3244,9 @@ mod tests {
     }
     pub(super) fn fixture(root: &Path) -> Host {
         let mut host = Host {
+            plugin_asset_ids: HashMap::new(),
+            pending_updates: HashMap::new(),
+            previous_plugins: HashMap::new(),
             pending_links: VecDeque::new(),
             registry_routes: HashMap::new(),
             registry_commands: None,
@@ -3245,6 +3307,7 @@ mod tests {
             inspectors: HashMap::new(),
             port: 0,
             plugins: vec![Plugin {
+                asset_generation: plugins::new_asset_generation(),
                 id: "test.plugin".into(),
                 name: "Test".into(),
                 root: root.to_owned(),

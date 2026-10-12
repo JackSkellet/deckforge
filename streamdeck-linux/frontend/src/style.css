@@ -2487,3 +2487,22 @@ dialog.mixer-dialog {
 .plugin-removal p {
   margin: 10px 0;
 }
+
+.plugin-update {
+  margin: 12px 0;
+}
+.plugin-update-review {
+  border-left: 2px solid #7fbba7;
+  padding: 4px 12px 12px;
+  margin-top: 12px;
+}
+.plugin-update-review h4 {
+  margin: 6px 0;
+}
+.plugin-update-review li {
+  overflow-wrap: anywhere;
+}
+.version-change {
+  font-weight: 600;
+  color: #cdeade;
+}

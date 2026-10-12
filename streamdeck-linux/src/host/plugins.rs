@@ -4,6 +4,11 @@ use super::*;
 use sha2::{Digest, Sha256};
 use std::{os::unix::ffi::OsStrExt, time::Instant};
 
+pub(super) fn new_asset_generation() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 pub(super) struct Runtime {
     pub status: &'static str,
     pub error: Option<String>,
@@ -57,7 +62,7 @@ impl Plugin {
     }
 }
 
-fn parse(path: &Path, reference: Option<&Path>) -> Result<(Plugin, Vec<Action>)> {
+pub(super) fn parse(path: &Path, reference: Option<&Path>) -> Result<(Plugin, Vec<Action>)> {
     let root = path
         .canonicalize()
         .with_context(|| format!("Plugin directory unavailable: {}", path.display()))?;
@@ -109,6 +114,7 @@ fn parse(path: &Path, reference: Option<&Path>) -> Result<(Plugin, Vec<Action>)>
     }
     Ok((
         Plugin {
+            asset_generation: new_asset_generation(),
             id,
             name: manifest["Name"].as_str().unwrap_or("Plugin").into(),
             root,
@@ -134,6 +140,7 @@ fn unavailable(path: &Path, error: anyhow::Error) -> Result<Plugin> {
     };
     runtime.fail(format!("{error:#}"));
     Ok(Plugin {
+        asset_generation: new_asset_generation(),
         id,
         name: root
             .file_name()
@@ -358,11 +365,21 @@ impl Host {
                 bail!("Plugin declares an action UUID already owned by another installed plugin");
             }
             self.sync_visible();
+            let previous: Vec<_> = self
+                .actions
+                .iter()
+                .filter(|action| action.plugin == id)
+                .cloned()
+                .collect();
             self.actions.retain(|action| action.plugin != id);
-            self.actions.extend(incoming);
+            self.actions.extend(incoming.clone());
             plugin.runtime.load_failed = false;
             self.plugins[index] = plugin;
             self.refresh_localizations();
+            self.refresh_updated_plugin_assets(&previous, &incoming);
+            self.refresh_previous_plugins();
+            self.recover_updated_plugin_assets()?;
+            self.record_plugin_asset_identity(index)?;
             for device in self.device_ids() {
                 self.with_device(&device, |host| {
                     host.sync_visible();
@@ -676,6 +693,7 @@ mod tests {
             .unwrap();
         let (other_sender, mut other_events) = mpsc::unbounded_channel();
         host.plugins.push(Plugin {
+            asset_generation: new_asset_generation(),
             id: "other.plugin".into(),
             name: "Other".into(),
             root: temp.path().join("other.sdPlugin"),

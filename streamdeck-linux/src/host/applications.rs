@@ -86,6 +86,12 @@ impl Host {
         let mut value = plugin.snapshot();
         value["enabled"] = json!(self.plugin_enabled(plugin));
         value["removal_mode"] = json!(self.plugin_removal_mode(plugin).as_str());
+        value["rollback_available"] = json!(self.previous_plugins.contains_key(&plugin.root));
+        value["rollback_version"] = json!(
+            self.previous_plugins
+                .get(&plugin.root)
+                .map(|previous| &previous.version)
+        );
         let presentation = self.presented_manifest(plugin);
         value["name"] = json!(presentation["Name"].as_str().unwrap_or(&plugin.name));
         value["description"] = presentation["Description"].clone();

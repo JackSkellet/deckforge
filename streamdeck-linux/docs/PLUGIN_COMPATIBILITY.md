@@ -73,4 +73,4 @@ unchanged shipped tutorial checks also pass with scoped asset loading.
 - More protected-package/reference versions beyond the verified 7.6 contract.
 - Windows/macOS executable plugins and OS-specific native dependencies.
 - Broader runtime/version selection and updates. Portable generic scripts and unambiguous Windows/macOS script entries now work, including `.cjs`; Node paths are searched deterministically.
-- Replacement/rollback for updates. Persistent Enable/Disable and explicit removal/reinstall with retained profile data are implemented.
+- Marketplace update discovery and account handoff. Managed package replacement/rollback, persistent Enable/Disable and explicit removal/reinstall are implemented.

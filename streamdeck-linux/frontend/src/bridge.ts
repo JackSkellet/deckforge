@@ -34,6 +34,8 @@ const globalCommands = new Set([
   "plugin_language",
   "plugin_enabled",
   "uninstall_plugin",
+  "plugin_update_apply",
+  "plugin_update_cancel",
   "reference_app",
   "mixer_refresh",
   "mixer_config",

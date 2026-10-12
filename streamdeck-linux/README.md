@@ -96,11 +96,14 @@ executable path or logging into Elgato.
 Use **Plugin settings…** to open an action's original HTML property inspector
 when its manifest provides one. Advanced JSON editing remains available. Draft changes survive periodic refresh
 and switching between controls. **Plugins** contains installation and runtime
-status, Enable, Disable, Restart and Remove. Disabling a plugin stops its backend and
+status, Enable, Disable, Restart and Remove, plus managed package updates and
+previous-version restoration. Disabling a plugin stops its backend and
 inspectors while preserving assignments and settings, and remains in effect
 after restarting Deckforge. Remove retains profile assignments and settings for
 reinstall, privately archives managed plugin folders and leaves external folders
-untouched. See [plugin lifecycle](docs/PLUGIN_LIFECYCLE.md).
+untouched. **Update from package** reviews the incoming version before replacing
+files; **Restore version** returns to a retained predecessor while keeping your
+current settings. See [plugin lifecycle](docs/PLUGIN_LIFECYCLE.md).
 The left sidebar manages profiles and imports. Title editing, removal and input
 testing stay with the selected control. Closing or hiding the editor
 keeps the device and plugins running. Open Deckforge again from the launcher or

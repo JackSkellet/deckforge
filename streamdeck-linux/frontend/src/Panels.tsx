@@ -6,6 +6,7 @@ import { getFormDraft, setFormDraft } from "./transient";
 import { PluginApplications } from "./PluginApplications";
 import { PluginLanguage } from "./PluginLanguage";
 import { ReferenceInstaller } from "./ReferenceInstaller";
+import { PluginUpdate } from "./PluginUpdate";
 import { deviceName } from "./device";
 export type Run = (payload: RecordValue) => Promise<boolean>;
 type PluginRemoval = {
@@ -73,7 +74,10 @@ export function Plugins({
   error?: string;
 }) {
   const [pluginBusy, setPluginBusy] = useState<
-    Record<string, "enable" | "disable" | "restart" | "remove" | undefined>
+    Record<
+      string,
+      "enable" | "disable" | "restart" | "remove" | "update" | undefined
+    >
   >({});
   const [removal, setRemoval] = useState<PluginRemoval | null>(null);
   async function removePlugin() {
@@ -338,6 +342,18 @@ export function Plugins({
                 </div>
               </section>
             )}
+            <PluginUpdate
+              plugin={p}
+              actions={snapshot.actions ?? []}
+              busy={!!pluginBusy[p.id]}
+              onBusy={(busy) =>
+                setPluginBusy((previous) => ({
+                  ...previous,
+                  [p.id]: busy ? "update" : undefined,
+                }))
+              }
+              run={run}
+            />
             {p.error && (
               <p role="status" className="error">
                 {p.error}

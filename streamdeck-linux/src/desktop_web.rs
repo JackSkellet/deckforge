@@ -161,14 +161,19 @@ impl Worker {
                                     picker.picker.store(false, Ordering::Release);
                                     reply(&picker, generation, request.id, result);
                                 });
-                            } else if request.method == "reference_import" {
+                            } else if matches!(
+                                request.method.as_str(),
+                                "reference_import"
+                                    | "plugin_update_prepare"
+                                    | "plugin_rollback_prepare"
+                            ) {
                                 if work.importing_reference.swap(true, Ordering::AcqRel) {
                                     reply(
                                         &work,
                                         generation,
                                         request.id,
                                         Err(anyhow::anyhow!(
-                                            "An installer import is already running"
+                                            "An installer or package is already being inspected"
                                         )),
                                     );
                                     continue;
@@ -179,8 +184,14 @@ impl Worker {
                                 let spawned = std::thread::Builder::new()
                                     .name("reference-import".into())
                                     .spawn(move || {
-                                        let result =
-                                            import_reference(&importer_controller, request.payload);
+                                        let result = if request.method == "reference_import" {
+                                            import_reference(&importer_controller, request.payload)
+                                        } else {
+                                            importer_controller.prepare_plugin_update(
+                                                request.payload,
+                                                request.method == "plugin_rollback_prepare",
+                                            )
+                                        };
                                         importer
                                             .importing_reference
                                             .store(false, Ordering::Release);
