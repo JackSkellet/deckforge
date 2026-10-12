@@ -19,6 +19,7 @@ pub(super) fn dial_image(
     renderer: &Renderer,
     slot: &mut Slot,
     root: Option<&Path>,
+    actions: &[Action],
 ) -> Result<DynamicImage> {
     if slot.layout_cache.is_none() {
         slot.layout_cache = Some(load_layout(root, &slot.layout)?);
@@ -33,6 +34,9 @@ pub(super) fn dial_image(
             continue;
         }
         let key = item["key"].as_str().context("Pixmap key missing")?;
+        if key == "icon" && appearance::custom_image(slot) {
+            continue;
+        }
         if let Some(source) = item["value"].as_str() {
             if source.is_empty() {
                 images.remove(key);
@@ -58,7 +62,16 @@ pub(super) fn dial_image(
             }
         }
     }
-    renderer.dial_layout(&slot.title, &slot.feedback, layout, &images)
+    let mut feedback = slot.feedback.clone();
+    if let Some(title) = slot
+        .appearances
+        .get(&slot.state)
+        .and_then(|s| s.user_title.as_ref())
+    {
+        merge_feedback(&mut feedback["title"], &json!(title));
+    }
+    let style = appearance::explicit_style(slot, actions).then(|| appearance::style(slot, actions));
+    renderer.dial_layout_styled(&slot.title, &feedback, layout, &images, style.as_ref())
 }
 
 /// SDK scalar shorthand changes an item's value without erasing its properties.
@@ -92,7 +105,20 @@ pub(super) fn merge_feedback(current: &mut Value, update: &Value) {
 
 pub(super) fn decode_image(data: &[u8], svg: bool) -> Result<DynamicImage> {
     if !svg {
-        return Ok(image::load_from_memory(data)?);
+        let dimensions = image::ImageReader::new(Cursor::new(data))
+            .with_guessed_format()?
+            .into_dimensions()?;
+        anyhow::ensure!(
+            u64::from(dimensions.0) * u64::from(dimensions.1) <= 16 * 1024 * 1024,
+            "Action image exceeds 16 megapixels"
+        );
+        let mut reader = image::ImageReader::new(Cursor::new(data)).with_guessed_format()?;
+        let mut limits = image::Limits::default();
+        limits.max_image_width = Some(8192);
+        limits.max_image_height = Some(8192);
+        limits.max_alloc = Some(64 * 1024 * 1024);
+        reader.limits(limits);
+        return Ok(cache_pixels(reader.decode()?));
     }
     let mut options = resvg::usvg::Options::default();
     // Resource paths are resolved by safe_file; an SVG cannot bypass that owner.
@@ -128,9 +154,19 @@ pub(super) fn decode_image(data: &[u8], svg: bool) -> Result<DynamicImage> {
                 .min(255) as u8;
         }
     }
-    Ok(DynamicImage::ImageRgba8(
+    Ok(cache_pixels(DynamicImage::ImageRgba8(
         image::RgbaImage::from_raw(width, height, rgba).context("Invalid SVG pixel buffer")?,
-    ))
+    )))
+}
+
+/// Source bytes stay unchanged in their archive/store; serialized render caches
+/// remain below image_serde's 12 MiB Base64 limit, even for incompressible pixels.
+fn cache_pixels(image: DynamicImage) -> DynamicImage {
+    if image.width() > 1024 || image.height() > 1024 {
+        image.thumbnail(1024, 1024)
+    } else {
+        image
+    }
 }
 
 #[cfg(test)]

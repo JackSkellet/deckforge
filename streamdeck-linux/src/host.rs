@@ -32,6 +32,7 @@ use std::{
 };
 use tokio::sync::mpsc;
 
+mod appearance;
 mod audio;
 mod brightness;
 mod children;
@@ -103,6 +104,9 @@ impl Controller {
         )))
     }
     pub fn command(&self, request: Value) -> Result<()> {
+        if request["command"] == "appearance" {
+            return self.appearance_command(request);
+        }
         if request["command"] == "screensaver" {
             let (device, previous, path) = {
                 let host = self.shared.lock().unwrap();
@@ -208,6 +212,8 @@ struct Slot {
     resources: Option<std::collections::BTreeMap<String, String>>,
     #[serde(default)]
     asset_source: Option<transfer::AssetSource>,
+    #[serde(default)]
+    appearances: appearance::States,
     context: String,
     controller: String,
     index: u8,
@@ -480,6 +486,9 @@ impl Host {
                     payload[k] = v.clone();
                 }
             }
+            if event == "titleParametersDidChange" {
+                payload.as_object_mut().unwrap().remove("isInMultiAction");
+            }
             let _=sender.send(json!({"event":event,"action":slot.uuid,"context":slot.context,"device":self.device,"payload":payload}));
         }
     }
@@ -511,9 +520,9 @@ impl Host {
         };
         current.state = (current.state + 1) % count as u64;
         current.background = self.resolve_state_image(&current, current.state);
-        if let Some(title) = current.states[current.state as usize]["Title"].as_str() {
-            current.title = title.into();
-        }
+        current.title = appearance::title(&current, &self.actions);
+        current.title_changed = false;
+        current.image_changed = false;
         self.store_slot(current);
         self.render()?;
         self.persist()
@@ -544,6 +553,7 @@ impl Host {
         let mut strip = DynamicImage::ImageRgb8(RgbImage::from_pixel(800, 100, Rgb([14, 21, 29])));
         let mut warnings = Vec::new();
         for slot in &mut self.slots {
+            appearance::apply_user_titles(slot, &self.actions);
             let mut picture = if slot.controller == "Encoder" {
                 let stacked = slot.uuid == crate::dial_stack::UUID;
                 let index = slot.active_stack_index();
@@ -572,17 +582,18 @@ impl Host {
                         placeholder.layout_cache = None;
                         placeholder.feedback = json!({"title":"Unavailable"});
                         placeholder.background = None;
-                        display::dial_image(&self.renderer, &mut placeholder, None)?
+                        display::dial_image(&self.renderer, &mut placeholder, None, &self.actions)?
                     } else {
                         if target.uuid == crate::action_trigger::UUID {
                             trigger::picture(
                                 &self.renderer,
+                                &self.actions,
                                 target,
                                 &self.badges,
                                 self.multi_clock.elapsed(),
                             )?
                         } else {
-                            display::dial_image(&self.renderer, target, root)?
+                            display::dial_image(&self.renderer, target, root, &self.actions)?
                         }
                     };
                 warnings.append(&mut target.display_warnings);
@@ -596,7 +607,11 @@ impl Host {
                 }
                 picture
             } else {
-                let mut picture = self.renderer.key(&slot.title, slot.background.as_ref());
+                let mut picture = self.renderer.key_styled(
+                    &slot.title,
+                    slot.background.as_ref(),
+                    &appearance::style(slot, &self.actions),
+                );
                 feedback::paint_key(&self.badges, &mut picture, slot, self.multi_clock.elapsed());
                 picture
             };
@@ -682,6 +697,7 @@ impl Host {
             child_id: String::new(),
             resources: None,
             asset_source: None,
+            appearances: Default::default(),
             in_multi_action: false,
             context: uuid::Uuid::new_v4().to_string(),
             controller: controller.into(),
@@ -1154,47 +1170,89 @@ impl Host {
         // Validate a replacement before exposing it to any display or saved state.
         let mut replacement = original;
         let slot = &mut replacement;
-        if matches!(event, "setImage" | "setTitle") {
-            if payload
-                .get("state")
-                .is_some_and(|v| v.as_u64() != Some(slot.state))
-            {
-                bail!("Updating an inactive state is not implemented");
-            }
-            if payload.get("target").is_some_and(|v| v.as_u64() != Some(0)) {
-                bail!("Separate hardware/software targets are not implemented");
-            }
+        if matches!(event, "setImage" | "setTitle")
+            && payload.get("target").is_some_and(|v| v.as_u64() != Some(0))
+        {
+            bail!("Separate hardware/software targets are not implemented");
         }
         match event {
-            "setTitle" => {
-                slot.title = payload["title"].as_str().unwrap_or(&slot.name).to_owned();
-                slot.title_changed = true;
-            }
-            "setImage" => {
-                let source = payload["image"].as_str().unwrap_or("");
-                slot.image_changed = !source.is_empty();
-                slot.background = if source.is_empty() {
-                    self.resolve_state_image(slot, slot.state)
+            "setTitle" | "setImage" => {
+                let count = appearance::count(slot, &self.actions);
+                anyhow::ensure!(count <= 1024, "Action state count exceeds limit");
+                let states = if let Some(state) = payload.get("state") {
+                    let state = state.as_u64().context("Invalid state")?;
+                    anyhow::ensure!(state < count as u64 && state < 1024, "State out of range");
+                    vec![state]
                 } else {
-                    Some(load_image(&root, source)?)
+                    (0..count as u64).collect()
                 };
+                let image = if event == "setImage" {
+                    match payload
+                        .get("image")
+                        .and_then(Value::as_str)
+                        .filter(|s| !s.is_empty())
+                    {
+                        Some(source) => Some(load_image(&root, source)?),
+                        None => None,
+                    }
+                } else {
+                    None
+                };
+                if event == "setImage" {
+                    let existing: usize = slot
+                        .appearances
+                        .iter()
+                        .map(|(state, a)| {
+                            a.user_pixels.as_ref().map_or(0, |p| p.as_bytes().len())
+                                + if states.contains(state) {
+                                    0
+                                } else {
+                                    a.plugin_pixels.as_ref().map_or(0, |p| p.as_bytes().len())
+                                }
+                        })
+                        .sum();
+                    let updated = image
+                        .as_ref()
+                        .map_or(0, |p| p.as_bytes().len())
+                        .saturating_mul(states.len());
+                    anyhow::ensure!(
+                        existing.saturating_add(updated) <= 64 * 1024 * 1024,
+                        "Action image states exceed 64 MiB decoded pixels"
+                    );
+                }
+                let affects_current = states.contains(&slot.state);
+                for state in states {
+                    let entry = slot.appearances.entry(state).or_default();
+                    if event == "setTitle" {
+                        entry.plugin_title = payload
+                            .get("title")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned);
+                    } else {
+                        entry.plugin_pixels = image.clone();
+                    }
+                }
+                if affects_current {
+                    if event == "setTitle" {
+                        slot.title = appearance::title(slot, &self.actions);
+                        slot.title_changed = false;
+                    } else {
+                        slot.background = self.resolve_state_image(slot, slot.state);
+                        slot.image_changed = false;
+                    }
+                }
             }
             "setState" => {
                 let state = payload["state"].as_u64().context("Invalid state")?;
-                let defined = self
-                    .actions
-                    .iter()
-                    .find(|a| a.uuid == slot.uuid)
-                    .and_then(|a| a.raw["States"].as_array())
-                    .map_or(1, Vec::len);
-                if state >= slot.states.as_array().map_or(1, Vec::len).max(defined) as u64 {
-                    bail!("State out of range");
-                }
+                anyhow::ensure!(
+                    state < appearance::count(slot, &self.actions) as u64 && state < 1024,
+                    "State out of range"
+                );
                 slot.state = state;
                 slot.background = self.resolve_state_image(slot, state);
-                if let Some(title) = slot.states[state as usize]["Title"].as_str() {
-                    slot.title = title.into();
-                }
+                slot.title = appearance::title(slot, &self.actions);
+                slot.image_changed = false;
+                slot.title_changed = false;
             }
             "setFeedback" => {
                 let object = payload.as_object().context("Feedback must be an object")?;
@@ -1215,7 +1273,7 @@ impl Host {
             }
         }
         if replacement.controller == "Encoder" {
-            display::dial_image(&self.renderer, &mut replacement, Some(&root))?;
+            display::dial_image(&self.renderer, &mut replacement, Some(&root), &self.actions)?;
         }
         self.store_slot(replacement);
         if active {
@@ -1291,7 +1349,7 @@ async fn root(
     Html(include_str!("ui.html").replace("__TOKEN__", &token)).into_response()
 }
 fn slot_snapshot(host: &Host, s: &Slot) -> Value {
-    json!({"available":host.actions.iter().any(|a|a.uuid==s.uuid),"pinned":s.pinned,"context":s.context,"controller":s.controller,"index":s.index,"uuid":s.uuid,"name":s.name,"settings":s.settings,"resources":s.resources.clone().unwrap_or_default(),"title":s.title,"state":s.state,"feedback":s.feedback,"layout":s.layout,"preview":s.preview,"raw":s.raw,
+    json!({"appearance":appearance::snapshot(s,&host.actions),"state_count":appearance::count(s,&host.actions),"available":host.actions.iter().any(|a|a.uuid==s.uuid),"pinned":s.pinned,"context":s.context,"controller":s.controller,"index":s.index,"uuid":s.uuid,"name":s.name,"settings":s.settings,"resources":s.resources.clone().unwrap_or_default(),"title":s.title,"state":s.state,"feedback":s.feedback,"layout":s.layout,"preview":s.preview,"raw":s.raw,
         "trigger_description":host.trigger_description(s),
         "trigger_children":if s.uuid==crate::action_trigger::UUID {s.children.iter().map(|g|g.first().map(|c|slot_snapshot(host,c)).unwrap_or(Value::Null)).collect::<Vec<_>>()}else{vec![]},
         "stack_children":if s.uuid==crate::dial_stack::UUID {s.children.first().map(|children|children.iter().map(|c|slot_snapshot(host,c)).collect::<Vec<_>>()).unwrap_or_default()}else{vec![]},
@@ -1355,7 +1413,10 @@ async fn control(
     if !authorize(&headers, &state.lock().unwrap()) {
         return (StatusCode::FORBIDDEN, "Invalid editor token").into_response();
     }
-    let result = if request["command"] == "screensaver" {
+    let result = if matches!(
+        request["command"].as_str(),
+        Some("screensaver" | "appearance")
+    ) {
         tokio::task::spawn_blocking(move || Controller { shared: state }.command(request))
             .await
             .unwrap_or_else(|error| Err(anyhow::anyhow!("Image loader failed: {error}")))
@@ -1459,21 +1520,7 @@ fn apply_control(host: &mut Host, r: Value) -> Result<()> {
             host.library.remove(&context);
             host.refresh_page()
         }
-        "appearance" => {
-            host.editable()?;
-            let slot = host
-                .slots
-                .iter_mut()
-                .find(|s| s.context == r["context"])
-                .context("Unknown context")?;
-            slot.title_changed = true;
-            slot.title = r["title"]
-                .as_str()
-                .context("Title must be text")?
-                .to_owned();
-            host.render()?;
-            host.persist()
-        }
+        "appearance" => appearance::legacy(host, &r),
         "import_profile" => host.import_profile(Path::new(
             r["path"].as_str().context("Profile path missing")?,
         )),
@@ -2578,6 +2625,7 @@ mod tests {
                 child_id: String::new(),
                 resources: None,
                 asset_source: None,
+                appearances: Default::default(),
                 in_multi_action: false,
                 context: "test.context".into(),
                 controller: "Keypad".into(),
@@ -2784,22 +2832,19 @@ mod tests {
         );
     }
     #[test]
-    fn inactive_state_and_software_target_cannot_change_hardware_title() {
+    fn inactive_state_updates_do_not_change_live_title_and_separate_targets_remain_explicit() {
         let temp = tempfile::tempdir().unwrap();
         let mut host = fixture(temp.path());
-        for payload in [
-            json!({"title":"bad","state":1}),
-            json!({"title":"bad","target":2}),
-        ] {
-            assert!(
-                host.plugin_message(
-                    0,
-                    json!({"event":"setTitle","context":"test.context","payload":payload})
-                )
-                .is_err()
-            );
-            assert_eq!(host.slots[0].title, "before");
-        }
+        host.plugin_message(0,json!({"event":"setTitle","context":"test.context","payload":{"title":"inactive","state":1}})).unwrap();
+        assert_eq!(host.slots[0].title, "before");
+        assert!(host.plugin_message(0,json!({"event":"setTitle","context":"test.context","payload":{"title":"bad","target":2}})).is_err());
+        assert_eq!(host.slots[0].title, "before");
+        host.plugin_message(
+            0,
+            json!({"event":"setState","context":"test.context","payload":{"state":1}}),
+        )
+        .unwrap();
+        assert_eq!(host.slots[0].title, "inactive");
     }
     #[test]
     fn plugin_context_ownership_and_settings_correlation_are_preserved() {

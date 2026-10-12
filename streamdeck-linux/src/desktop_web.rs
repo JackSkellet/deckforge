@@ -251,6 +251,8 @@ fn dispatch(
 ) -> Result<Value> {
     match method {
         "snapshot" => Ok(shared.latest.lock().unwrap().snapshot.clone()),
+        "fonts" => Ok(serde_json::to_value(crate::appearance::font_families()?)?),
+        "appearance_preview" => controller.appearance_preview(payload),
         "command" => {
             ensure!(payload.is_object(), "Host command must be an object");
             controller.command(payload)?;

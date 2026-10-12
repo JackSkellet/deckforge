@@ -347,16 +347,20 @@ impl Library {
 
 impl Host {
     pub(super) fn resolve_state_image(&mut self, slot: &Slot, state: u64) -> Option<DynamicImage> {
+        if let Some(image) = appearance::pixels(slot, state) {
+            return Some(image);
+        }
         let action = self.actions.iter().find(|a| a.uuid == slot.uuid).cloned();
         let plugin = action
             .as_ref()
             .and_then(|a| self.plugins.iter().find(|p| p.id == a.plugin))
             .map(|p| p.root.clone());
-        if let Some(image) = slot
-            .states
-            .get(state as usize)
-            .and_then(|s| s["Image"].as_str())
-            .filter(|s| !s.is_empty())
+        if !slot.appearances.get(&state).is_some_and(|a| a.image_reset)
+            && let Some(image) = slot
+                .states
+                .get(state as usize)
+                .and_then(|s| s["Image"].as_str())
+                .filter(|s| !s.is_empty())
         {
             if let Some(origin) = self.asset_origin(slot) {
                 let path = origin.source;
@@ -376,7 +380,7 @@ impl Host {
             }
             return plugin
                 .as_ref()
-                .and_then(|root| load_image(root, image).ok());
+                .and_then(|root| state_image(root, &slot.states, state));
         }
         action.and_then(|action| {
             plugin.and_then(|root| state_image(&root, &action.raw["States"], state))
@@ -652,6 +656,7 @@ impl Host {
                     child_id: String::new(),
                     resources: None,
                     asset_source: None,
+                    appearances: Default::default(),
                     in_multi_action: false,
                     context: new_id(),
                     controller: item.controller.clone(),
@@ -1155,6 +1160,7 @@ fn navigation_slot(uuid: &str, name: &str, index: u8, settings: Value) -> Slot {
         child_id: String::new(),
         resources: None,
         asset_source: None,
+        appearances: Default::default(),
         in_multi_action: false,
         context: new_id(),
         controller: "Keypad".into(),

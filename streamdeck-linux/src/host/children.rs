@@ -184,6 +184,7 @@ impl Slot {
                         // own settings or child records have just been edited.
                         children: previous.map(|s| s.children.clone()).unwrap_or_default(),
                         child_id: id,
+                        appearances: previous.map(|s| s.appearances.clone()).unwrap_or_default(),
                         asset_source: previous
                             .and_then(|s| s.asset_source.clone())
                             .or_else(|| self.asset_source.clone()),
@@ -245,12 +246,22 @@ impl Host {
             .flat_map(|p| &mut p.pages)
             .flat_map(|p| &mut p.slots)
         {
+            appearance::migrate(parent, &self.actions);
             if let Err(error) = parent.hydrate_children(&self.actions) {
                 errors.push(format!(
                     "Container {} retained but invalid: {error}",
                     parent.name
                 ));
             }
+        }
+        for parent in self
+            .library
+            .profiles
+            .iter_mut()
+            .flat_map(|p| &mut p.pages)
+            .flat_map(|p| &mut p.slots)
+        {
+            appearance::migrate(parent, &self.actions);
         }
         for error in errors {
             if !self.logs.contains(&error) {

@@ -5,6 +5,7 @@ import {
   finishSave,
   replaceChildren,
   saveRequests,
+  editAppearance,
   filteredActions,
   STACK,
   MULTI,
@@ -31,10 +32,92 @@ const slot = {
   multi_children: [],
 } as Slot;
 describe("action drafts", () => {
+  it("does not freeze a live plugin title when only settings change", () => {
+    const initial = reconcileDraft(undefined, slot);
+    const edited = editDraft(initial, {
+      settings: { count: 8, Future: slot.settings.Future },
+    });
+    const live = { ...slot, title: "Plugin changed", state: 1 };
+    expect(reconcileDraft(edited, live)).toBe(edited);
+    expect(saveRequests(live, edited)).toEqual([
+      { command: "settings", context: slot.context, settings: edited.settings },
+    ]);
+  });
+  it("keeps per-state appearance intent and never writes untouched settings or other state records", () => {
+    const base = {
+      title_parameters: { fontFamily: "", fontSize: 11, FutureFont: true },
+      title_custom: false,
+      image_custom: false,
+      title: "Counter",
+    };
+    let draft = reconcileDraft(undefined, slot);
+    draft = editAppearance(
+      draft,
+      slot,
+      1,
+      { title_parameters: { fontSize: 18 } },
+      base,
+    );
+    draft = editAppearance(draft, slot, 0, { title: "Custom" }, base);
+    draft = editAppearance(draft, slot, 0, { reset_title: true }, base);
+    expect(saveRequests({ ...slot, state: 1 }, draft)).toEqual([
+      {
+        command: "appearance",
+        context: slot.context,
+        expected_state: 0,
+        state: 0,
+        reset_title: true,
+      },
+      {
+        command: "appearance",
+        context: slot.context,
+        expected_state: 0,
+        state: 1,
+        title_parameters: { fontSize: 18 },
+      },
+    ]);
+    expect(draft.raw).toEqual(slot.raw);
+    expect(draft.settings).toEqual(slot.settings);
+    expect(draft.appearanceBases?.[1].title_parameters.FutureFont).toBe(true);
+  });
+  it("allows title styling on actions with live-owned text, without sending a title override", () => {
+    const base = {
+      title_parameters: {},
+      title_custom: false,
+      image_custom: false,
+    };
+    let draft = editAppearance(
+      reconcileDraft(undefined, slot),
+      slot,
+      0,
+      { title: "Never override", title_parameters: { fontStyle: "Bold" } },
+      base,
+    );
+    expect(saveRequests(slot, draft, false)).toEqual([
+      {
+        command: "appearance",
+        context: slot.context,
+        expected_state: 0,
+        state: 0,
+        title_parameters: { fontStyle: "Bold" },
+      },
+    ]);
+  });
+
   it("does not write an appearance override for action-owned live titles", () => {
     const draft = reconcileDraft(undefined, slot);
-    expect(saveRequests(slot, draft, false)).toEqual([
-      { command: "settings", context: slot.context, settings: slot.settings },
+    expect(
+      saveRequests(
+        slot,
+        editDraft(draft, { settings: { ...slot.settings, count: 2 } }),
+        false,
+      ),
+    ).toEqual([
+      {
+        command: "settings",
+        context: slot.context,
+        settings: { ...slot.settings, count: 2 },
+      },
     ]);
   });
   it("does not let live plugin updates erase edited settings or title", () => {
@@ -55,10 +138,21 @@ describe("action drafts", () => {
   it("preserves vendor settings in exact host save commands", () => {
     const draft = editDraft(reconcileDraft(undefined, slot), {
       title: "Changed",
+      settings: { ...slot.settings, count: 2 },
     });
     expect(saveRequests(slot, draft)).toEqual([
-      { command: "settings", context: "counter-1", settings: slot.settings },
-      { command: "appearance", context: "counter-1", title: "Changed" },
+      {
+        command: "appearance",
+        context: "counter-1",
+        expected_state: 0,
+        state: 0,
+        title: "Changed",
+      },
+      {
+        command: "settings",
+        context: "counter-1",
+        settings: { ...slot.settings, count: 2 },
+      },
     ]);
   });
 });
@@ -94,7 +188,7 @@ describe("structured containers", () => {
     expect(
       saveRequests(
         { ...slot, uuid: STACK },
-        reconcileDraft(undefined, { ...slot, raw }),
+        editDraft(reconcileDraft(undefined, { ...slot, raw }), { raw }),
       )[0].command,
     ).toBe("stack_save");
   });

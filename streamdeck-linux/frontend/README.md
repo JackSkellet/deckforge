@@ -114,3 +114,27 @@ nested action/resource transfer. Every destination request includes its observed
 silently replace a different action. Read-only actions can be copied; they cannot
 be cut or removed. The explicit development fixture models these interactions
 without touching real profiles.
+
+## Appearance drafts
+
+The Appearance editor reads `slot.appearance` and `slot.state_count`. It keeps
+independent edits for each target state, while `expected_state` guards the live
+action state. Selecting another appearance state only requests a native preview;
+it never flips the physical action. If the live state changes during editing,
+Save stops until **Refresh state and preview** explicitly accepts the new live
+state while retaining the targeted drafts.
+
+`appearance_preview` sends the same context, state guard and changed appearance
+fields to Rust, without issuing a host command. Requests are debounced, and
+replies for older edits or contexts are ignored. The result supplies PNG pixels,
+resolved title/style, custom-override flags and optional font fallback details.
+`fonts` returns the native font-family inventory. Empty/default and unavailable
+saved families remain selectable and are not rewritten on display. The browser
+fixture deliberately does not pretend to reproduce Rust's font or image renderer.
+
+Title, style, icon, settings and container edits carry separate intent. A
+settings-only save cannot create a user title override, and an appearance-only
+save cannot overwrite a plugin's live settings. Style payloads contain only
+changed fields; the host merges them onto the selected state's resolved style.
+Explicit title/icon resets are distinct from choosing a replacement. Unknown
+settings and other state records remain untouched.

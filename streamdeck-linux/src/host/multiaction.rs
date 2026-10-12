@@ -152,9 +152,10 @@ impl Host {
                 if let Some(mut slot) = self.slot_any(&parent).cloned() {
                     if slot.uuid == SWITCH {
                         slot.state = (slot.state + 1) % 2;
-                        if let Some(title) = slot.states[slot.state as usize]["Title"].as_str() {
-                            slot.title = title.into();
-                        }
+                        slot.title = appearance::title(&slot, &self.actions);
+                        slot.background = self.resolve_state_image(&slot, slot.state);
+                        slot.title_changed = false;
+                        slot.image_changed = false;
                         self.store_slot(slot);
                         self.render()?;
                         self.persist()?;

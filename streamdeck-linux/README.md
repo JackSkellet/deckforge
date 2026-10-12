@@ -25,6 +25,14 @@ with its own settings panel and artwork. No Wine is used. Notifications, server
 statistics and volume graphics have mock integration coverage. Live authorization
 and real Discord control behavior remain unverified.
 
+## Appearance editor
+
+Select a control and expand **Appearance** for custom icons and per-state title
+styling. Rust renders the draft preview; Save applies it. User overrides retain
+priority over live plugin updates, and Reset restores the underlying appearance.
+See [Action appearance](docs/APPEARANCE.md) for font substitution, export behavior
+and the remaining rendering limits.
+
 ## Audio mixer
 
 Open **Audio mixer** to configure independent monitor and stream mixes, input

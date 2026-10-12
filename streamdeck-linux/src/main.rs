@@ -1,6 +1,7 @@
 mod action_icons;
 mod action_library;
 mod action_trigger;
+mod appearance;
 mod audio_output;
 mod brightness;
 mod desktop;

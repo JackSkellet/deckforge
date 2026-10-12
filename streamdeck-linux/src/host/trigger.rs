@@ -23,6 +23,7 @@ pub(super) fn action() -> Action {
 }
 pub(super) fn picture(
     renderer: &Renderer,
+    actions: &[Action],
     slot: &mut Slot,
     badges: &HashMap<String, feedback::Badge>,
     now: Duration,
@@ -34,7 +35,11 @@ pub(super) fn picture(
     ));
     for (index, (x, y)) in [(12, 29), (72, 14), (132, 29)].into_iter().enumerate() {
         if let Some(child) = slot.children.get_mut(index).and_then(|g| g.first_mut()) {
-            let mut key = renderer.key(&child.title, child.background.as_ref());
+            let mut key = renderer.key_styled(
+                &child.title,
+                child.background.as_ref(),
+                &appearance::style(child, actions),
+            );
             feedback::paint_key(badges, &mut key, child, now);
             let mut png = Cursor::new(Vec::new());
             key.write_to(&mut png, image::ImageFormat::Png)?;

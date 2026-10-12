@@ -8,7 +8,12 @@ The official [7.6 release notes](https://help.elgato.com/hc/en-us/articles/51156
 
 ## Current work order
 
-The user prioritized the native UI and plugin support on 12 October 2026. Improve action discovery, plugin installation, configuration and runtime reliability first. Screensaver completion and physical acceptance are deferred until the end; existing work stays available and its open gaps remain listed below. GitHub CI is manual-only while development continues; use local checks for published checkpoints.
+The user's latest order on 12 October 2026 is to finish the current appearance
+editor, then support other Stream Deck devices, improve plugin compatibility,
+and add Wave Link meters. Sharing and Smart Profiles come at the end. Wave Link
+effects and screensaver completion are deferred. The user will perform
+long-running reliability testing; it is not part of the agent's current work
+queue. Short functional/regression checks continue. GitHub CI remains manual-only.
 
 ## Status and evidence rules
 
@@ -35,7 +40,7 @@ Desktop interaction requirements come from the official [plugin setup guide][plu
 | UI-03 | Action library with categories, search, controller filtering and useful plugin metadata | **Partial, C/T.** Native Actions sidebar searches action/plugin names, UUIDs, categories and tooltips; groups actions by manifest category and filters by controller. Incompatible entries can be shown disabled; duplicate names retain distinct UUIDs. Search/filter drafts survive window recreation. Manifest SVG/raster icons now appear as bounded cached thumbnails; broader keyboard acceptance and exact reference appearance remain open. | Search/filter official manifests; key actions cannot be accidentally placed on dial-only slots; categories, icons and disabled/incompatible states are clear. |
 | UI-04 | Drag/drop, move/copy/paste, reorder, remove, context menus and reusable action editing | **Verified subset, C/T.** Native right-click/Edit menus, keyboard copy/cut/paste, canvas moves/swaps and Ctrl-drag copies preserve nested actions, settings and resource bindings. Cuts retain their source until paste; stale targets/read-only/incompatible destinations are rejected. Folder copies receive independent page trees; state assets survive cross-profile export/restart. System clipboard interoperability, action-sharing files and undo remain missing. | Exercise internal and file-manager drag/drop; copy across pages/profiles; verify nested data and settings survive. Test undo/recovery as a Linux usability requirement. |
 | UI-05 | Action-specific configuration with plugin property inspectors | **Verified subset, C/T.** Native Plugin settings opens a WebKit inspector. Unchanged Counter PI registers; instrumented original control saves into the real plugin. Broader forms/file controls remain unverified. | Open unchanged official property inspector; edit controls, file selectors and dynamic lists; verify visible plugin/hardware response and restart persistence. [PI guide][pi] |
-| UI-06 | Titles, typography, image selection, icon/background libraries, preview fidelity | **Partial, C.** Fontdue title rendering and raster backgrounds exist; full style controls and asset libraries do not. | Compare imported title size/style/alignment/color, custom icons and state changes with reference screenshots; verify scaled native UI and hardware rendering. [Key guide][keys], [layouts][layouts] |
+| UI-06 | Titles, typography, image selection, icon/background libraries, preview fidelity | **Verified subset, C/T.** Per-state title/icon editing, multiline titles, font family/size/style/underline/colour/alignment/visibility, Rust-rendered draft previews and explicit Save/reset are implemented. User overrides take precedence over SDK updates; original image bytes survive export. Font substitutions are reported. Animation, complex text shaping, image cropping/asset libraries and Windows pixel equivalence remain open. | Compare imported title styling, custom icons and state changes against reference screenshots; verify scaled native UI and hardware rendering. [Key guide][keys], [layouts][layouts] |
 | UI-07 | Window/tray lifecycle, startup preference, diagnostics and update/about UI | **Partial, C/T.** Closing the editor preserves the host and unsaved drafts; launcher/tray reopening recreates the native window in the same process. Private state-scoped instance activation, explicit Quit, background startup, SIGINT/SIGTERM and owned-child cleanup are tested. Native window generations and plugin heartbeat continuity are checked. Native startup preference and About version/source are implemented; generated XDG entry is validated and launched through GIO with isolated state and reserved-character paths. Actual next-login startup and update UI remain open; compositor focus, real title-bar close input and visible tray painting remain unverified. | Close/reopen window without interrupting configured background actions; explicitly quit stops only this app's children; test login startup, version display and bounded logs. [Preferences][preferences], [7.6 fixes][release76] |
 
 ## Profiles, pages, folders and portable data
@@ -80,7 +85,7 @@ The shipped profiles contain real action identifiers and settings; their presenc
 | PL-04 | Property-inspector browser, registration and bidirectional messaging | **Verified subset, C/T.** Native inspector windows register, route messages/settings, enforce per-action context binding and send appearance/disappearance. Original Counter PI registers; its unchanged control code saves via explicit instrumentation. | Unchanged official inspector registers, receives action/settings metadata, exchanges `sendToPlugin`/`sendToPropertyInspector`, and gets appearance/disappearance events. [PI guide][pi] |
 | PL-05 | Device/action lifecycle and physical input events | **Verified subset, D/C/T/H.** Registration, offline device state, connect/disconnect and key/dial events work. SDK stores retain visible actions during same-device recovery; new identity is announced before appearance. Broader physical lifecycle acceptance remains open. | Contract fixtures cover disconnect/reconnect, page/folder transitions, simultaneous instances, title changes and touch coordinates; then repeat physical paths. [WebSocket API][ws] |
 | PL-06 | Action/global settings, correlation IDs and persistent isolation | **Verified subset, T.** Sample settings survive restart; global storage and correlated replies exist in code. | Test SDK v1/v2/v3 clients, PI-origin updates, concurrent gets, multi-plugin isolation, malformed settings and crash-safe persistence. [Settings][settings], [SDK 3 changes][sdk3] |
-| PL-07 | Title/image/state commands and separate hardware/software targets | **Partial, C.** Current state and combined target work; inactive-state/separate-target requests are rejected. | Verify all states and targets, user-title precedence, resets and plugin overrides before/after state changes against reference output. [Keys][keys], [WebSocket API][ws] |
+| PL-07 | Title/image/state commands and separate hardware/software targets | **Partial, C/T.** Combined-target per-state SDK updates, including inactive states, user-override priority/reset and titleParametersDidChange packets are implemented and process-tested. Separate hardware/software targets remain explicitly unsupported. | Verify combined and separate targets, every valid state, ownership, title parameters and reset behavior with official SDK fixtures. [WebSocket API][ws] |
 | PL-08 | Image formats, animation and resource path behavior | **Partial, C/T.** PNG/JPEG/GIF and SVG file/data-URI rendering work; SVG transparency is checked. Animation and WebP remain missing. | Test file/data-URI icons, SVG and animated assets, scaling/transparency, frame timing and bounded memory with real devices. [Keys][keys], [6.0.1 release][release601] |
 | PL-09 | All built-in feedback layouts and custom JSON layouts | **Verified subset, C/T.** All six built-ins and four official custom layouts run unchanged with real preview-pixel checks. Incremental properties, SVG, clipping/layers/gradients work. Exact Windows text/bar raster parity remains unverified. | Run every unchanged Layouts sample action; compare text, pixmap, bars, ranges, z-order, clipping, opacity and incremental updates. [Layouts][layouts] |
 | PL-10 | Visual alerts, success feedback and trigger descriptions | **Verified subset, D/A/C/T.** Native-duration key badges, red dial flashes, Trigger miniature feedback, selected Stack forwarding and runtime gesture hints implemented. Generated probes and unchanged Image Resizer warning/success pass. Multi parent routing, pixel-perfect vendor artwork and physical acceptance remain open. | Observe correct temporary overlays and restoration on keys/dials; inspector descriptions update when requested. [WebSocket API][ws], [dials][dials] |
@@ -666,3 +671,26 @@ Core checks pass 354 tests with 11 opt-in tests ignored; frontend checks pass 39
 Existing official whole-profile, resource SDK/native inspector and portable Node
 entry suites pass after the provenance and file-reader changes. Physical editing
 acceptance and complete Windows application parity remain unverified.
+
+### Appearance editing, 2026-10-12
+
+The native editor now edits custom icons and title styling per state. Previews
+run through the Rust renderer without saving or sending frames to the device.
+A native React/Counter fixture verifies that an appearance draft remains local,
+that Save retains a count changed by the running plugin during editing, and that
+plugin title ownership remains intact. Extensionless manifest icons survive style
+changes and resets. Titles support multiple lines.
+
+`tests/appearance_interop.py` checks actual rendered pixels, sparse style patches,
+SDK title-parameter packets, inactive-state title/image updates, user priority,
+reset, original SVG export/reimport and restart. Unit tests cover two-state GIF/SVG
+byte preservation and a high-entropy photo whose decoded cache is bounded for safe
+session reload. Imported profile override provenance remains partly inferred from
+standard raw Image/Title fields; new SDK runtime caches are kept out of user-profile
+exports. See [Action appearance](APPEARANCE.md) for exact limits.
+
+Core tests pass 374 cases with 11 opt-in tests ignored; frontend tests pass 49.
+Font matching/loading runs outside the shared render-cache lock. Windows font
+metrics, complex shaping, per-character fallback and animated key playback are
+not established. The user's next priority is other devices, then plugins, then
+Wave Link meters. Long-running reliability checks are delegated to the user.

@@ -130,6 +130,37 @@ afterEach(() => {
   delete window.deckforge;
 });
 describe("desktop interactions", () => {
+  it("preserves multiline titles, inserts Enter without submitting, and saves explicit title intent", async () => {
+    snapshot.slots[0].title = "Imported\nTitle";
+    const user = userEvent.setup();
+    render(<App />);
+    const title = (await screen.findByRole("textbox", {
+      name: "Title",
+    })) as HTMLTextAreaElement;
+    expect(title.tagName).toBe("TEXTAREA");
+    expect(title.value).toBe("Imported\nTitle");
+    expect(title.rows).toBe(2);
+    await user.type(title, "{Enter}Third{Enter}Fourth");
+    expect(title.value).toBe("Imported\nTitle\nThird\nFourth");
+    expect(title.rows).toBe(3);
+    expect(request.mock.calls.some(([method]) => method === "command")).toBe(
+      false,
+    );
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() =>
+      expect(request).toHaveBeenCalledWith("command", {
+        command: "appearance",
+        context: "counter-1",
+        expected_state: 0,
+        state: 0,
+        title: "Imported\nTitle\nThird\nFourth",
+      }),
+    );
+    expect(
+      request.mock.calls.some(([, payload]) => payload?.command === "settings"),
+    ).toBe(false);
+  });
+
   it("opens the clicked control's edit menu with right-click and keyboard context keys", async () => {
     snapshot.slots.push({
       ...structuredClone(slot),
@@ -443,7 +474,7 @@ describe("desktop interactions", () => {
                 raw: {},
                 dirty: true,
                 revision: 1,
-                source: "old",
+                source: JSON.stringify([slot.settings, slot.title, slot.raw]),
               },
             },
             selected: { controller: "Keypad", index: 0 },

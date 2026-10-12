@@ -7,6 +7,9 @@ import {
   editDraft,
   finishSave,
   saveRequests,
+  editAppearance,
+  hasAppearanceEdits,
+  sourceOf,
   isContainer,
   STACK,
   type Action,
@@ -20,6 +23,7 @@ import { Field, Check, SettingsFields } from "./Fields";
 import { Sequence } from "./Sequence";
 import { AudioMixer } from "./Mixer";
 import { ActionEdit, isEditingTarget } from "./ActionEdit";
+import { AppearanceEditor } from "./Appearance";
 import { Modal, Plugins, Preferences } from "./Panels";
 import {
   exportTextDrafts,
@@ -219,6 +223,12 @@ export default function App() {
       ),
     }));
   }
+  const appearanceStale =
+    !!slot &&
+    !!draft &&
+    hasAppearanceEdits(draft) &&
+    draft.appearanceExpectedState !== undefined &&
+    draft.appearanceExpectedState !== slot.state;
   async function save() {
     if (
       !slot ||
@@ -230,6 +240,14 @@ export default function App() {
       !form.current?.reportValidity()
     )
       return;
+    if (appearanceStale) {
+      onError(
+        new Error(
+          "The action state changed. Refresh the appearance state and preview before saving.",
+        ),
+      );
+      return;
+    }
     if (hasTextDrafts(slot.context)) {
       onError(
         new Error(
@@ -986,71 +1004,70 @@ export default function App() {
                     disabled={readonly || saving || editBusy}
                     className="inspector-fields"
                   >
-                    <div className="appearance">
-                      <div className="selected-art">
-                        {slot.preview ? (
-                          <img
-                            alt="Selected control preview"
-                            src={
-                              slot.preview.startsWith("data:")
-                                ? slot.preview
-                                : `data:image/png;base64,${slot.preview}`
-                            }
-                          />
-                        ) : (
-                          <ActionIcon action={action} />
-                        )}
-                      </div>
-                      <div className="appearance-fields">
-                        <Field
-                          label="Title"
-                          hint={
-                            action?.user_title_enabled === false
-                              ? "Updated live by this action."
-                              : undefined
-                          }
-                        >
-                          <input
-                            disabled={action?.user_title_enabled === false}
-                            value={
-                              action?.user_title_enabled === false
-                                ? slot.title
-                                : draft.title
-                            }
-                            onChange={(e) => change({ title: e.target.value })}
-                          />
-                        </Field>
-                        <Check
-                          label="Pin on every page"
-                          checked={slot.pinned}
-                          onChange={(pinned) =>
-                            run({
-                              command: "slot_pin",
-                              context: slot.context,
-                              pinned,
-                            })
-                          }
-                        />
-                      </div>
-                    </div>
+                    <AppearanceEditor
+                      key={`appearance:${slot.context}`}
+                      slot={slot}
+                      draft={draft}
+                      userTitleEnabled={action?.user_title_enabled !== false}
+                      fallback={<ActionIcon action={action} />}
+                      onError={onError}
+                      onEdit={(state, patch, base) =>
+                        setDrafts((previous) => ({
+                          ...previous,
+                          [slot.context]: editAppearance(
+                            previous[slot.context] ??
+                              reconcileDraft(undefined, slot),
+                            slot,
+                            state,
+                            patch,
+                            base,
+                          ),
+                        }))
+                      }
+                      onSelectState={(state) =>
+                        setDrafts((previous) => ({
+                          ...previous,
+                          [slot.context]: {
+                            ...previous[slot.context],
+                            appearanceState: state,
+                          },
+                        }))
+                      }
+                      onRefreshState={() =>
+                        setDrafts((previous) => ({
+                          ...previous,
+                          [slot.context]: {
+                            ...previous[slot.context],
+                            appearanceExpectedState: slot.state,
+                            revision: previous[slot.context].revision + 1,
+                          },
+                        }))
+                      }
+                    >
+                      <Check
+                        label="Pin on every page"
+                        checked={slot.pinned}
+                        onChange={(pinned) =>
+                          run({
+                            command: "slot_pin",
+                            context: slot.context,
+                            pinned,
+                          })
+                        }
+                      />
+                    </AppearanceEditor>
                     {slot.available === false && (
                       <p className="warning">
                         This action's plugin is unavailable. Its settings are
                         preserved; install or restart the plugin to use it.
                       </p>
                     )}
-                    {draft.dirty &&
-                      draft.source !==
-                        JSON.stringify([
-                          slot.settings,
-                          slot.title,
-                          slot.raw,
-                        ]) && (
-                        <p className="warning">
-                          The plugin changed this action while you were editing.
-                          Your draft is kept; saving applies your changes.
-                        </p>
-                      )}
+                    {draft.dirty && draft.source !== sourceOf(slot) && (
+                      <p className="warning">
+                        The plugin changed this action while you were editing.
+                        Your draft is kept; saving applies your changes.
+                      </p>
+                    )}
                     {isContainer(slot.uuid) ? (
                       <Sequence
                         mixer={snapshot.mixer?.config}
@@ -1088,6 +1105,8 @@ export default function App() {
                           !draft.dirty ||
                           readonly ||
                           saving ||
+                          editBusy ||
+                          appearanceStale ||
                           hasTextDrafts(slot.context)
                         }
                       >

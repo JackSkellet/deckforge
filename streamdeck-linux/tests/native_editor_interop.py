@@ -43,11 +43,11 @@ const until=async fn=>{for(let i=0;i<100;i++){const value=await fn();if(value)re
 const title='Unsaved across native close';const bridge=window.deckforge;
 const state=await bridge.request('ui_state_get');
 const previous=Object.values(state?.drafts||{}).find(d=>d.title===title&&d.dirty);
-const field=()=>[...document.querySelectorAll('label.field')].find(label=>label.querySelector('span')?.textContent==='Title')?.querySelector('input');
+const field=()=>[...document.querySelectorAll('label.field')].find(label=>label.querySelector('span')?.textContent==='Title')?.querySelector('input,textarea');
 if(previous){const input=await until(()=>field());if(input.value!==title)throw Error('React did not restore the retained Rust draft');return {phase:'restored',title:input.value,dirty:true};}
 await bridge.request('command',{command:'assign',controller:'Keypad',index:0,uuid:'com.elgato.streamdeck.page.next'});
 const input=await until(()=>field());
-Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(input,title);
+Object.getOwnPropertyDescriptor(input.tagName==='TEXTAREA'?HTMLTextAreaElement.prototype:HTMLInputElement.prototype,'value').set.call(input,title);
 input.dispatchEvent(new Event('input',{bubbles:true}));input.dispatchEvent(new Event('change',{bubbles:true}));
 await until(async()=>Object.values((await bridge.request('ui_state_get'))?.drafts||{}).some(d=>d.title===title&&d.dirty));
 return {phase:'edited',title:input.value,dirty:true};
@@ -75,7 +75,7 @@ await bridge.request('command',{command:'mixer_config',settings:config,expected:
 if(!document.querySelector('.audio-mixer'))[...document.querySelectorAll('button')].find(b=>b.textContent.trim()==='Audio mixer').click();
 const input=await until(()=>gain('Music','Monitor'));
 if(input.value!=='55')throw Error('Routing matrix did not load bridge config');
-const enabled=[...document.querySelectorAll('.audio-mixer label')].find(label=>label.textContent.includes('Enable audio routing'))?.querySelector('input');
+const enabled=[...document.querySelectorAll('.audio-mixer label')].find(label=>label.textContent.includes('Enable audio routing'))?.querySelector('input,textarea');
 if(!enabled||enabled.checked)throw Error('Routing must remain disabled');
 const set=(input,value)=>{Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(input,String(value));input.dispatchEvent(new Event('input',{bubbles:true}));input.dispatchEvent(new Event('change',{bubbles:true}));};
 set(input,62);

@@ -18,7 +18,31 @@ export interface Action {
   icon_generation?: number;
   tooltip?: string;
 }
+export interface TitleParameters extends RecordValue {
+  fontFamily?: string;
+  fontSize?: number;
+  fontStyle?: "Regular" | "Bold" | "Italic" | "Bold Italic" | "";
+  fontUnderline?: boolean;
+  showTitle?: boolean;
+  titleAlignment?: "top" | "middle" | "bottom";
+  titleColor?: string;
+}
+export interface AppearanceInfo {
+  title_parameters: TitleParameters;
+  title_custom: boolean;
+  image_custom: boolean;
+  title?: string;
+}
+export interface AppearanceEdit {
+  title?: string;
+  reset_title?: boolean;
+  title_parameters?: TitleParameters;
+  image_path?: string | null;
+  reset_image?: boolean;
+}
 export interface Slot {
+  appearance?: AppearanceInfo;
+  state_count?: number;
   context: string;
   uuid: string;
   name: string;
@@ -88,13 +112,71 @@ export interface Draft {
   dirty: boolean;
   revision: number;
   source: string;
+  baseState?: number;
+  settingsEdited?: boolean;
+  rawEdited?: boolean;
+  titleEdited?: boolean;
+  appearanceState?: number;
+  appearanceExpectedState?: number;
+  appearanceEdits?: Record<string, AppearanceEdit>;
+  appearanceBases?: Record<string, AppearanceInfo>;
 }
 export const clone = <T>(value: T): T => structuredClone(value);
 export const sourceOf = (slot: Slot) =>
-  JSON.stringify([slot.settings, slot.title, slot.raw]);
-export function reconcileDraft(existing: Draft | undefined, slot: Slot): Draft {
-  if (existing && (existing.dirty || existing.source === sourceOf(slot)))
+  JSON.stringify([
+    slot.settings,
+    slot.title,
+    slot.raw,
+    slot.state,
+    slot.appearance,
+  ]);
+function migrateDraft(existing: Draft, slot: Slot): Draft {
+  if (
+    existing.settingsEdited !== undefined &&
+    existing.titleEdited !== undefined &&
+    existing.rawEdited !== undefined
+  )
     return existing;
+  // Migration compares the old captured baseline, never the plugin's current title.
+  let baseline: any[] = [];
+  try {
+    baseline = JSON.parse(existing.source);
+  } catch {
+    /* Legacy malformed source is kept as a settings draft. */
+  }
+  const titleEdited =
+    existing.titleEdited ??
+    (existing.dirty &&
+      typeof baseline[1] === "string" &&
+      existing.title !== baseline[1]);
+  const target = existing.appearanceState ?? existing.baseState ?? slot.state;
+  return {
+    ...existing,
+    baseState: existing.baseState ?? slot.state,
+    titleEdited,
+    settingsEdited:
+      existing.settingsEdited ??
+      (existing.dirty &&
+        (baseline[0] === undefined ||
+          JSON.stringify(existing.settings) !== JSON.stringify(baseline[0]))),
+    rawEdited:
+      existing.rawEdited ??
+      (existing.dirty &&
+        baseline[2] !== undefined &&
+        JSON.stringify(existing.raw) !== JSON.stringify(baseline[2])),
+    appearanceEdits:
+      existing.appearanceEdits ??
+      (titleEdited ? { [target]: { title: existing.title } } : {}),
+    appearanceExpectedState:
+      existing.appearanceExpectedState ??
+      (titleEdited ? slot.state : undefined),
+  };
+}
+export function reconcileDraft(existing: Draft | undefined, slot: Slot): Draft {
+  if (existing) {
+    existing = migrateDraft(existing, slot);
+    if (existing.dirty || existing.source === sourceOf(slot)) return existing;
+  }
   return {
     settings: clone(slot.settings),
     title: slot.title,
@@ -102,17 +184,94 @@ export function reconcileDraft(existing: Draft | undefined, slot: Slot): Draft {
     dirty: false,
     revision: existing?.revision ?? 0,
     source: sourceOf(slot),
+    baseState: slot.state,
+    settingsEdited: false,
+    rawEdited: false,
+    titleEdited: false,
+    appearanceEdits: {},
+    appearanceBases: {},
+    appearanceState: existing?.appearanceState,
   };
 }
 export function editDraft(draft: Draft, patch: Partial<Draft>): Draft {
-  return { ...draft, ...patch, dirty: true, revision: draft.revision + 1 };
+  let next = { ...draft, ...patch, dirty: true, revision: draft.revision + 1 };
+  if (Object.hasOwn(patch, "settings")) next.settingsEdited = true;
+  if (Object.hasOwn(patch, "raw")) next.rawEdited = true;
+  if (Object.hasOwn(patch, "title")) {
+    const state = draft.appearanceState ?? draft.baseState ?? 0;
+    const edits = { ...draft.appearanceEdits?.[state], title: patch.title };
+    delete edits.reset_title;
+    next = {
+      ...next,
+      titleEdited: true,
+      appearanceState: state,
+      appearanceExpectedState:
+        draft.appearanceExpectedState ?? draft.baseState ?? 0,
+      appearanceEdits: { ...draft.appearanceEdits, [state]: edits },
+    };
+  }
+  return next;
+}
+export function editAppearance(
+  draft: Draft,
+  slot: Slot,
+  state: number,
+  patch: AppearanceEdit,
+  base: AppearanceInfo,
+): Draft {
+  const edits = { ...draft.appearanceEdits?.[state], ...patch };
+  if (patch.title_parameters)
+    edits.title_parameters = {
+      ...draft.appearanceEdits?.[state]?.title_parameters,
+      ...patch.title_parameters,
+    };
+  if (Object.hasOwn(patch, "title")) delete edits.reset_title;
+  if (patch.reset_title) delete edits.title;
+  if (Object.hasOwn(patch, "image_path")) delete edits.reset_image;
+  if (patch.reset_image) delete edits.image_path;
+  return {
+    ...draft,
+    dirty: true,
+    revision: draft.revision + 1,
+    appearanceState: state,
+    titleEdited:
+      draft.titleEdited || Object.hasOwn(patch, "title") || !!patch.reset_title,
+    title: patch.title ?? draft.title,
+    appearanceExpectedState: draft.appearanceExpectedState ?? slot.state,
+    appearanceEdits: { ...draft.appearanceEdits, [state]: edits },
+    appearanceBases: {
+      ...draft.appearanceBases,
+      [state]: draft.appearanceBases?.[state] ?? clone(base),
+    },
+  };
+}
+export function hasAppearanceEdits(draft: Draft) {
+  return Object.keys(draft.appearanceEdits ?? {}).length > 0;
+}
+export function appearancePatch(
+  draft: Draft,
+  state: number,
+  userTitleEnabled = true,
+): AppearanceEdit {
+  const patch = clone(draft.appearanceEdits?.[state] ?? {});
+  if (!userTitleEnabled) {
+    delete patch.title;
+    delete patch.reset_title;
+  }
+  return patch;
 }
 export function finishSave(current: Draft, saved: Draft): Draft {
   return current.revision === saved.revision
     ? {
         ...current,
         dirty: false,
-        source: JSON.stringify([saved.settings, saved.title, saved.raw]),
+        settingsEdited: false,
+        rawEdited: false,
+        titleEdited: false,
+        appearanceEdits: {},
+        appearanceBases: {},
+        appearanceExpectedState: undefined,
+        source: "",
       }
     : current;
 }
@@ -195,27 +354,36 @@ export function saveRequests(
   draft: Draft,
   userTitleEnabled = true,
 ): RecordValue[] {
-  const appearance = userTitleEnabled
-    ? [{ command: "appearance", context: slot.context, title: draft.title }]
-    : [];
-  if (isContainer(slot.uuid))
-    return [
-      {
-        command:
-          slot.uuid === STACK
-            ? "stack_save"
-            : slot.uuid === TRIGGER
-              ? "trigger_save"
-              : "multi_save",
+  const requests: RecordValue[] = [];
+  for (const state of Object.keys(draft.appearanceEdits ?? {})) {
+    const patch = appearancePatch(draft, Number(state), userTitleEnabled);
+    if (Object.keys(patch).length)
+      requests.push({
+        command: "appearance",
         context: slot.context,
-        raw: draft.raw,
-      },
-      ...appearance,
-    ];
-  return [
-    { command: "settings", context: slot.context, settings: draft.settings },
-    ...appearance,
-  ];
+        expected_state: draft.appearanceExpectedState ?? slot.state,
+        state: Number(state),
+        ...patch,
+      });
+  }
+  if (isContainer(slot.uuid) && draft.rawEdited)
+    requests.push({
+      command:
+        slot.uuid === STACK
+          ? "stack_save"
+          : slot.uuid === TRIGGER
+            ? "trigger_save"
+            : "multi_save",
+      context: slot.context,
+      raw: draft.raw,
+    });
+  else if (!isContainer(slot.uuid) && draft.settingsEdited)
+    requests.push({
+      command: "settings",
+      context: slot.context,
+      settings: draft.settings,
+    });
+  return requests;
 }
 export function filteredActions(
   actions: Action[],

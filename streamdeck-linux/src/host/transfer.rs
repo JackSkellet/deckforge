@@ -328,6 +328,11 @@ impl Host {
                     paths.push(origin.source.as_path());
                 }
                 for slot in page.slots.iter().flat_map(Slot::flatten) {
+                    paths.extend(
+                        slot.appearances
+                            .values()
+                            .filter_map(|a| a.user_image.as_deref()),
+                    );
                     if let Some(origin) = &slot.asset_source {
                         paths.push(origin.source.as_path());
                     }
@@ -340,6 +345,11 @@ impl Host {
                     .iter()
                     .flat_map(|p| p.slots.iter().flat_map(Slot::flatten)),
             ) {
+                paths.extend(
+                    slot.appearances
+                        .values()
+                        .filter_map(|a| a.user_image.as_deref()),
+                );
                 if let Some(origin) = &slot.asset_source {
                     paths.push(origin.source.as_path());
                 }

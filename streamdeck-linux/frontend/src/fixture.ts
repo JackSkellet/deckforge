@@ -127,6 +127,20 @@ function assigned(
     available: true,
     preview: icon(title, mark),
     state: 0,
+    state_count: 1,
+    appearance: {
+      title_parameters: {
+        fontFamily: "",
+        fontSize: 12,
+        fontStyle: "Regular",
+        fontUnderline: false,
+        showTitle: true,
+        titleAlignment: "bottom",
+        titleColor: "#ffffff",
+      },
+      title_custom: false,
+      image_custom: false,
+    },
     raw: { ActionID: `fixture-${index}`, UUID: id, Settings: {}, Actions: [] },
     has_inspector: !id.includes("system"),
     multi_running: false,
@@ -343,6 +357,11 @@ export function installFixture() {
         return null as T;
       }
       if (method === "action_icon") return null as T;
+      if (method === "fonts") return [] as T;
+      if (method === "appearance_preview")
+        throw new Error(
+          "Use the native desktop app for Rust-rendered appearance previews. The synthetic fixture does not render fonts or icons.",
+        );
       if (method === "startup_status" || method === "startup_set")
         return { enabled: payload?.enabled ?? false, this_session: true } as T;
       if (method === "pick_file") return null as T;
@@ -411,8 +430,32 @@ export function installFixture() {
         const slot = snapshot.slots.find((s) => s.context === payload.context);
         if (payload.command === "settings" && slot)
           slot.settings = payload.settings;
-        if (payload.command === "appearance" && slot)
-          slot.title = payload.title;
+        if (payload.command === "appearance" && slot) {
+          if (
+            payload.expected_state !== undefined &&
+            payload.expected_state !== slot.state
+          )
+            throw new Error("Action state changed");
+          if (payload.state !== undefined && payload.state !== slot.state)
+            throw new Error(
+              "The synthetic fixture only models its current appearance state",
+            );
+          if (payload.title !== undefined) {
+            slot.title = payload.title;
+            slot.appearance!.title_custom = !!payload.title;
+          }
+          if (payload.reset_title) {
+            slot.title = slot.name;
+            slot.appearance!.title_custom = false;
+          }
+          if (payload.title_parameters)
+            slot.appearance!.title_parameters = {
+              ...slot.appearance!.title_parameters,
+              ...payload.title_parameters,
+            };
+          if (payload.image_path) slot.appearance!.image_custom = true;
+          if (payload.reset_image) slot.appearance!.image_custom = false;
+        }
         if (payload.command === "assign") {
           snapshot.slots = snapshot.slots.filter(
             (s) =>

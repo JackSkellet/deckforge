@@ -503,15 +503,45 @@ fn export_action_at(
         if !states[state].is_object() {
             states[state] = json!({});
         }
-        if native || slot.title_changed {
+        if slot.title_changed
+            || (native
+                && !slot
+                    .appearances
+                    .get(&(state as u64))
+                    .is_some_and(|a| a.plugin_title.is_some() && a.user_title.is_none()))
+        {
             states[state]["Title"] = json!(slot.title);
         }
+    }
+    if let Some(last) = slot.appearances.keys().next_back() {
+        ensure!(*last < 1024, "Appearance state exceeds export limit");
+        states.resize_with(states.len().max(*last as usize + 1), || json!({}));
     }
     for (index, metadata) in states.iter_mut().enumerate() {
         if !metadata.is_object() {
             continue;
         }
-        if slot.image_changed && index == state {
+        let appearance = slot.appearances.get(&(index as u64));
+        if let Some(title) = appearance.and_then(|a| a.user_title.as_ref()) {
+            metadata["Title"] = json!(title);
+        }
+        if appearance.is_some_and(|a| a.title_reset && a.user_title.is_none()) {
+            metadata.as_object_mut().unwrap().remove("Title");
+        }
+        if appearance.is_some_and(|a| a.image_reset && a.user_image.is_none()) {
+            metadata.as_object_mut().unwrap().remove("Image");
+            continue;
+        }
+        if let Some(path) = appearance.and_then(|a| a.user_image.as_ref()) {
+            let (name, bytes) = crate::resources::read_regular(path)?;
+            let extension = Path::new(&name)
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("bin");
+            let relative = format!("Images/custom-{}-{index}.{extension}", slot.context);
+            insert_unique(files, format!("{page_root}{relative}"), bytes)?;
+            metadata["Image"] = json!(relative);
+        } else if slot.image_changed && index == state {
             if let Some(background) = &slot.background {
                 embed_png(background, metadata, page_root, files)?;
             } else {
@@ -549,6 +579,7 @@ fn export_action_at(
             // Only a new native assignment may fall back to rendered pixels;
             // existing imported animated/vector assets are never flattened.
             if index == state
+                && appearance.is_none_or(|a| a.plugin_pixels.is_none())
                 && let Some(background) = &slot.background
             {
                 embed_png(background, metadata, page_root, files)?;
@@ -556,6 +587,7 @@ fn export_action_at(
         } else if native
             && index == state
             && metadata.get("Image").is_none()
+            && appearance.is_none_or(|a| a.plugin_pixels.is_none())
             && let Some(background) = &slot.background
         {
             embed_png(background, metadata, page_root, files)?;
