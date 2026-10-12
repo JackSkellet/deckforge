@@ -8,6 +8,42 @@ declare global {
     deckforge?: DesktopBridge;
   }
 }
+
+// The native worker queue is bounded. Loading every library icon at once can
+// crowd out startup/draft requests; keep only four icon reads in flight.
+const iconQueues = new WeakMap<DesktopBridge, ReturnType<typeof iconQueue>>();
+function iconQueue(bridge: DesktopBridge) {
+  let active = 0;
+  const waiting: Array<() => void> = [];
+  const pending = new Map<string, Promise<unknown>>();
+  const drain = () => {
+    while (active < 4 && waiting.length) waiting.shift()!();
+  };
+  return (payload: unknown): Promise<unknown> => {
+    const key = JSON.stringify(payload ?? {});
+    const existing = pending.get(key);
+    if (existing) return existing;
+    const result = new Promise((resolve, reject) => {
+      waiting.push(() => {
+        active++;
+        void (async () => {
+          try {
+            resolve(await bridge.request("action_icon", payload));
+          } catch (error) {
+            reject(error);
+          } finally {
+            pending.delete(key);
+            active--;
+            drain();
+          }
+        })();
+      });
+    });
+    pending.set(key, result);
+    drain();
+    return result;
+  };
+}
 export function request<T = any>(
   method: string,
   payload?: unknown,
@@ -18,6 +54,14 @@ export function request<T = any>(
         "Open Deckforge from the installed desktop application. The native connection is unavailable.",
       ),
     );
+  if (method === "action_icon") {
+    let queue = iconQueues.get(window.deckforge);
+    if (!queue) {
+      queue = iconQueue(window.deckforge);
+      iconQueues.set(window.deckforge, queue);
+    }
+    return queue(payload) as Promise<T>;
+  }
   return window.deckforge.request<T>(method, payload);
 }
 export const command = (payload: RecordValue, capturedDevice?: string) =>

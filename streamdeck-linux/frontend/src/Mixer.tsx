@@ -1356,7 +1356,7 @@ export function AudioMixer({
                   <div className="mixer-create-results">
                     {createSources.length > 0 && (
                       <>
-                        <h4>Input devices</h4>
+                        <h4>Microphones &amp; audio inputs</h4>
                         {createSources.slice(0, 20).map((source) => (
                           <button
                             type="button"
