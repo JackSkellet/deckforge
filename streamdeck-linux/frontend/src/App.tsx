@@ -1675,7 +1675,12 @@ export default function App() {
           {panel === "mixer" ? (
             <AudioMixer snapshot={snapshot.mixer} run={run} error={error} />
           ) : panel === "plugins" ? (
-            <Plugins snapshot={snapshot} run={run} onError={onError} />
+            <Plugins
+              snapshot={snapshot}
+              run={run}
+              onError={onError}
+              error={error}
+            />
           ) : panel === "preferences" ? (
             <Preferences
               key={`${snapshot.device}:${snapshot.device_model}`}

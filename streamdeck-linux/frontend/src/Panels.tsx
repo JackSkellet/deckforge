@@ -3,6 +3,7 @@ import { request, pick } from "./bridge";
 import { Field, Check, SelectField } from "./Fields";
 import type { Snapshot, RecordValue } from "./model";
 import { getFormDraft, setFormDraft } from "./transient";
+import { PluginApplications } from "./PluginApplications";
 import { deviceName } from "./device";
 export type Run = (payload: RecordValue) => Promise<boolean>;
 export function Modal({
@@ -53,10 +54,12 @@ export function Plugins({
   snapshot,
   run,
   onError,
+  error = "",
 }: {
   snapshot: Snapshot;
   run: Run;
   onError: (e: unknown) => void;
+  error?: string;
 }) {
   const saved = getFormDraft("plugins") ?? {};
   const [path, setPath] = useState(saved.path ?? "");
@@ -82,6 +85,16 @@ export function Plugins({
         Install a Stream Deck package or a plugin folder. Actions appear in the
         library when the plugin loads.
       </p>
+      {error && (
+        <p className="error" role="alert">
+          {error}
+        </p>
+      )}
+      {snapshot.application_monitor?.error && (
+        <p className="warning" role="status">
+          Application monitoring: {snapshot.application_monitor.error}
+        </p>
+      )}
       <div className="plugin-install">
         <Field label="Plugin package or folder">
           <input
@@ -134,6 +147,14 @@ export function Plugins({
               <p role="status" className="error">
                 {p.error}
               </p>
+            )}
+            {Array.isArray(p.applications) && p.applications.length > 0 && (
+              <PluginApplications
+                id={p.id}
+                applications={p.applications}
+                mappings={p.application_mappings ?? {}}
+                run={run}
+              />
             )}
             <details>
               <summary>Runtime details</summary>

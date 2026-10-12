@@ -93,6 +93,7 @@ export interface DeviceRecord {
   online?: boolean;
 }
 export interface Snapshot {
+  application_monitor?: { enabled: boolean; error: string | null };
   devices?: DeviceRecord[];
   page_navigation?: { previous: boolean; next: boolean };
   device_model?: string;

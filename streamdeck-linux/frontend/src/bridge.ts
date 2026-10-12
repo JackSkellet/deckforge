@@ -30,6 +30,7 @@ const globalCommands = new Set([
   "device_add",
   "install_plugin",
   "restart_plugin",
+  "plugin_applications",
   "reference_app",
   "mixer_refresh",
   "mixer_config",

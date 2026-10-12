@@ -2420,3 +2420,26 @@ dialog.mixer-dialog {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+.plugin-applications {
+  margin-top: 12px;
+  border-top: 1px solid #34434c;
+  padding-top: 10px;
+}
+.plugin-application {
+  display: grid;
+  gap: 6px;
+  margin: 12px 0;
+}
+.plugin-application-identity {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.plugin-application-identity code {
+  overflow-wrap: anywhere;
+}
+.plugin-application-identity small {
+  color: #9eb4c0;
+}

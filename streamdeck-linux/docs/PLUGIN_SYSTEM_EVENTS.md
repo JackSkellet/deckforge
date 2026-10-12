@@ -39,4 +39,5 @@ an idle plugin, ordering and stable settings, contexts, selection and process ID
 These checks do not suspend the user's computer. Physical suspend/resume
 acceptance remains unverified.
 
-Application monitoring and localization remain separate compatibility work.
+See [application monitoring](PLUGIN_APPLICATIONS.md) for launch and quit events.
+Plugin localization remains separate compatibility work.

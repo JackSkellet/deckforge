@@ -102,6 +102,13 @@ crashing plugins. Missing or malformed plugin folders stay in the session so the
 can be repaired and retried. Windows-only executables still require a compatible
 runtime or Linux port; restarting does not make them supported.
 
+Plugins that monitor application launches can use **Monitored applications** to
+map their Windows or macOS identifiers to Linux executable names or paths.
+Mappings are explicit and saved per plugin. See
+[application monitoring](docs/PLUGIN_APPLICATIONS.md) for matching and event
+behavior. [System-resume events](docs/PLUGIN_SYSTEM_EVENTS.md) replay visible
+actions and notify plugins after logind reports sleep completion.
+
 The tray uses Linux StatusNotifierItem. If your desktop has no tray, reopening
 the launcher still restores the editor through a private local socket. This
 works by closing and recreating the actual native window, including on Wayland.

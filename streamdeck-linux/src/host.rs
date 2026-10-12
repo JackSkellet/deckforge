@@ -33,6 +33,7 @@ use std::{
 use tokio::sync::mpsc;
 
 mod appearance;
+mod applications;
 mod audio;
 mod brightness;
 mod children;
@@ -328,6 +329,8 @@ mod image_serde {
 #[derive(Serialize, Deserialize, Default)]
 struct Saved {
     #[serde(default)]
+    application_mappings: applications::Mappings,
+    #[serde(default)]
     devices: Vec<device_pool::Record>,
     #[serde(default)]
     active_scope: Option<String>,
@@ -359,6 +362,10 @@ enum HeldControl {
     Dial(u8),
 }
 struct Host {
+    application_mappings: applications::Mappings,
+    application_monitor: Option<crate::application_monitor::Worker>,
+    application_delivered: HashMap<String, applications::Delivered>,
+    application_error: Option<String>,
     pending_links: VecDeque<links::Pending>,
     registry_routes: HashMap<crate::device_registry::Key, String>,
     registry_commands: Option<std::sync::mpsc::Sender<crate::device_registry::Command>>,
@@ -491,6 +498,7 @@ impl Host {
             plugins: Vec<&'a Path>,
             slots: &'a [Slot],
             globals: &'a HashMap<String, Value>,
+            application_mappings: &'a applications::Mappings,
         }
         let data = serde_json::to_vec_pretty(&View {
             devices: self.device_records(),
@@ -506,6 +514,7 @@ impl Host {
             plugins: self.plugins.iter().map(|p| p.root.as_path()).collect(),
             slots: &self.slots,
             globals: &self.globals,
+            application_mappings: &self.application_mappings,
         })?;
         {
             use std::io::Write;
@@ -1607,7 +1616,7 @@ fn snapshot(host: &Host) -> Value {
         "volume":host.volume_state,"volume_error":host.volume_error,"multi_runs":host.multi.snapshot(),"multi_pending":host.multi_pending.len(),"audio_outputs":host.audio_outputs,"audio_active":host.audio_active,"system_status":host.system_status,"slots":host.slots.iter().map(|s|slot_snapshot(host,s)).collect::<Vec<_>>(),
         "reference_app":host.reference_app,"inspectors":host.inspectors.values().map(|i|json!({"context":i.context,"plugin":host.plugins[i.plugin].id,"connected":i.sender.is_some()})).collect::<Vec<_>>(),
         "actions":host.actions.iter().map(|action|action_snapshot(host,action)).collect::<Vec<_>>(),
-        "logs":host.logs,"plugins":host.plugins.iter().map(Plugin::snapshot).collect::<Vec<_>>()})
+        "logs":host.logs,"application_monitor":{"enabled":host.application_monitor.is_some(),"error":host.application_error},"plugins":host.plugins.iter().map(|p|host.plugin_snapshot(p)).collect::<Vec<_>>()})
 }
 async fn dashboard(State(state): State<Shared>) -> Json<Value> {
     Json(snapshot(&state.lock().unwrap()))
@@ -1671,6 +1680,7 @@ fn apply_control(host: &mut Host, r: Value) -> Result<()> {
         command,
         "install_plugin"
             | "system_wake"
+            | "plugin_applications"
             | "restart_plugin"
             | "reference_app"
             | "mixer_config"
@@ -1827,6 +1837,7 @@ fn apply_control_local(host: &mut Host, r: Value) -> Result<()> {
             Ok(())
         }
         "restart_plugin" => host.restart_plugin(r["id"].as_str().context("Plugin id missing")?),
+        "plugin_applications" => host.save_application_mappings(&r),
         "install_plugin" => {
             let state_dir = host
                 .state_path
@@ -2091,6 +2102,8 @@ async fn socket_session(socket: WebSocket, state: Shared) {
             }
             // Callback messages follow registration and visible-action replay.
             host.flush_deep_links(&id);
+            host.application_delivered.remove(&id);
+            host.poll_applications();
             Client::Plugin {
                 index,
                 launch,
@@ -2631,6 +2644,10 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
         actions,
         slots,
         globals: saved.globals,
+        application_mappings: saved.application_mappings,
+        application_monitor: None,
+        application_delivered: HashMap::new(),
+        application_error: None,
         renderer: Renderer::new()?,
         hardware: None,
         device,
@@ -2890,6 +2907,7 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
             host.poll_system_actions();
             host.poll_session();
             host.poll_system_resume();
+            host.poll_applications();
             host.poll_audio();
             host.poll_volume();
             host.poll_mixer();
@@ -3165,6 +3183,10 @@ mod tests {
                 preview: String::new(),
             }],
             globals: HashMap::new(),
+            application_mappings: HashMap::new(),
+            application_monitor: None,
+            application_delivered: HashMap::new(),
+            application_error: None,
             renderer: Renderer::new().unwrap(),
             hardware: None,
             device: "test-device".into(),
