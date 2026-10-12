@@ -40,6 +40,68 @@ pub struct Deck {
     input: InputState,
 }
 
+/// Prefer a descriptor match; only probe descriptor-less devices when needed to
+/// identify a requested serial. Probes read serial metadata, never images/input.
+fn select_candidate<T>(
+    requested: Option<&str>,
+    serials: &[Option<&str>],
+    mut open: impl FnMut(usize) -> Result<(String, T)>,
+) -> Result<T> {
+    ensure!(
+        !serials.is_empty(),
+        "no matching Stream Deck + found (USB 0fd9:0084)"
+    );
+    let exact: Vec<_> = serials
+        .iter()
+        .enumerate()
+        .filter(|(_, serial)| requested.is_none_or(|wanted| **serial == Some(wanted)))
+        .map(|(index, _)| index)
+        .collect();
+    ensure!(
+        exact.len() <= 1,
+        "multiple Stream Deck + devices found; select a unique serial number"
+    );
+    if let Some(index) = exact.first() {
+        let (serial, device) = open(*index)?;
+        ensure!(
+            !serial.is_empty() && requested.is_none_or(|wanted| wanted == serial),
+            "device serial does not match selection"
+        );
+        return Ok(device);
+    }
+    let wanted = requested.context("No device selected")?;
+    let mut matched = None;
+    let mut first_error = None;
+    for (index, _) in serials
+        .iter()
+        .enumerate()
+        .filter(|(_, serial)| serial.is_none())
+    {
+        match open(index) {
+            Ok((serial, device)) if serial == wanted => {
+                ensure!(
+                    matched.is_none(),
+                    "multiple Stream Deck + devices have the selected serial"
+                );
+                matched = Some(device);
+            }
+            Ok(_) => {}
+            Err(error) => {
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+            }
+        }
+    }
+    if let Some(device) = matched {
+        return Ok(device);
+    }
+    if let Some(error) = first_error {
+        return Err(error.context("Could not identify a Stream Deck + with the selected serial"));
+    }
+    bail!("no matching Stream Deck + found (USB 0fd9:0084)")
+}
+
 impl Deck {
     pub fn enumerate() -> Result<Vec<DeviceInfo>> {
         let api = HidApi::new().context("initialize HID enumeration")?;
@@ -48,7 +110,10 @@ impl Deck {
             .filter(|d| d.vendor_id() == VENDOR && d.product_id() == PRODUCT)
             .map(|d| DeviceInfo {
                 path: d.path().to_string_lossy().into_owned(),
-                serial: d.serial_number().map(str::to_owned),
+                serial: d
+                    .serial_number()
+                    .filter(|serial| !serial.is_empty())
+                    .map(str::to_owned),
                 product: d.product_string().map(str::to_owned),
             })
             .collect())
@@ -60,36 +125,38 @@ impl Deck {
         let devices: Vec<_> = api
             .device_list()
             .filter(|d| d.vendor_id() == VENDOR && d.product_id() == PRODUCT)
-            .filter(|d| serial.is_none_or(|s| d.serial_number() == Some(s)))
             .collect();
-        ensure!(
-            !devices.is_empty(),
-            "no matching Stream Deck + found (USB 0fd9:0084)"
-        );
-        ensure!(
-            devices.len() == 1,
-            "multiple Stream Deck + devices found; select a serial number"
-        );
-        let info = devices[0];
-        let device = info
-            .open_device(&api)
-            .context("open Stream Deck +; check hidraw permissions")?;
-        let serial = match info.serial_number() {
-            Some(s) => s.to_owned(),
-            None => {
-                let mut report = [0u8; 32];
-                report[0] = 0x06;
-                let size = device.get_feature_report(&mut report)?;
-                ensure!(size >= 2 && report[0] == 0x06, "invalid serial response");
-                let len = usize::from(report[1]);
-                ensure!(len > 0 && len <= size - 2, "truncated serial response");
-                ascii_string(&report[2..2 + len])?
-            }
-        };
-        Ok(Self {
-            device,
-            serial,
-            input: InputState::default(),
+        let serials: Vec<_> = devices
+            .iter()
+            .map(|d| d.serial_number().filter(|s| !s.is_empty()))
+            .collect();
+        select_candidate(serial, &serials, |index| {
+            let info = devices[index];
+            let device = info
+                .open_device(&api)
+                .context("open Stream Deck +; check hidraw permissions")?;
+            let serial = match serials[index] {
+                Some(serial) => serial.to_owned(),
+                None => {
+                    let mut report = [0u8; 32];
+                    report[0] = 0x06;
+                    let size = device
+                        .get_feature_report(&mut report)
+                        .context("read Stream Deck + serial")?;
+                    ensure!(size >= 2 && report[0] == 0x06, "invalid serial response");
+                    let len = usize::from(report[1]);
+                    ensure!(len > 0 && len <= size - 2, "truncated serial response");
+                    ascii_string(&report[2..2 + len])?
+                }
+            };
+            Ok((
+                serial.clone(),
+                Self {
+                    device,
+                    serial,
+                    input: InputState::default(),
+                },
+            ))
         })
     }
 
@@ -307,6 +374,61 @@ fn touch_position(data: &[u8], offset: usize) -> Result<(u16, u16)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn descriptor_missing_serial_can_be_selected_after_first_connection() {
+        let serials = [None];
+        let first =
+            select_candidate(None, &serials, |_| Ok(("feature-serial".into(), "opened"))).unwrap();
+        assert_eq!(first, "opened");
+        let reconnected = select_candidate(Some("feature-serial"), &serials, |_| {
+            Ok(("feature-serial".into(), "reopened"))
+        })
+        .unwrap();
+        assert_eq!(reconnected, "reopened");
+        assert!(
+            select_candidate(Some("different"), &serials, |_| Ok((
+                "feature-serial".into(),
+                ()
+            )))
+            .is_err()
+        );
+    }
+    #[test]
+    fn exact_descriptor_match_does_not_probe_unrelated_devices() {
+        let found = select_candidate(
+            Some("wanted"),
+            &[Some("other"), Some("wanted"), None],
+            |index| {
+                assert_eq!(index, 1);
+                Ok(("wanted".into(), 17))
+            },
+        )
+        .unwrap();
+        assert_eq!(found, 17);
+        let found = select_candidate(Some("wanted"), &[Some("other"), None], |index| {
+            assert_eq!(index, 1);
+            Ok(("wanted".into(), 19))
+        })
+        .unwrap();
+        assert_eq!(found, 19);
+    }
+    #[test]
+    fn ambiguous_selection_and_unidentified_errors_remain_explicit() {
+        assert!(
+            select_candidate(None, &[None, None], |_| -> Result<(String, ())> {
+                panic!("ambiguous devices must not be opened")
+            })
+            .is_err()
+        );
+        assert!(
+            select_candidate(Some("same"), &[None, None], |_| Ok(("same".into(), ()))).is_err()
+        );
+        let error = select_candidate(Some("wanted"), &[None], |_| -> Result<(String, ())> {
+            bail!("permission denied")
+        })
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("permission denied"));
+    }
 
     fn input(command: u8, data: &[u8]) -> Vec<u8> {
         let mut report = vec![1, command, data.len() as u8, 0];

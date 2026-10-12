@@ -200,6 +200,20 @@ impl Host {
             self.log(format!("Action Trigger: {error:#}"));
         }
     }
+    pub(super) fn disconnect_trigger_buttons(&mut self) {
+        let held: Vec<_> = self
+            .triggers
+            .held
+            .iter()
+            .filter(|(_, (_, owners))| *owners & DIRECT != 0)
+            .map(|((parent, index), _)| (parent.clone(), *index))
+            .collect();
+        for (parent, index) in held {
+            if let Err(error) = self.trigger_edge(&parent, index, DIRECT, false, true) {
+                self.log(format!("Disconnected dial release: {error:#}"));
+            }
+        }
+    }
     pub(super) fn cancel_trigger(&mut self, parent: &str) {
         self.triggers.targets.remove(parent);
         self.triggers.pending.remove(parent);

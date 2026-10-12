@@ -249,6 +249,26 @@ with its Linux Sharp dependencies; this does not establish compatibility with
 Windows-only native plugin binaries. Badge artwork is independently drawn;
 pixel-perfect vendor artwork and new physical feedback acceptance remain open.
 
+## Offline editing and USB recovery
+
+The native editor opens even when the deck is absent or hidraw access fails. It
+keeps profiles, visible actions and plugin processes available, displays the
+connection error, and checks for the selected device every second. The last
+selected serial and firmware are remembered. `--serial YOUR_SERIAL` selects a
+different target; the host never switches to an arbitrary other connected deck.
+
+A lost connection releases held buttons/shortcuts and clears pending physical
+dial gestures. Already-started Multi Actions and timed Action Trigger presses
+continue in the offline editor. Reconnecting the same device sends the SDK
+connection event and restores the latest images without recreating visible action
+instances. A newly identified device is announced before its action events.
+
+Generated SDK tests verify lifecycle and state retention. Fake transport tests
+cover read/write failures and replay of all nine current display images. A gated
+probe also closed and reopened the actual Plus HID handle successfully, with zero
+image writes during that probe. Physical cable removal, USB re-enumeration and
+system suspend/resume remain separate acceptance checks.
+
 ## Commands
 
 ```sh
@@ -313,8 +333,8 @@ completion criterion replaces the desktop parity goal.
    of Action Trigger, text/hotkey-switch actions, application activation, and automatic profile selection.
 4. Native Windows/macOS plugin binaries and platform-specific dependencies.
    These do not become Linux programs simply by reproducing the WebSocket API.
-5. USB reconnect recovery, more device models, plugin supervision, tray/autostart,
-   and broader long-running tests. Restart the host after a USB disconnect.
+5. Physical unplug/re-enumeration and suspend/resume acceptance, more device models,
+   plugin supervision, tray/autostart, and broader long-running tests.
 
 Unsupported messages/options are logged or rejected explicitly. Plugin success and
 warning feedback is visible, and dial trigger descriptions appear in the native editor. `application.version` in plugin
@@ -342,6 +362,7 @@ python tests/volume_interop.py --binary target/release/deckforge
 python tests/trigger_interop.py --binary target/release/deckforge
 python tests/resources_interop.py --binary target/release/deckforge
 python tests/feedback_interop.py --binary target/release/deckforge
+python tests/device_interop.py --binary target/release/deckforge
 # After building the unchanged official Image Resizer fixture:
 python tests/feedback_interop.py --binary target/release/deckforge --official-image-resizer
 ```

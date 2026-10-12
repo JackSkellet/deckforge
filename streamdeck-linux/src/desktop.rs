@@ -211,6 +211,45 @@ fn show_dial_gesture_descriptions(ui: &mut egui::Ui, snapshot: &Value) {
     });
 }
 
+fn connection_label(snapshot: &Value) -> &'static str {
+    if snapshot["simulate"] == true {
+        "Simulation"
+    } else if snapshot["connected"] == true {
+        "USB connected"
+    } else {
+        "Waiting for USB"
+    }
+}
+
+fn device_summary(snapshot: &Value) -> String {
+    let device = string(snapshot, "device").trim();
+    let mut summary = if device.is_empty() || device.eq_ignore_ascii_case("unknown") {
+        "Stream Deck +".to_owned()
+    } else {
+        format!("Device {device}")
+    };
+    let firmware = string(snapshot, "firmware").trim();
+    if snapshot["simulate"] != true
+        && !firmware.is_empty()
+        && !firmware.eq_ignore_ascii_case("unknown")
+        && !firmware.eq_ignore_ascii_case("simulation")
+    {
+        summary.push_str(&format!(
+            "   ·   Firmware {firmware}{}",
+            if snapshot["connected"] == true {
+                ""
+            } else {
+                " (last known)"
+            }
+        ));
+    }
+    summary
+}
+
+fn waiting_for_usb(snapshot: &Value) -> bool {
+    snapshot["simulate"] != true && snapshot["connected"] != true
+}
+
 fn page_label(page: &Value) -> String {
     let name = string(page, "name");
     let name = if name.trim().is_empty() {
@@ -508,32 +547,32 @@ impl Desktop {
             ui.heading("Deckforge");
             ui.label(RichText::new("STREAM DECK +").small().color(Color32::GRAY));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let connected = self.snapshot["connected"].as_bool().unwrap_or(false);
-                let simulated = self.snapshot["simulate"].as_bool().unwrap_or(false);
                 ui.colored_label(
-                    if connected {
+                    if self.snapshot["connected"] == true {
                         ACCENT
                     } else {
                         Color32::LIGHT_GRAY
                     },
-                    if simulated {
-                        "Simulation"
-                    } else if connected {
-                        "USB connected"
-                    } else {
-                        "USB disconnected"
-                    },
+                    connection_label(&self.snapshot),
                 );
             });
         });
-        ui.horizontal(|ui| {
-            ui.small(format!(
-                "Device {}   ·   Firmware {}",
-                string(&self.snapshot, "device"),
-                string(&self.snapshot, "firmware")
-            ));
-        });
-        ui.separator();
+        ui.small(device_summary(&self.snapshot));
+        if waiting_for_usb(&self.snapshot) {
+            ui.weak("Deckforge checks for your Stream Deck every second. You can keep editing.");
+            if let Some(error) = self.snapshot["connection_error"]
+                .as_str()
+                .filter(|text| !text.trim().is_empty())
+            {
+                let summary = error
+                    .lines()
+                    .find(|line| !line.trim().is_empty())
+                    .unwrap_or(error)
+                    .trim();
+                ui.add(egui::Label::new(RichText::new(summary).small()).truncate())
+                    .on_hover_text(error);
+            }
+        }
         let system_status = string(&self.snapshot, "system_status");
         if !system_status.is_empty() {
             ui.label(system_status);
@@ -793,7 +832,7 @@ impl Desktop {
             });
         });
         ui.add_space(8.0);
-        ui.small("The previews show the images sent to the device.");
+        ui.small("Preview your keys and touch strip.");
     }
     fn control_button(&mut self, ui: &mut egui::Ui, selection: Selection, size: Vec2) {
         let slot = self.slot(selection);
@@ -1488,6 +1527,39 @@ mod tests {
         });
         output.drop_without_applying_deltas();
         assert_eq!(root, before);
+    }
+
+    #[test]
+    fn offline_header_waits_for_physical_usb_and_marks_last_known_firmware() {
+        let mut snapshot = json!({"device":"serial-123","firmware":"2.0.3","connected":false,
+            "simulate":false,"device_online":true,"connection_error":"Device not found"});
+        assert_eq!(connection_label(&snapshot), "Waiting for USB");
+        assert!(waiting_for_usb(&snapshot));
+        assert_eq!(
+            device_summary(&snapshot),
+            "Device serial-123   ·   Firmware 2.0.3 (last known)"
+        );
+        snapshot["connected"] = json!(true);
+        assert_eq!(connection_label(&snapshot), "USB connected");
+        assert!(!waiting_for_usb(&snapshot));
+        assert_eq!(
+            device_summary(&snapshot),
+            "Device serial-123   ·   Firmware 2.0.3"
+        );
+    }
+
+    #[test]
+    fn missing_firmware_and_simulation_do_not_claim_a_live_firmware_version() {
+        for firmware in ["", "unknown", "UNKNOWN", "simulation"] {
+            let snapshot = json!({"device":"serial-123","firmware":firmware,"connected":false,"simulate":false});
+            assert_eq!(device_summary(&snapshot), "Device serial-123");
+        }
+        let simulated = json!({"device":"simulated-streamdeck-plus","firmware":"simulation", "connected":false,
+            "simulate":true,"device_online":true});
+        assert_eq!(connection_label(&simulated), "Simulation");
+        assert!(!waiting_for_usb(&simulated));
+        assert!(!device_summary(&simulated).contains("Firmware"));
+        assert_eq!(device_summary(&json!({})), "Stream Deck +");
     }
 
     #[test]

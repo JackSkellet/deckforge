@@ -74,7 +74,7 @@ The shipped profiles contain real action identifiers and settings; their presenc
 | PL-02 | Legacy HTML plugin runtime | **Verified subset, A/C/T.** Native hidden HTML runtime registers unchanged shipped tutorial; generated HTML backend/PI fixture exchanges real SDK messages. Full tutorial navigation and background-media behavior remain open. | Run untouched tutorial HTML with the expected injected connection callback; verify browser networking, local resources, lifecycle and actual responses. [Artifact findings](../../evidence/elgato-7.6/findings.md) |
 | PL-03 | Native plugins and OS-dependent modules | **Partial/Unresolved, C/T.** Unchanged Image Resizer runs in place with its Linux Sharp native dependency. Windows/macOS executable plugins and platform-only dependencies remain unresolved. | Inventory Windows/macOS-dependent plugins, provide a supported runtime/porting path, and test real native binaries or Linux ports against the same contract. Explicit per-plugin limitations remain until resolved. [WebSocket API][ws], [manifest][manifest] |
 | PL-04 | Property-inspector browser, registration and bidirectional messaging | **Verified subset, C/T.** Native inspector windows register, route messages/settings, enforce per-action context binding and send appearance/disappearance. Original Counter PI registers; its unchanged control code saves via explicit instrumentation. | Unchanged official inspector registers, receives action/settings metadata, exchanges `sendToPlugin`/`sendToPropertyInspector`, and gets appearance/disappearance events. [PI guide][pi] |
-| PL-05 | Device/action lifecycle and physical input events | **Verified subset, C/T/H.** Registration, device-connect and key/dial events work for samples; broader lifecycle incomplete. | Contract fixtures cover disconnect/reconnect, page/folder transitions, simultaneous instances, title changes and touch coordinates; then repeat physical paths. [WebSocket API][ws] |
+| PL-05 | Device/action lifecycle and physical input events | **Verified subset, D/C/T/H.** Registration, offline device state, connect/disconnect and key/dial events work. SDK stores retain visible actions during same-device recovery; new identity is announced before appearance. Broader physical lifecycle acceptance remains open. | Contract fixtures cover disconnect/reconnect, page/folder transitions, simultaneous instances, title changes and touch coordinates; then repeat physical paths. [WebSocket API][ws] |
 | PL-06 | Action/global settings, correlation IDs and persistent isolation | **Verified subset, T.** Sample settings survive restart; global storage and correlated replies exist in code. | Test SDK v1/v2/v3 clients, PI-origin updates, concurrent gets, multi-plugin isolation, malformed settings and crash-safe persistence. [Settings][settings], [SDK 3 changes][sdk3] |
 | PL-07 | Title/image/state commands and separate hardware/software targets | **Partial, C.** Current state and combined target work; inactive-state/separate-target requests are rejected. | Verify all states and targets, user-title precedence, resets and plugin overrides before/after state changes against reference output. [Keys][keys], [WebSocket API][ws] |
 | PL-08 | Image formats, animation and resource path behavior | **Partial, C/T.** PNG/JPEG/GIF and SVG file/data-URI rendering work; SVG transparency is checked. Animation and WebP remain missing. | Test file/data-URI icons, SVG and animated assets, scaling/transparency, frame timing and bounded memory with real devices. [Keys][keys], [6.0.1 release][release601] |
@@ -104,12 +104,12 @@ The shipped profiles contain real action identifiers and settings; their presenc
 | HW-04 | Touch tap/hold and swipe navigation | **Partial, C/T.** Tap routing and swipe page navigation implemented; full physical touch/hold/swipe acceptance remains open. | Physically tap/hold all four segments and swipe between real pages. Compare local coordinates, direction, hold semantics and visible effects. [Touch guide][touch] |
 | HW-05 | Per-action/dial/whole-strip backgrounds | **Partial, C.** Fixed renderer background and imported key images; full touch background layers absent. | Configure and import all three official touch-strip layers; verify composition and retained settings. [Touch guide][touch] |
 | HW-06 | Brightness, naming, sleep, lock behavior, screensaver and wake | **Missing, C.** Firmware query exists; persistent device controls not exercised. | Set values through GUI, observe physical device; lock/unlock and timer wake restore correct profile without spurious actions. [Preferences][preferences], [screensaver][screensaver] |
-| HW-07 | USB reconnect, suspend/resume and startup permission handling | **Partial, C.** Disconnect is logged; user must restart host. | Unplug/replug same and different serials, suspend/resume, and start without access; recover automatically with actionable permission UI and intact state. [Device protocol][hidgeneral] |
+| HW-07 | USB reconnect, suspend/resume and startup permission handling | **Verified subset, D/A/C/T/H.** Native offline startup, error UI, serial-specific retry and latest-frame replay implemented. SDK lifecycle tests and controlled real HID handle close/reopen pass. Physical cable removal, re-enumeration and suspend/resume remain unverified. | Unplug/replug same and different serials, suspend/resume, and start without access; recover automatically with actionable permission UI and intact state. [Device protocol][hidgeneral] |
 | HW-08 | Multiple devices and cross-device profile actions | **Missing, C.** One connected device per host instance. | Operate two devices concurrently with independent profiles; switch one device from another and test removal while the other remains active. [Multiple devices][devices] |
 | HW-09 | Other models, Neo Infobar, + XL, Mobile/virtual devices and Network Dock | **Missing/Unresolved, D/C.** HID implementation targets Plus only. | Inventory 7.6 supported surfaces and transport contracts; implement each, then run real hardware/network/mobile acceptance. Simulated layouts alone are insufficient. [7.6 release][release76], [7.1 release][release71], [layouts][layouts] |
 | HW-10 | Firmware inspection/update workflow | **Partial, C/H.** Current firmware can be read; updater absent. | Separate update eligibility from write operations; validate correct model/image and recovery using authorized devices. Retain explicit unresolved status until a safe supported update path exists. [Preferences][preferences], [7.1 release][release71] |
 | OS-01 | Native package, launcher, autostart and clean uninstall | **Partial, C/T/H/U.** Per-user optimized binary and validated desktop launcher installed, settings migrated with original retained. Clean-machine uninstall/autostart remain open. | Install/uninstall on a clean supported Linux system; launcher works outside repository; data migration/retention and login lifecycle are verified. User desktop requirement; [7.6 autostart fix][release76]. |
-| OS-02 | Audio routing and per-app/input/output controls | **Missing/Unresolved, A/C.** Shipped Plus profile includes volume-controller actions; no Linux audio integration. | Imported actions control real Linux input/output/app streams with equivalent mute/volume feedback and reconnect behavior. A placeholder volume number is insufficient. [7.1 plugin note][release71], [soundboard][soundboard] |
+| OS-02 | Audio routing and per-app/input/output controls | **Partial/Unresolved, A/C/T/H/U.** Native default-output volume/mute and soundboard output routing are implemented. Per-app/input controls and the imported Wave Link integration remain unresolved. | Imported actions control real Linux input/output/app streams with equivalent mute/volume feedback and reconnect behavior. A placeholder volume number is insufficient. [7.1 plugin note][release71], [soundboard][soundboard] |
 | OS-03 | OAuth/account-backed and companion-app integrations | **Missing/Unresolved, D/A.** No account UI/credential flow; platform companion apps may be unavailable on Linux. | Keep a named compatibility matrix for real plugins and required services; validate actual login, refresh, actions and logout using supported APIs. Preserve unresolved dependencies instead of claiming universal compatibility. [7.6 plugins][release76], [preferences][preferences] |
 | OS-04 | MCP/virtual-deck control introduced before 7.6 | **Missing/Unresolved, D/C.** No MCP endpoint or virtual-deck runtime. | Inspect the official 7.4 contract; authorize a client, enumerate/configure its virtual deck, and exercise real actions with connection/revocation tests. [7.4 release][release74] |
 | OS-05 | Long-running reliability, isolation and recovery | **Partial, T.** Bounded sample tests and ordinary persistence work; soak/cross-process ownership evidence absent. | Run representative profiles/plugins through a working day, restart/crash/power-loss simulations and competing host instances; verify bounded memory, no lost config and no duplicated actions. Project acceptance requirement. |
@@ -504,3 +504,41 @@ no-op path, strict Rust 1.99 Clippy and fourteen process suites. App-owned nativ
 capture shows the effects and gesture hints. Evidence, timing samples and source
 hashes are retained in `../../evidence/plugin-feedback/`. Physical effect acceptance
 and broader parity still require the other ledger entries to be resolved.
+
+
+### Offline device and reconnect evidence update, 2026-10-12
+
+This updates HW-07, PL-05 and held-control aspects of HW-03.
+`../../evidence/device-lifecycle-contracts.json` records official disconnected-device
+visibility and SDK 2.0.4 behavior. Registration can include an offline device;
+connection events change its online flag without deleting visible action instances.
+A previously unknown device must reach the SDK device store before its action events.
+Exact native event ordering and serial/context permanence remain unproven.
+
+`src/device_session.rs` owns reconnecting transport and nine latest display frames.
+It pins the selected/first successful serial, retries after failures, prioritizes
+input between writes, skips unchanged images and replays the latest state after
+opening a fresh handle. Offline retries do not stop plugins or block the editor.
+Physical holds are released when transport is lost; completed clicks and their
+asynchronous Multi/Trigger work keep running. Changing logical device identity
+ends the old action lifecycle before connect/appear for the new identity.
+These context-stability and cleanup details are explicit Linux host policies.
+
+`tests/device_interop.py` uses the unchanged official SDK to verify stores, event
+ordering, stable plugin PID, resources/settings, held release and timed-work
+continuity. Two actual native startups use an explicitly absent serial while the
+real deck remains untouched. Fake transport tests exercise failed reads/writes,
+retry, frame replay and shutdown. A separately gated probe exclusively opens the
+real Plus, injects one controlled read failure, closes/reopens its own HID handle
+and reports two opens/two drops/zero image writes. It proves handle recovery,
+not physical cable removal or USB re-enumeration. App-owned capture confirms the
+editable offline native window. Evidence: `../../evidence/device-lifecycle/`.
+
+This device checkpoint passes 225 non-gated tests plus the two gated tests' default
+no-op paths, strict Rust 1.99 Clippy and fifteen process suites. The real handle
+probe also ran explicitly and passed after review fixed feature-report-only serial
+matching. Exact descriptor matches avoid unrelated probes; devices lacking a serial
+descriptor can be matched by a read-only serial feature report. An identity change
+closes inspectors carrying old device initialization. The prior live session is
+backed up; the installed build preserves its four controls and reconnects the
+actual Plus with the three original sample plugins.

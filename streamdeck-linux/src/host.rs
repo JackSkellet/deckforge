@@ -1,6 +1,7 @@
 //! Independent implementation of Elgato's public plugin WebSocket contract.
 use crate::{
-    hardware::{Deck, InputEvent},
+    device_session::{self, Draw, Event as DeviceEvent},
+    hardware::InputEvent,
     profile,
     render::Renderer,
 };
@@ -33,6 +34,7 @@ use tokio::sync::mpsc;
 
 mod audio;
 mod children;
+mod device;
 mod display;
 mod export;
 mod feedback;
@@ -235,6 +237,8 @@ mod image_serde {
 #[derive(Serialize, Deserialize, Default)]
 struct Saved {
     #[serde(default)]
+    device_config: Option<device::Config>,
+    #[serde(default)]
     library: Option<Library>,
     #[serde(default)]
     plugins: Vec<PathBuf>,
@@ -242,17 +246,15 @@ struct Saved {
     #[serde(default)]
     globals: HashMap<String, Value>,
 }
-enum Draw {
-    Key(u8, DynamicImage),
-    Strip(DynamicImage),
-    Stop,
-}
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum HeldControl {
     Key(u8),
     Dial(u8),
 }
 struct Host {
+    connected: bool,
+    connection_error: Option<String>,
+    device_config: Option<device::Config>,
     redraw: Option<Box<dyn Fn() + Send + Sync>>,
     badges: HashMap<String, feedback::Badge>,
     trigger_descriptions: HashMap<String, Value>,
@@ -326,12 +328,14 @@ impl Host {
         let pending = self.state_path.with_extension("tmp");
         #[derive(Serialize)]
         struct View<'a> {
+            device_config: &'a Option<device::Config>,
             library: &'a Library,
             plugins: Vec<&'a Path>,
             slots: &'a [Slot],
             globals: &'a HashMap<String, Value>,
         }
         let data = serde_json::to_vec_pretty(&View {
+            device_config: &self.device_config,
             library: &self.library,
             plugins: self.plugins.iter().map(|p| p.root.as_path()).collect(),
             slots: &self.slots,
@@ -1136,7 +1140,7 @@ fn slot_snapshot(host: &Host, s: &Slot) -> Value {
         "has_inspector":host.actions.iter().find(|a|a.uuid==s.uuid).is_some_and(|a|a.raw["PropertyInspectorPath"].is_string()||host.plugins.iter().find(|p|p.id==a.plugin).is_some_and(|p|p.manifest["PropertyInspectorPath"].is_string()))})
 }
 fn snapshot(host: &Host) -> Value {
-    json!({"library":host.library.snapshot(),"running":host.running,"device":host.device,"firmware":host.firmware,"simulate":host.simulate,"connected":host.hardware.is_some(),
+    json!({"library":host.library.snapshot(),"running":host.running,"device":host.device,"firmware":host.firmware,"simulate":host.simulate,"connected":host.connected && !host.simulate,"device_online":host.connected,"connection_error":host.connection_error,
         "volume":host.volume_state,"volume_error":host.volume_error,"multi_runs":host.multi.snapshot(),"multi_pending":host.multi_pending.len(),"audio_outputs":host.audio_outputs,"audio_active":host.audio_active,"system_status":host.system_status,"slots":host.slots.iter().map(|s|slot_snapshot(host,s)).collect::<Vec<_>>(),
         "inspectors":host.inspectors.values().map(|i|json!({"context":i.context,"plugin":host.plugins[i.plugin].id,"connected":i.sender.is_some()})).collect::<Vec<_>>(),
         "actions":host.actions.iter().map(|a|json!({"uuid":a.uuid,"name":a.name,"plugin":a.plugin,"controllers":a.controllers,"states":a.raw["States"],"supported_in_multi":a.raw["SupportedInMultiActions"]!=false && !multiaction::container(&a.uuid),"multi_only":a.uuid==multiaction::DELAY,"defaults":if a.uuid=="com.elgato.streamdeck.page.goto"{json!({"PageIndex":1})}else if a.uuid==multiaction::DELAY{json!({"delay":1000})}else{crate::audio_output::defaults(&a.uuid).unwrap_or_else(||crate::system_actions::defaults(&a.uuid))}})).collect::<Vec<_>>(),
@@ -1276,6 +1280,25 @@ fn apply_control(host: &mut Host, r: Value) -> Result<()> {
             host.install_bundled_profiles(true)?;
             host.persist()
         }
+        "device_event" => {
+            if !host.simulate || !host.diagnostics {
+                bail!("Device event injection is only available in simulated diagnostic mode");
+            }
+            let event = match r["event"].as_str() {
+                Some("connected") => DeviceEvent::Connected {
+                    serial: r["serial"].as_str().context("Missing serial")?.into(),
+                    firmware: r["firmware"].as_str().unwrap_or("test").into(),
+                },
+                Some("disconnected") => DeviceEvent::Disconnected {
+                    reason: r["reason"]
+                        .as_str()
+                        .unwrap_or("Simulated disconnect")
+                        .into(),
+                },
+                _ => bail!("Unknown device event"),
+            };
+            host.device_event(event)
+        }
         "input" => {
             let index = u8::try_from(r["index"].as_u64().context("Missing index")?)?;
             let event = match r["event"].as_str().unwrap_or("") {
@@ -1380,7 +1403,9 @@ async fn socket_session(socket: WebSocket, state: Shared) {
             else {
                 return;
             };
-            let _=sender.send(json!({"event":"deviceDidConnect","device":host.device,"deviceInfo":{"name":"Stream Deck +","type":7,"size":{"columns":4,"rows":2}}}));
+            if host.connected {
+                let _=sender.send(json!({"event":"deviceDidConnect","device":host.device,"deviceInfo":device::info()}));
+            }
             host.plugins[index].sender = Some(sender);
             host.hydrate_resources();
             let id = host.plugins[index].id.clone();
@@ -1728,23 +1753,37 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
             raw: json!({"States":[{"Title":if uuid==crate::system_actions::OPEN {"Open"} else {name}}],"Encoder":{"layout":"$X1"}}),
         });
     }
-    let (events_tx, mut events_rx) = mpsc::unbounded_channel::<Result<InputEvent>>();
+    let remembered = device::Config::remembered(&saved);
+    let previous_device = remembered.as_ref().map(|config| config.id.clone());
+    let mut device_config = device::Config::select(remembered, serial);
+    device_config.validate()?;
+    let (events_tx, mut events_rx) = mpsc::unbounded_channel::<DeviceEvent>();
     let (draw_tx, draw_rx) = std::sync::mpsc::channel();
-    let mut deck = if simulate {
-        None
+    let (initial, connection_error) = if simulate {
+        (None, None)
     } else {
-        Some(Deck::connect(serial.as_deref())?)
+        match device_session::connect(device_config.serial.as_deref()) {
+            Ok(connection) => (Some(connection), None),
+            Err(error) => (None, Some(format!("{error:#}"))),
+        }
     };
-    let device = deck
-        .as_ref()
-        .map(|d| d.serial().to_owned())
-        .unwrap_or_else(|| "simulated-streamdeck-plus".into());
-    let firmware = deck
-        .as_ref()
-        .map(Deck::firmware_version)
-        .transpose()?
-        .unwrap_or_else(|| "simulation".into());
-    let library = if let Some(library) = saved.library {
+    if let Some(connection) = &initial {
+        device_config.id = connection.deck.serial().to_owned();
+        device_config.serial = Some(device_config.id.clone());
+        device_config.firmware = connection.firmware.clone();
+    }
+    let connected = simulate || initial.is_some();
+    let device = if simulate {
+        "simulated-streamdeck-plus".into()
+    } else {
+        device_config.id.clone()
+    };
+    let firmware = if simulate {
+        "simulation".into()
+    } else {
+        device_config.firmware.clone()
+    };
+    let mut library = if let Some(library) = saved.library {
         library
     } else {
         if state_path.exists() {
@@ -1755,9 +1794,26 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
         }
         Library::legacy(saved.slots, &device)
     };
+    if !simulate {
+        for profile in &mut library.profiles {
+            if profile.device == "simulated-streamdeck-plus"
+                || profile.device.starts_with("offline-streamdeck-plus-")
+                || previous_device.as_deref() == Some(profile.device.as_str())
+            {
+                profile.device = device.clone();
+            }
+        }
+    }
     library.validate()?;
     let slots = library.visible()?;
     let mut host = Host {
+        connected,
+        connection_error,
+        device_config: if simulate {
+            saved.device_config.clone()
+        } else {
+            Some(device_config.clone())
+        },
         volume: None,
         volume_state: None,
         volume_error: None,
@@ -1858,69 +1914,16 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
         stop_plugins(&mut host);
         return Err(error);
     }
-    let worker = deck.take().map(|mut deck| {
-        std::thread::spawn(move || {
-            let mut displayed_keys: HashMap<u8, DynamicImage> = HashMap::new();
-            let mut displayed_strip: Option<DynamicImage> = None;
-            loop {
-                // Coalesce plugin bursts to one latest image for each physical surface.
-                let mut keys: HashMap<u8, DynamicImage> = HashMap::new();
-                let mut strip = None;
-                let mut stopping = false;
-                loop {
-                    let draw = match draw_rx.try_recv() {
-                        Ok(draw) => draw,
-                        Err(std::sync::mpsc::TryRecvError::Empty) => break,
-                        Err(std::sync::mpsc::TryRecvError::Disconnected) => return,
-                    };
-                    match draw {
-                        Draw::Stop => {
-                            stopping = true;
-                            break;
-                        }
-                        Draw::Key(i, img) => {
-                            keys.insert(i, img);
-                        }
-                        Draw::Strip(img) => strip = Some(img),
-                    }
-                }
-                let write: Result<()> = (|| {
-                    // Animation can change one dial without changing any key.
-                    for (i, img) in keys {
-                        if displayed_keys.get(&i) != Some(&img) {
-                            deck.set_key_image(i, &img)?;
-                            displayed_keys.insert(i, img);
-                        }
-                    }
-                    if let Some(img) = strip
-                        && displayed_strip.as_ref() != Some(&img)
-                    {
-                        deck.set_touchscreen_image(&img)?;
-                        displayed_strip = Some(img);
-                    }
-                    Ok(())
-                })();
-                if let Err(e) = write {
-                    let _ = events_tx.send(Err(e));
-                    return;
-                }
-                if stopping {
-                    return;
-                }
-                match deck.read_events(20) {
-                    Ok(events) => {
-                        for event in events {
-                            let _ = events_tx.send(Ok(event));
-                        }
-                    }
-                    Err(e) => {
-                        let _ = events_tx.send(Err(e));
-                        return;
-                    }
-                }
-            }
-        })
-    });
+    let worker = if simulate {
+        None
+    } else {
+        Some(device_session::spawn(
+            initial,
+            device_config.serial.clone(),
+            draw_rx,
+            events_tx,
+        ))
+    };
     host.sync_visible();
     host.hydrate_library_children();
     host.hydrate_resources();
@@ -1961,20 +1964,10 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
     let event_task = tokio::spawn(async move {
         while let Some(event) = events_rx.recv().await {
             let mut host = events_state.lock().unwrap();
-            match event {
-                Ok(e) => {
-                    if let Err(e) = host.input(e) {
-                        host.system_status = format!("Action failed: {e:#}");
-                        let message = host.system_status.clone();
-                        host.log(message);
-                    }
-                }
-                Err(e) => {
-                    host.hardware = None;
-                    host.log(format!(
-                        "USB disconnected/error: {e}. Restart host after reconnect."
-                    ));
-                }
+            if let Err(error) = host.device_event(event) {
+                host.system_status = format!("Device/action failed: {error:#}");
+                let message = host.system_status.clone();
+                host.log(message);
             }
         }
     });
@@ -2169,6 +2162,9 @@ mod tests {
     }
     pub(super) fn fixture(root: &Path) -> Host {
         let mut host = Host {
+            connected: true,
+            connection_error: None,
+            device_config: None,
             volume: None,
             volume_state: None,
             volume_error: None,

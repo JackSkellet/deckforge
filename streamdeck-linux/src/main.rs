@@ -1,6 +1,7 @@
 mod action_trigger;
 mod audio_output;
 mod desktop;
+mod device_session;
 mod dial_stack;
 mod feedback;
 mod hardware;
