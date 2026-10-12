@@ -53,7 +53,17 @@ deckforge window quit
 These commands use the default application state; add `--state /path/to/state`
 for a separate session. Opening the same state again activates its existing
 process. Startup flags such as `--plugin` and `--profile` apply only when starting
-a new host. Login autostart is not enabled or configured by this build.
+a new host. In **Preferences**, enable **Start this session when I log in** to start it in
+the background at your next desktop login. It defaults to off. The setting uses
+`$XDG_CONFIG_HOME/autostart/deckforge.desktop`, falling back to
+`~/.config/autostart/deckforge.desktop`. Disabling writes `Hidden=true` so a
+system-wide entry with the same name cannot re-enable startup. Custom entries
+are preserved. The executable, state directory and simulation mode are retained.
+
+The same setting is available as `deckforge startup enable`, `disable`, or
+`status`, with optional `--state` and `--simulate`. A state directory must exist
+before enabling startup. These commands do not log you out or start a second host.
+**Preferences** also shows the application version and source repository.
 
 Build and install an updated native executable:
 
@@ -474,3 +484,11 @@ Activate/Open/Quit methods. Neither test injects desktop input or opens USB.
 The tray test needs a running StatusNotifier watcher and `busctl`. The window
 test needs the separately obtained official Counter sample dependencies.
 Native title-bar input and compositor focus still need direct desktop acceptance.
+
+`python tests/startup_interop.py --binary target/release/deckforge` validates the
+startup entry and launches it through GIO with an isolated configuration and
+paths containing spaces, quotes and other reserved characters. It checks the
+exact state/simulation arguments, background startup, quit and disable behavior.
+The test requires `gio` and `desktop-file-validate`; it does not change the real
+user's startup preference or perform a desktop logout/login. Actual next-login
+acceptance remains a separate check.

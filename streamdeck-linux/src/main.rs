@@ -11,12 +11,14 @@ mod layout;
 mod multi;
 mod multi_editor;
 mod package;
+mod preferences;
 mod profile;
 mod render;
 mod resources;
 mod soundboard;
 mod soundboard_editor;
 mod stack_editor;
+mod startup;
 mod system_actions;
 mod system_editor;
 mod system_keyboard;
@@ -68,6 +70,15 @@ enum Command {
         command: String,
         #[arg(long)]
         state: Option<PathBuf>,
+    },
+    /// Configure login startup for this user. No change occurs until enable/disable.
+    Startup {
+        #[arg(value_parser = ["enable", "disable", "status"])]
+        command: String,
+        #[arg(long)]
+        state: Option<PathBuf>,
+        #[arg(long)]
+        simulate: bool,
     },
     /// Enumerate Stream Deck+ devices without changing them.
     Devices,
@@ -166,6 +177,20 @@ fn main() -> Result<()> {
                     )
                 })?;
             println!("{}", serde_json::to_string(&response)?);
+        }
+        Command::Startup {
+            command,
+            state,
+            simulate,
+        } => {
+            let startup =
+                startup::Startup::current(&state.unwrap_or_else(desktop_state), simulate)?;
+            let status = match command.as_str() {
+                "enable" => startup.set_enabled(true)?,
+                "disable" => startup.set_enabled(false)?,
+                _ => startup.status()?,
+            };
+            println!("{}", serde_json::to_string(&status)?);
         }
         Command::Desktop(options) => {
             let state = options.state.unwrap_or_else(desktop_state);

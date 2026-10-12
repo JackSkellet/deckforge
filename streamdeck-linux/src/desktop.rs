@@ -62,6 +62,8 @@ pub fn run(controller: Controller, state: &std::path::Path, background: bool) ->
         let saved_app = saved.clone();
         let current_window = window.clone();
         let controller = controller.clone();
+        let preferences =
+            crate::preferences::Preferences::new(state, controller.snapshot()["simulate"] == true);
         let capture_path = capture_path.clone();
         let capture_result = capture_result.clone();
         // eframe reuses its event loop across run_native calls. Closing a real
@@ -91,7 +93,11 @@ pub fn run(controller: Controller, state: &std::path::Path, background: bool) ->
                         app.attach(cc.egui_ctx.clone());
                         app
                     }
-                    None => Desktop::new(controller, cc.egui_ctx.clone(), current_window),
+                    None => {
+                        let mut app = Desktop::new(controller, cc.egui_ctx.clone(), current_window);
+                        app.preferences = Some(preferences);
+                        app
+                    }
                 };
                 if capture_path.is_some()
                     && std::env::var("DECKFORGE_CAPTURE_CONTROL").as_deref() == Ok("dial0")
@@ -100,6 +106,12 @@ pub fn run(controller: Controller, state: &std::path::Path, background: bool) ->
                         dial: true,
                         index: 0,
                     };
+                }
+                if capture_path.is_some()
+                    && std::env::var("DECKFORGE_CAPTURE_PAGE").as_deref() == Ok("preferences")
+                    && let Some(preferences) = &mut app.preferences
+                {
+                    preferences.show();
                 }
                 app.capture = capture_path.map(|path| Capture {
                     path,
@@ -401,6 +413,7 @@ fn nested_container_target(parent: &Value, context: &str) -> Option<NestedContai
 }
 
 struct Desktop {
+    preferences: Option<crate::preferences::Preferences>,
     closing: bool,
     window: crate::window::Window,
     redraw_pending: Arc<AtomicBool>,
@@ -436,6 +449,7 @@ impl Desktop {
             redraw_window.repaint();
         });
         Self {
+            preferences: None,
             closing: false,
             window,
             redraw_pending,
@@ -618,6 +632,11 @@ impl Desktop {
                 .clicked()
             {
                 self.window.request(crate::instance::Command::Quit);
+            }
+            if ui.button("Preferences").clicked()
+                && let Some(preferences) = &mut self.preferences
+            {
+                preferences.show();
             }
             ui.label(RichText::new("STREAM DECK +").small().color(Color32::GRAY));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1555,6 +1574,9 @@ impl eframe::App for Desktop {
                 }
             });
         self.deletion_dialog(ui.ctx());
+        if let Some(preferences) = &mut self.preferences {
+            preferences.ui(ui.ctx());
+        }
     }
 }
 
