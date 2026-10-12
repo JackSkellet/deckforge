@@ -108,10 +108,17 @@ pub fn run(controller: Controller, state: &std::path::Path, background: bool) ->
                     };
                 }
                 if capture_path.is_some()
-                    && std::env::var("DECKFORGE_CAPTURE_PAGE").as_deref() == Ok("preferences")
+                    && matches!(
+                        std::env::var("DECKFORGE_CAPTURE_PAGE").as_deref(),
+                        Ok("preferences" | "screensaver")
+                    )
                     && let Some(preferences) = &mut app.preferences
                 {
-                    preferences.show();
+                    if std::env::var("DECKFORGE_CAPTURE_PAGE").as_deref() == Ok("screensaver") {
+                        preferences.show_screensaver();
+                    } else {
+                        preferences.show();
+                    }
                 }
                 app.capture = capture_path.map(|path| Capture {
                     path,
@@ -413,6 +420,7 @@ fn nested_container_target(parent: &Value, context: &str) -> Option<NestedContai
 }
 
 struct Desktop {
+    focused: bool,
     preferences: Option<crate::preferences::Preferences>,
     closing: bool,
     window: crate::window::Window,
@@ -449,6 +457,7 @@ impl Desktop {
             redraw_window.repaint();
         });
         Self {
+            focused: false,
             preferences: None,
             closing: false,
             window,
@@ -482,6 +491,7 @@ impl Desktop {
         self.previews.clear();
         self.last_poll = None;
         self.closing = false;
+        self.focused = false;
         self.redraw_pending.store(true, Ordering::Release);
         self.window.attach(context);
     }
@@ -650,6 +660,14 @@ impl Desktop {
                 );
             });
         });
+        if self.snapshot["screensaver"]["active"] == true {
+            ui.horizontal(|ui| {
+                ui.label("Device screensaver active");
+                if ui.button("Wake device").clicked() {
+                    self.command(json!({"command":"wake_device"}));
+                }
+            });
+        }
         ui.small(device_summary(&self.snapshot));
         if waiting_for_usb(&self.snapshot) {
             ui.weak("Deckforge checks for your Stream Deck every second. You can keep editing.");
@@ -1508,6 +1526,11 @@ impl eframe::App for EditorWindow {
 }
 impl eframe::App for Desktop {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let focused = ctx.input(|input| input.viewport().focused.unwrap_or(false));
+        if focused && !self.focused {
+            let _ = self.controller.command(json!({"command":"wake_device"}));
+        }
+        self.focused = focused;
         if !self.controller.is_running() {
             self.window.request(crate::instance::Command::Quit);
         }

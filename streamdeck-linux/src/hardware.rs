@@ -38,6 +38,7 @@ pub struct Deck {
     device: HidDevice,
     serial: String,
     input: InputState,
+    trace: bool,
 }
 
 // Firmware2.0.3.4 can return the previous value immediately after a setter.
@@ -171,6 +172,7 @@ impl Deck {
                     device,
                     serial,
                     input: InputState::default(),
+                    trace: std::env::var_os("DECKFORGE_TRACE_HID").is_some(),
                 },
             ))
         })
@@ -225,16 +227,24 @@ impl Deck {
     /// Returns state transitions only. Timeout returns an empty vector.
     /// A 50 ms timeout is recommended by Elgato. Negative timeouts are rejected.
     pub fn read_events(&mut self, timeout_ms: i32) -> Result<Vec<InputEvent>> {
+        Ok(self.read_packet(timeout_ms, true)?.unwrap_or_default())
+    }
+
+    /// None means timeout. Some means a physical report arrived, even if decoding
+    /// produces no transitions. Sleeping reads bypass decoding and retain InputState.
+    pub fn read_packet(
+        &mut self,
+        timeout_ms: i32,
+        decode: bool,
+    ) -> Result<Option<Vec<InputEvent>>> {
         ensure!(timeout_ms >= 0, "input timeout must be nonnegative");
         let mut report = [0u8; 512];
         let size = self
             .device
             .read_timeout(&mut report, timeout_ms)
             .context("read Stream Deck + input")?;
-        if size == 0 {
-            return Ok(Vec::new());
-        }
-        self.input.decode(&report[..size])
+        ensure!(size <= report.len(), "oversized input report");
+        self.input.packet(&report[..size], decode)
     }
 
     /// Resizes to 120x120 and encodes RGB JPEG. Stream Deck + needs no rotation.
@@ -250,6 +260,12 @@ impl Deck {
         self.write_image(0x0b, 0, &jpeg)
     }
 
+    /// Full 800x480 LCD, including the key area and strip. No rotation required.
+    pub fn set_lcd_image(&self, image: &DynamicImage) -> Result<()> {
+        let jpeg = encode_jpeg(image, 800, 480)?;
+        self.write_image(0x08, 0, &jpeg)
+    }
+
     fn write_image(&self, command: u8, key: u8, jpeg: &[u8]) -> Result<()> {
         // Build all packets before writing, so validation cannot fail mid-transfer.
         for report in image_reports(command, key, jpeg)? {
@@ -257,6 +273,13 @@ impl Deck {
             ensure!(
                 written == REPORT_SIZE,
                 "short HID image write: {written}/{REPORT_SIZE}"
+            );
+        }
+        if self.trace {
+            eprintln!(
+                "HID image accepted: command=0x{command:02x} key={key} chunks={} jpeg_bytes={}",
+                jpeg.len().div_ceil(IMAGE_CHUNK_SIZE),
+                jpeg.len()
             );
         }
         Ok(())
@@ -313,7 +336,7 @@ fn encode_jpeg(image: &DynamicImage, width: u32, height: u32) -> Result<Vec<u8>>
 
 fn image_reports(command: u8, key: u8, jpeg: &[u8]) -> Result<Vec<[u8; REPORT_SIZE]>> {
     ensure!(
-        (command == 0x07 && key < 8) || (command == 0x0b && key == 0),
+        (command == 0x07 && key < 8) || (matches!(command, 0x08 | 0x0b) && key == 0),
         "invalid image command or key"
     );
     ensure!(!jpeg.is_empty(), "empty image transfer");
@@ -340,6 +363,16 @@ fn image_reports(command: u8, key: u8, jpeg: &[u8]) -> Result<Vec<[u8; REPORT_SI
 }
 
 impl InputState {
+    fn packet(&mut self, report: &[u8], decode: bool) -> Result<Option<Vec<InputEvent>>> {
+        if report.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(if decode {
+            self.decode(report)?
+        } else {
+            Vec::new()
+        }))
+    }
     fn decode(&mut self, report: &[u8]) -> Result<Vec<InputEvent>> {
         ensure!(
             report.len() >= 4 && report.len() <= 512,
@@ -440,6 +473,38 @@ fn touch_position(data: &[u8], offset: usize) -> Result<(u16, u16)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn sleeping_reports_are_activity_without_decoding_or_mutating_button_state() {
+        let mut state = InputState::default();
+        let down = input(0, &[1, 0, 0, 0, 0, 0, 0, 0]);
+        let up = input(0, &[0; 8]);
+        assert_eq!(state.packet(&down, true).unwrap().unwrap().len(), 1);
+        assert_eq!(state.packet(&up, false).unwrap(), Some(Vec::new()));
+        assert_eq!(state.packet(&[0xff], false).unwrap(), Some(Vec::new()));
+        assert_eq!(state.packet(&[], false).unwrap(), None);
+        assert_eq!(state.packet(&down, true).unwrap(), Some(Vec::new()));
+        assert_eq!(
+            state.packet(&up, true).unwrap(),
+            Some(vec![InputEvent::Key {
+                index: 0,
+                pressed: false
+            }])
+        );
+        assert!(state.packet(&[0xff], true).is_err());
+    }
+    #[test]
+    fn full_lcd_reports_use_reserved_zero_and_preserve_chunks() {
+        let bytes = vec![27; IMAGE_CHUNK_SIZE + 3];
+        let reports = image_reports(0x08, 0, &bytes).unwrap();
+        assert_eq!(&reports[0][..4], &[2, 8, 0, 0]);
+        assert_eq!(&reports[1][..8], &[2, 8, 0, 1, 3, 0, 1, 0]);
+        assert_eq!(&reports[1][8..11], &[27; 3]);
+        assert!(reports[1][11..].iter().all(|&byte| byte == 0));
+        assert!(image_reports(0x08, 1, &bytes).is_err());
+        let jpeg = encode_jpeg(&DynamicImage::new_rgb8(2, 2), 800, 480).unwrap();
+        let image = image::load_from_memory(&jpeg).unwrap();
+        assert_eq!((image.width(), image.height()), (800, 480));
+    }
     #[test]
     fn sleep_setter_readback_tolerates_stale_values_but_bounds_mismatch() {
         let mut calls = 0;

@@ -81,16 +81,24 @@ impl Host {
             .unwrap_or_default()
     }
     pub(super) fn send_device_controls(&mut self) {
-        // An offline placeholder must not reach an as-yet unidentified deck.
-        // Its serial-specific saved settings take precedence when it connects.
         if self
             .device_config
             .as_ref()
-            .is_some_and(|config| config.serial.is_some())
-            && let Some(hardware) = &self.hardware
-            && let Err(error) = hardware.send(Draw::Controls(self.configured_controls()))
+            .is_none_or(|config| config.serial.is_none())
         {
-            self.controls_error = Some(format!("Device settings delivery failed: {error}"));
+            return;
+        }
+        if let Some(hardware) = &self.hardware {
+            // Timer ownership and restoration are ordered with HID writes in
+            // the worker; old asynchronous reports cannot release that ownership.
+            let result = hardware
+                .send(Draw::SleepPolicy(
+                    self.screensavers.contains_key(&self.device),
+                ))
+                .and_then(|()| hardware.send(Draw::Controls(self.configured_controls())));
+            if let Err(error) = result {
+                self.controls_error = Some(format!("Device settings delivery failed: {error}"));
+            }
         }
     }
     pub(super) fn set_device_controls(&mut self, controls: device_session::Controls) -> Result<()> {
@@ -122,7 +130,7 @@ impl Host {
             }
         }
     }
-    fn release_device_holds(&mut self) {
+    pub(super) fn release_device_holds(&mut self) {
         // Completed clicks and their asynchronous actions remain active offline.
         // Only physical ownership is lost when the USB transport disappears.
         self.disconnect_trigger_buttons();
@@ -135,6 +143,18 @@ impl Host {
             return Ok(());
         }
         match event {
+            Event::Activity => {
+                if !self.saver.active {
+                    self.saver.activity = self.multi_clock.elapsed();
+                    self.multi_notify.notify_one();
+                }
+                return Ok(());
+            }
+            Event::Wake { generation } => {
+                if generation == self.saver.generation {
+                    self.wake_device()?;
+                }
+            }
             Event::Controls { controls, error } => {
                 self.controls_observed = controls;
                 if let Some(error) = &error {
@@ -180,6 +200,26 @@ impl Host {
                 let changed = self.device != serial;
                 let announce = changed || !self.connected;
                 if changed {
+                    super::screensaver::adopt_preferences(
+                        &mut self.screensavers,
+                        Some(&self.device),
+                        &serial,
+                    );
+                    let generation = self.saver.generation.saturating_add(1);
+                    let locked = self.saver.locked;
+                    self.saver = super::screensaver::Runtime {
+                        generation,
+                        locked,
+                        activity: self.multi_clock.elapsed(),
+                        ..Default::default()
+                    };
+                    if let Some(hardware) = &self.hardware {
+                        let _ = hardware.send(Draw::Screensaver {
+                            generation,
+                            image: None,
+                            wake_on_input: true,
+                        });
+                    }
                     if self.device.starts_with("offline-streamdeck-plus-")
                         && !self.device_controls.contains_key(&serial)
                         && let Some(controls) = self.device_controls.remove(&self.device)
@@ -209,6 +249,9 @@ impl Host {
                     self.badges.clear();
                 }
                 self.connected = true;
+                if announce && !self.saver.active {
+                    self.saver.activity = self.multi_clock.elapsed();
+                }
                 self.connection_error = None;
                 self.firmware = firmware;
                 if !self.simulate {
@@ -224,6 +267,9 @@ impl Host {
                 }
                 if changed {
                     self.send_device_controls();
+                    if self.saver.locked && !self.saver_preferences().disable_on_lock {
+                        self.sleep_device("lock")?;
+                    }
                 }
                 self.render()?;
                 self.persist()?;

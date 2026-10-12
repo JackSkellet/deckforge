@@ -147,13 +147,49 @@ Press or tap alone does nothing. The touch strip shows the requested percentage.
 When no brightness has been chosen, the first relative action starts from the
 original app's default of 80%. Elgato documents a brightness setter but no getter,
 so this percentage is a requested value, not a physical luminance measurement.
+The original Plus mapping is retained: logical 0–100% maps to raw HID 4–100,
+so logical 50% sends raw 52. Raw zero belongs to the separate hardware sleep path.
 
-The device's raw idle timer getter/setter is also implemented and was tested on
-the connected Plus with a temporary 60-second value, restored and independently
-read back as 0. Firmware can briefly report a stale value after a setter; readback
-verification waits up to 100 ms. This timer is not yet presented as the app's
-Sleep After feature. Desktop idle, lock, screensaver selection and exact wake
-behavior still need implementation and verification.
+## Sleep and screensavers
+
+In **Preferences → Screensaver**, choose a PNG, JPEG or GIF, set **Sleep After**
+to Never, 5, 15, 30, 60 or 120 minutes, and use **Preview on device**. Deckforge
+uses its own logo by default. Images fit the full 800×480 display with black
+borders. Files are copied into the session cache; moving the original file does
+not break the saved screensaver. Image decoding runs outside the host lock and
+native UI thread, and a newer configuration wins over an older import still loading.
+
+The original **Sleep** action runs on key release. An empty device target means
+all currently supported devices; an explicit target must match the connected
+serial. The current host owns one Plus. Physical wake consumes the waking report
+and queued reports, then restores the latest cached key and touch-strip images.
+Plugins remain running and their display updates are retained while asleep.
+Opening/focusing the native editor or using **Wake device** also wakes the deck.
+
+The software timer follows device input and display/feature activity. It does
+not use computer-wide keyboard/mouse idle. Custom images and GIFs use the software
+screensaver path; the device worker temporarily suspends its firmware timer and
+restores the captured or explicitly configured value in USB order. The device's
+raw timer completed a separate 0→60→0-second hardware test with restoration readback.
+
+Desktop lock detection uses read-only KDE or logind state. While locked, the
+software screensaver displays its first frame and suppresses physical input;
+unlock restores the profile. This is a Linux policy, not a claim of identical
+Windows lock handling. Unknown lock status does not invent an unlock. KDE Wayland
+cannot provide idle time through this D-Bus API; lock detection still works.
+A locked shutdown retains the static image while restoring the firmware timer.
+
+PNG/JPEG/GIF files are limited to 32 MiB input and 4096 pixels per dimension.
+Decoder allocations and retained RGB frames each have a 128 MiB budget. GIF
+frames preserve their decoded delays and disposal, loop continuously, and use
+10 ms for zero-delay frames. Interactive image crop/zoom, native finite-loop
+parity, standby-image installation, and the original no-custom-image firmware
+fade-to-zero path remain open.
+
+A full-LCD transfer and all nine profile-frame restoration transfers completed
+on the connected Plus without transport errors. This is HID acceptance evidence;
+physical appearance, physical wake gestures and real desktop lock/unlock still
+need direct acceptance. See [protocol notes](docs/SCREEN_SAVER_PROTOCOL.md).
 
 ## Soundboard
 
@@ -527,3 +563,10 @@ feedback, nested action cancellation, per-device settings and restart. The
 explicitly gated hardware sleep tests require exclusive device ownership and a
 selected serial; ordinary test runs do not write settings to a physical device.
 The protocol implementation follows [Elgato's HID reference](https://docs.elgato.com/streamdeck/hid/general/).
+
+`python tests/sleep_interop.py --binary target/release/deckforge` verifies static
+and animated frames, copied-asset persistence, wake input consumption, plugin
+continuity, lock simulation, cancellation and stale-import rejection. Timer
+boundaries use deterministic Rust tests; this suite does not wait five real
+minutes or lock the desktop. `DECKFORGE_TRACE_HID=1` logs accepted image-transfer
+metadata for an explicitly run host; it never logs image bytes.

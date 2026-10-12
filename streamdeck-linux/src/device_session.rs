@@ -17,6 +17,13 @@ pub enum Draw {
     Key(u8, DynamicImage),
     Strip(DynamicImage),
     Controls(Controls),
+    /// Keep the firmware idle timer suspended while software sleep is configured.
+    SleepPolicy(bool),
+    Screensaver {
+        generation: u64,
+        image: Option<DynamicImage>,
+        wake_on_input: bool,
+    },
     Stop,
 }
 
@@ -41,6 +48,12 @@ pub enum Event {
         reason: String,
     },
     Input(InputEvent),
+    Wake {
+        generation: u64,
+    },
+    /// A physical report or a successful normal image/control update. Screensaver
+    /// animation frames and read-only metadata do not count as activity.
+    Activity,
     /// Sleep is getter-verified; brightness means the HID setter was accepted,
     /// not physical brightness measurement or a readback that the protocol lacks.
     Controls {
@@ -79,8 +92,9 @@ pub fn spawn(
 
 trait Transport {
     fn serial(&self) -> &str;
-    fn read(&mut self, timeout_ms: i32) -> Result<Vec<InputEvent>>;
+    fn read_packet(&mut self, timeout_ms: i32, decode: bool) -> Result<Option<Vec<InputEvent>>>;
     fn write(&mut self, index: usize, image: &DynamicImage) -> Result<()>;
+    fn write_lcd(&mut self, image: &DynamicImage) -> Result<()>;
     fn sleep_seconds(&mut self) -> Result<u32>;
     fn set_brightness(&mut self, brightness: u8) -> Result<()>;
     fn set_sleep_seconds(&mut self, seconds: u32) -> Result<()>;
@@ -90,7 +104,7 @@ impl Transport for Deck {
         Deck::sleep_seconds(self)
     }
     fn set_brightness(&mut self, brightness: u8) -> Result<()> {
-        Deck::set_brightness(self, brightness)
+        Deck::set_brightness(self, crate::brightness::hid_value(brightness)?)
     }
     fn set_sleep_seconds(&mut self, seconds: u32) -> Result<()> {
         Deck::set_sleep_seconds(self, seconds)
@@ -98,8 +112,11 @@ impl Transport for Deck {
     fn serial(&self) -> &str {
         self.serial()
     }
-    fn read(&mut self, timeout_ms: i32) -> Result<Vec<InputEvent>> {
-        self.read_events(timeout_ms)
+    fn read_packet(&mut self, timeout_ms: i32, decode: bool) -> Result<Option<Vec<InputEvent>>> {
+        Deck::read_packet(self, timeout_ms, decode)
+    }
+    fn write_lcd(&mut self, image: &DynamicImage) -> Result<()> {
+        self.set_lcd_image(image)
     }
     fn write(&mut self, index: usize, image: &DynamicImage) -> Result<()> {
         if index == 8 {
@@ -111,6 +128,26 @@ impl Transport for Deck {
 }
 
 const RETRY: Duration = Duration::from_secs(1);
+struct Saver {
+    generation: u64,
+    image: Arc<DynamicImage>,
+    wake_on_input: bool,
+}
+enum Written {
+    None,
+    Normal,
+    Saver,
+}
+#[derive(Default)]
+struct Timer {
+    policy: bool,
+    stopping: bool,
+    baseline: Option<u32>,
+    owned: bool,
+    // A failed disable and a failed restore are distinct operations even when
+    // their value is zero. Animation frames never reset this attempt marker.
+    attempted: Option<(u32, bool)>,
+}
 struct Session<T> {
     device: Option<(T, String)>,
     serial: Option<String>,
@@ -121,10 +158,16 @@ struct Session<T> {
     next_retry: Duration,
     retry_reason: Option<String>,
     desired_controls: Controls,
-    attempted_controls: Controls,
+    attempted_brightness: Option<u8>,
     observed_controls: Controls,
     control_errors: [Option<String>; 2],
     control_cursor: usize,
+    saver: Option<Saver>,
+    saver_sent: Option<Arc<DynamicImage>>,
+    closed_generation: Option<u64>,
+    draining: Option<u64>,
+    wake_notification: bool,
+    timer: Timer,
 }
 impl<T: Transport> Session<T> {
     fn new(initial: Option<(T, String)>, serial: Option<String>) -> Self {
@@ -138,30 +181,69 @@ impl<T: Transport> Session<T> {
             next_retry: Duration::ZERO,
             retry_reason: None,
             desired_controls: Controls::default(),
-            attempted_controls: Controls::default(),
+            attempted_brightness: None,
             observed_controls: Controls::default(),
             control_errors: [None, None],
             control_cursor: 0,
+            saver: None,
+            saver_sent: None,
+            closed_generation: None,
+            draining: None,
+            wake_notification: false,
+            timer: Timer::default(),
         }
     }
 
     // Invalid key indices cannot enter the nine-frame cache.
     fn cache(&mut self, draw: Draw) -> bool {
         let (index, image) = match draw {
+            Draw::SleepPolicy(enabled) => {
+                self.timer.policy = enabled;
+                self.retry_timer();
+                return false;
+            }
+            Draw::Screensaver {
+                generation,
+                image,
+                wake_on_input,
+            } => {
+                if let Some(image) = image {
+                    if self
+                        .closed_generation
+                        .is_some_and(|closed| generation <= closed)
+                        || self
+                            .saver
+                            .as_ref()
+                            .is_some_and(|active| generation < active.generation)
+                    {
+                        return false;
+                    }
+                    self.saver = Some(Saver {
+                        generation,
+                        image: Arc::new(image),
+                        wake_on_input,
+                    });
+                } else {
+                    if let Some(active) = &self.saver
+                        && active.generation <= generation
+                    {
+                        self.draining = Some(active.generation);
+                        self.wake_notification = false;
+                    }
+                    self.close_saver(generation);
+                }
+                return false;
+            }
             Draw::Controls(controls) => {
                 // A new command can retry a failed field. Successful duplicates
                 // remain coalesced; None withdraws an override without resetting it.
-                if controls.brightness == self.attempted_controls.brightness
+                if controls.brightness == self.attempted_brightness
                     && controls.brightness != self.observed_controls.brightness
                 {
-                    self.attempted_controls.brightness = None;
-                }
-                if controls.sleep_seconds == self.attempted_controls.sleep_seconds
-                    && controls.sleep_seconds != self.observed_controls.sleep_seconds
-                {
-                    self.attempted_controls.sleep_seconds = None;
+                    self.attempted_brightness = None;
                 }
                 self.desired_controls = controls;
+                self.retry_timer();
                 return false;
             }
             Draw::Stop => return true,
@@ -228,11 +310,15 @@ impl<T: Transport> Session<T> {
             self.announce = false;
             self.retry_reason = None;
             self.observed_controls = Controls::default();
-            self.attempted_controls = Controls::default();
+            self.attempted_brightness = None;
+            self.timer.attempted = None;
             self.control_errors = [None, None];
             match self.device.as_mut().unwrap().0.sleep_seconds() {
                 Ok(seconds) if seconds <= i32::MAX as u32 => {
-                    self.observed_controls.sleep_seconds = Some(seconds)
+                    self.observed_controls.sleep_seconds = Some(seconds);
+                    if !self.timer.owned {
+                        self.timer.baseline = Some(seconds);
+                    }
                 }
                 Ok(_) => {
                     self.control_errors[1] =
@@ -243,21 +329,27 @@ impl<T: Transport> Session<T> {
             events.push(self.controls_event());
         }
         // Poll before each image, rather than holding input behind a full replay.
-        let timeout = if self.dirty().is_some() { 0 } else { 20 };
-        match self.device.as_mut().unwrap().0.read(timeout) {
-            Ok(input) => events.extend(input.into_iter().map(Event::Input)),
+        let timeout = if self.display_dirty() { 0 } else { 20 };
+        let mut activity = match self.poll_input(timeout, &mut events) {
+            Ok(activity) => activity,
             Err(error) => {
                 events.push(self.disconnect(now, error));
                 return events;
             }
-        }
+        };
         // At most one feature update per poll, with independent image progress.
         // Metadata failures do not evict a functioning input/image transport.
-        if let Some(event) = self.write_control() {
+        if let Some((event, success)) = self.write_control() {
             events.push(event);
+            activity |= success;
         }
-        if let Err(error) = self.write_one() {
-            events.push(self.disconnect(now, error));
+        match self.write_one() {
+            Ok(Written::Normal) => activity = true,
+            Ok(_) => {}
+            Err(error) => events.push(self.disconnect(now, error)),
+        }
+        if activity {
+            events.push(Event::Activity);
         }
         events
     }
@@ -275,7 +367,12 @@ impl<T: Transport> Session<T> {
     fn disconnect(&mut self, now: Duration, error: anyhow::Error) -> Event {
         self.device = None;
         self.sent.fill(None);
-        self.attempted_controls = Controls::default();
+        self.saver_sent = None;
+        self.attempted_brightness = None;
+        self.timer.attempted = None;
+        if !self.timer.owned {
+            self.timer.baseline = None;
+        }
         self.next_retry = now + RETRY;
         Event::Disconnected {
             reason: format!("{error:#}"),
@@ -293,7 +390,32 @@ impl<T: Transport> Session<T> {
             error: (!errors.is_empty()).then(|| errors.join("; ")),
         }
     }
-    fn write_control(&mut self) -> Option<Event> {
+    fn timer_target(&self) -> Option<(u32, bool)> {
+        let restore = self.desired_controls.sleep_seconds.or(self.timer.baseline);
+        let suspend = !self.timer.stopping
+            && (self.timer.policy || self.saver.is_some() || self.draining.is_some())
+            && restore.is_some_and(|seconds| seconds <= i32::MAX as u32);
+        if suspend {
+            Some((0, true))
+        } else if self.timer.owned {
+            restore.map(|seconds| (seconds, false))
+        } else {
+            self.desired_controls
+                .sleep_seconds
+                .map(|seconds| (seconds, false))
+        }
+    }
+    fn retry_timer(&mut self) {
+        if self.timer_target() == self.timer.attempted
+            && self
+                .timer_target()
+                .is_some_and(|(seconds, _)| self.observed_controls.sleep_seconds != Some(seconds))
+        {
+            self.timer.attempted = None;
+        }
+    }
+    fn write_control(&mut self) -> Option<(Event, bool)> {
+        let timer_target = self.timer_target();
         let (device, _) = self.device.as_mut()?;
         for offset in 0..2 {
             let field = (self.control_cursor + offset) % 2;
@@ -301,10 +423,10 @@ impl<T: Transport> Session<T> {
                 let Some(brightness) = self.desired_controls.brightness else {
                     continue;
                 };
-                if self.attempted_controls.brightness == Some(brightness) {
+                if self.attempted_brightness == Some(brightness) {
                     continue;
                 }
-                self.attempted_controls.brightness = Some(brightness);
+                self.attempted_brightness = Some(brightness);
                 let result = (|| {
                     ensure!(brightness <= 100, "brightness must be between 0 and 100");
                     device.set_brightness(brightness)
@@ -320,13 +442,32 @@ impl<T: Transport> Session<T> {
                     }
                 }
             } else {
-                let Some(seconds) = self.desired_controls.sleep_seconds else {
+                let Some((seconds, suspend)) = timer_target else {
                     continue;
                 };
-                if self.attempted_controls.sleep_seconds == Some(seconds) {
+                if suspend && !self.timer.owned {
+                    // The last getter/verified setter is the pre-override value.
+                    // If that is unknown, only an explicit user value supplies a
+                    // safe restore target; remember it even if later withdrawn.
+                    self.timer.baseline = self
+                        .observed_controls
+                        .sleep_seconds
+                        .or(self.timer.baseline)
+                        .or(self.desired_controls.sleep_seconds);
+                    self.timer.owned = true;
+                }
+                if self.observed_controls.sleep_seconds == Some(seconds) {
+                    self.timer.attempted = Some((seconds, suspend));
+                    if !suspend {
+                        self.timer.owned = false;
+                        self.timer.baseline = Some(seconds);
+                    }
                     continue;
                 }
-                self.attempted_controls.sleep_seconds = Some(seconds);
+                if self.timer.attempted == Some((seconds, suspend)) {
+                    continue;
+                }
+                self.timer.attempted = Some((seconds, suspend));
                 let result = (|| {
                     ensure!(
                         seconds <= i32::MAX as u32,
@@ -338,6 +479,10 @@ impl<T: Transport> Session<T> {
                     Ok(()) => {
                         self.observed_controls.sleep_seconds = Some(seconds);
                         self.control_errors[1] = None;
+                        if !suspend {
+                            self.timer.owned = false;
+                            self.timer.baseline = Some(seconds);
+                        }
                     }
                     Err(error) => {
                         self.observed_controls.sleep_seconds = None;
@@ -346,7 +491,7 @@ impl<T: Transport> Session<T> {
                 }
             }
             self.control_cursor = (field + 1) % 2;
-            return Some(self.controls_event());
+            return Some((self.controls_event(), self.control_errors[field].is_none()));
         }
         None
     }
@@ -361,28 +506,132 @@ impl<T: Transport> Session<T> {
                 })
             })
     }
-    fn write_one(&mut self) -> Result<bool> {
+    fn close_saver(&mut self, generation: u64) {
+        self.closed_generation = Some(
+            self.closed_generation
+                .map_or(generation, |old| old.max(generation)),
+        );
+        if self
+            .saver
+            .as_ref()
+            .is_some_and(|active| active.generation <= generation)
+        {
+            self.saver = None;
+            self.saver_sent = None;
+            self.sent.fill(None);
+        }
+    }
+    fn display_dirty(&self) -> bool {
+        if self.draining.is_some() {
+            return false;
+        }
+        if let Some(saver) = &self.saver {
+            return self
+                .saver_sent
+                .as_ref()
+                .is_none_or(|sent| !same(sent, &saver.image));
+        }
+        self.dirty().is_some()
+    }
+    fn poll_input(&mut self, timeout: i32, events: &mut Vec<Event>) -> Result<bool> {
+        let (device, _) = self.device.as_mut().unwrap();
+        if self.saver.is_none() && self.draining.is_none() {
+            return match device.read_packet(timeout, true)? {
+                Some(input) => {
+                    events.extend(input.into_iter().map(Event::Input));
+                    Ok(true)
+                }
+                None => Ok(false),
+            };
+        }
+        let mut activity = false;
+        // Consume the wake report and queued reports without touching decoder
+        // state. Resume across ticks if a burst exceeds this bounded batch.
+        for index in 0..256 {
+            let wait = if index == 0 && self.draining.is_none() {
+                timeout
+            } else {
+                0
+            };
+            match device.read_packet(wait, false)? {
+                Some(_) => {
+                    activity = true;
+                    if self.draining.is_none()
+                        && let Some(saver) = &self.saver
+                        && saver.wake_on_input
+                    {
+                        self.draining = Some(saver.generation);
+                        self.wake_notification = true;
+                        self.closed_generation = Some(
+                            self.closed_generation
+                                .map_or(saver.generation, |old| old.max(saver.generation)),
+                        );
+                    }
+                }
+                None => {
+                    if let Some(generation) = self.draining.take() {
+                        self.close_saver(generation);
+                        if self.wake_notification {
+                            events.push(Event::Wake { generation });
+                        }
+                        self.wake_notification = false;
+                    }
+                    break;
+                }
+            }
+        }
+        Ok(activity)
+    }
+    fn write_one(&mut self) -> Result<Written> {
+        if self.draining.is_some() {
+            return Ok(Written::None);
+        }
+        if let Some(saver) = &self.saver {
+            if self
+                .saver_sent
+                .as_ref()
+                .is_some_and(|sent| same(sent, &saver.image))
+            {
+                return Ok(Written::None);
+            }
+            let Some((device, _)) = self.device.as_mut() else {
+                return Ok(Written::None);
+            };
+            device.write_lcd(&saver.image)?;
+            self.saver_sent = Some(saver.image.clone());
+            return Ok(Written::Saver);
+        }
         let Some(index) = self.dirty() else {
-            return Ok(false);
+            return Ok(Written::None);
         };
         let Some((device, _)) = self.device.as_mut() else {
-            return Ok(false);
+            return Ok(Written::None);
         };
         let image = self.desired[index].as_ref().unwrap();
         device.write(index, image)?;
         self.sent[index] = Some(image.clone());
         self.cursor = (index + 1) % 9;
-        Ok(true)
+        Ok(Written::Normal)
     }
     fn stop(&mut self, now: Duration) -> Vec<Event> {
         let mut events = Vec::new();
-        while let Some(event) = self.write_control() {
+        self.timer.stopping = true;
+        // Shutdown makes one final bounded restoration attempt, even when an
+        // earlier normal wake restoration failed. Never reconnect just to do it.
+        if self.timer.owned {
+            self.timer.attempted = None;
+        }
+        if let Some(generation) = self.draining.take() {
+            self.close_saver(generation);
+            self.wake_notification = false;
+        }
+        while let Some((event, _)) = self.write_control() {
             events.push(event);
         }
         loop {
             match self.write_one() {
-                Ok(true) => {}
-                Ok(false) => return events,
+                Ok(Written::Normal | Written::Saver) => {}
+                Ok(Written::None) => return events,
                 Err(error) => {
                     events.push(self.disconnect(now, error));
                     return events;
@@ -466,6 +715,7 @@ mod tests {
         reads: usize,
         features: Vec<(u8, u32)>,
         sleep_queries: usize,
+        decoding: Vec<bool>,
     }
     struct Fake {
         serial: String,
@@ -473,10 +723,12 @@ mod tests {
         read_error: bool,
         write_error: bool,
         inputs: Vec<InputEvent>,
+        packets: VecDeque<Vec<InputEvent>>,
         sleep: u32,
         sleep_read_error: bool,
         brightness_error: bool,
         sleep_write_error: bool,
+        on_sleep_set: Option<Box<dyn FnMut(u32) + Send>>,
     }
     impl Transport for Fake {
         fn sleep_seconds(&mut self) -> Result<u32> {
@@ -495,6 +747,9 @@ mod tests {
         }
         fn set_sleep_seconds(&mut self, seconds: u32) -> Result<()> {
             self.calls.lock().unwrap().features.push((1, seconds));
+            if let Some(callback) = &mut self.on_sleep_set {
+                callback(seconds);
+            }
             ensure!(!self.sleep_write_error, "sleep readback mismatch");
             self.sleep = seconds;
             self.sleep_seconds()?;
@@ -503,10 +758,22 @@ mod tests {
         fn serial(&self) -> &str {
             &self.serial
         }
-        fn read(&mut self, _: i32) -> Result<Vec<InputEvent>> {
-            self.calls.lock().unwrap().reads += 1;
+        fn read_packet(&mut self, _: i32, decode: bool) -> Result<Option<Vec<InputEvent>>> {
+            {
+                let mut calls = self.calls.lock().unwrap();
+                calls.reads += 1;
+                calls.decoding.push(decode);
+            }
             ensure!(!self.read_error, "read failed");
-            Ok(std::mem::take(&mut self.inputs))
+            let packet = if !self.inputs.is_empty() {
+                Some(std::mem::take(&mut self.inputs))
+            } else {
+                self.packets.pop_front()
+            };
+            Ok(packet.map(|events| if decode { events } else { Vec::new() }))
+        }
+        fn write_lcd(&mut self, image: &DynamicImage) -> Result<()> {
+            self.write(9, image)
         }
         fn write(&mut self, index: usize, image: &DynamicImage) -> Result<()> {
             ensure!(!self.write_error, "write failed");
@@ -527,10 +794,12 @@ mod tests {
                 read_error: false,
                 write_error: false,
                 inputs: Vec::new(),
+                packets: VecDeque::new(),
                 sleep: 600,
                 sleep_read_error: false,
                 brightness_error: false,
                 sleep_write_error: false,
+                on_sleep_set: None,
             },
             calls,
         )
@@ -555,7 +824,7 @@ mod tests {
         session.cache(Draw::Strip(frame(3)));
         let events = session.tick(Duration::ZERO, &mut never);
         assert!(
-            matches!(&events[..], [Event::Connected { serial, .. }, Event::Controls { error: None, .. }, Event::Input(_)] if serial == "A")
+            matches!(&events[..], [Event::Connected { serial, .. }, Event::Controls { error: None, .. }, Event::Input(_), Event::Activity] if serial == "A")
         );
         session.tick(Duration::ZERO, &mut never);
         session.cache(Draw::Key(0, frame(2)));
@@ -618,7 +887,7 @@ mod tests {
                 Ok(replacements.pop_front().unwrap())
             };
             assert!(
-                matches!(&session.tick(RETRY, &mut open)[..], [Event::Connected { firmware, .. }, Event::Controls { .. }] if firmware == "2")
+                matches!(&session.tick(RETRY, &mut open)[..], [Event::Connected { firmware, .. }, Event::Controls { .. }, Event::Activity] if firmware == "2")
             );
             for _ in 0..8 {
                 session.tick(RETRY, &mut never);
@@ -846,7 +1115,7 @@ mod tests {
         session.tick(RETRY * 20, &mut never);
         let events = session.tick(RETRY * 20, &mut never);
         assert!(
-            matches!(&events[..], [Event::Controls { controls: observed, error: None }] if *observed == controls)
+            matches!(&events[..], [Event::Controls { controls: observed, error: None }, Event::Activity] if *observed == controls)
         );
         assert_eq!(
             calls.lock().unwrap().features,
@@ -882,6 +1151,426 @@ mod tests {
             sleep_seconds: Some(0),
         }));
         assert!(offline.stop(Duration::ZERO).is_empty());
+    }
+
+    fn saver(generation: u64, value: u8, wake_on_input: bool) -> Draw {
+        Draw::Screensaver {
+            generation,
+            image: Some(frame(value)),
+            wake_on_input,
+        }
+    }
+    fn clear_saver(generation: u64) -> Draw {
+        Draw::Screensaver {
+            generation,
+            image: None,
+            wake_on_input: true,
+        }
+    }
+
+    #[test]
+    fn screensaver_coalesces_full_frames_hides_normal_updates_and_replays_all_nine_on_clear() {
+        let (deck, calls) = fake("A");
+        let mut session = Session::new(Some((deck, "1".into())), None);
+        for key in 0..8 {
+            session.cache(Draw::Key(key, frame(key)));
+        }
+        session.cache(Draw::Strip(frame(8)));
+        for _ in 0..9 {
+            session.tick(Duration::ZERO, &mut never);
+        }
+        calls.lock().unwrap().writes.clear();
+        session.cache(saver(1, 200, true));
+        assert!(matches!(
+            &session.tick(Duration::ZERO, &mut never)[..],
+            [Event::Controls { .. }, Event::Activity]
+        ));
+        session.cache(Draw::Key(0, frame(99)));
+        session.cache(Draw::Strip(frame(77)));
+        assert!(session.tick(Duration::ZERO, &mut never).is_empty());
+        session.cache(saver(1, 201, true));
+        session.cache(saver(1, 202, true));
+        assert!(session.tick(Duration::ZERO, &mut never).is_empty());
+        session.cache(saver(1, 202, true));
+        assert!(session.tick(Duration::ZERO, &mut never).is_empty());
+        assert_eq!(calls.lock().unwrap().writes, [(9, 200), (9, 202)]);
+        session.cache(clear_saver(1));
+        for index in 0..9 {
+            let events = session.tick(Duration::ZERO, &mut never);
+            assert_eq!(events.len(), if index == 0 { 2 } else { 1 });
+            assert!(matches!(events.last(), Some(Event::Activity)));
+        }
+        let writes = &calls.lock().unwrap().writes;
+        assert_eq!(writes.len(), 11);
+        assert!(writes[2..].contains(&(0, 99)) && writes[2..].contains(&(8, 77)));
+        for key in 1..8 {
+            assert!(writes[2..].contains(&(key, key as u8)));
+        }
+    }
+
+    #[test]
+    fn wake_consumes_first_packet_and_bounded_queued_reports_before_decoding_resumes() {
+        let (deck, calls) = fake("A");
+        let mut session = Session::new(Some((deck, "1".into())), None);
+        session.cache(Draw::Key(0, frame(4)));
+        session.tick(Duration::ZERO, &mut never);
+        session.cache(saver(7, 200, true));
+        session.tick(Duration::ZERO, &mut never);
+        session.device.as_mut().unwrap().0.packets = (0..300)
+            .map(|index| {
+                vec![InputEvent::Key {
+                    index: 0,
+                    pressed: index % 2 == 0,
+                }]
+            })
+            .collect();
+        let events = session.tick(Duration::ZERO, &mut never);
+        assert!(matches!(&events[..], [Event::Activity]));
+        assert_eq!(session.draining, Some(7));
+        assert_eq!(calls.lock().unwrap().writes, [(0, 4), (9, 200)]);
+        session.cache(saver(7, 201, true)); // Queued animation must not undo waking.
+        let events = session.tick(Duration::ZERO, &mut never);
+        assert!(matches!(
+            &events[..],
+            [
+                Event::Wake { generation: 7 },
+                Event::Controls { .. },
+                Event::Activity
+            ]
+        ));
+        assert!(session.saver.is_none() && session.draining.is_none());
+        assert_eq!(calls.lock().unwrap().writes, [(0, 4), (9, 200), (0, 4)]);
+        assert!(
+            calls.lock().unwrap().decoding[1..]
+                .iter()
+                .all(|decode| !decode)
+        );
+        session
+            .device
+            .as_mut()
+            .unwrap()
+            .0
+            .packets
+            .push_back(vec![InputEvent::Key {
+                index: 0,
+                pressed: true,
+            }]);
+        assert!(matches!(
+            &session.tick(Duration::ZERO, &mut never)[..],
+            [
+                Event::Input(InputEvent::Key { pressed: true, .. }),
+                Event::Activity
+            ]
+        ));
+        assert!(session.tick(Duration::ZERO, &mut never).is_empty());
+    }
+
+    #[test]
+    fn empty_decoded_packet_wakes_but_locked_policy_consumes_without_waking() {
+        let (deck, calls) = fake("A");
+        let mut session = Session::new(Some((deck, "1".into())), None);
+        session.cache(saver(10, 200, false));
+        session.tick(Duration::ZERO, &mut never);
+        session
+            .device
+            .as_mut()
+            .unwrap()
+            .0
+            .packets
+            .push_back(Vec::new());
+        assert!(matches!(
+            &session.tick(Duration::ZERO, &mut never)[..],
+            [Event::Activity]
+        ));
+        assert_eq!(session.saver.as_ref().unwrap().generation, 10);
+        session.cache(saver(10, 201, true));
+        session
+            .device
+            .as_mut()
+            .unwrap()
+            .0
+            .packets
+            .push_back(Vec::new());
+        assert!(matches!(
+            &session.tick(Duration::ZERO, &mut never)[..],
+            [
+                Event::Wake { generation: 10 },
+                Event::Controls { .. },
+                Event::Activity
+            ]
+        ));
+        assert!(session.saver.is_none());
+        session.cache(saver(10, 202, true));
+        session.cache(saver(9, 203, true));
+        assert!(session.tick(Duration::ZERO, &mut never).is_empty());
+        assert_eq!(calls.lock().unwrap().writes, [(9, 200)]);
+    }
+
+    #[test]
+    fn explicit_wake_discards_sleeping_backlog_without_an_input_wake_notification() {
+        let (deck, calls) = fake("A");
+        let mut session = Session::new(Some((deck, "1".into())), None);
+        session.cache(Draw::Key(0, frame(4)));
+        session.cache(saver(11, 200, false));
+        session.tick(Duration::ZERO, &mut never);
+        session.device.as_mut().unwrap().0.packets = (0..300)
+            .map(|_| {
+                vec![InputEvent::Key {
+                    index: 0,
+                    pressed: true,
+                }]
+            })
+            .collect();
+        session.cache(clear_saver(11));
+        assert!(matches!(
+            &session.tick(Duration::ZERO, &mut never)[..],
+            [Event::Activity]
+        ));
+        assert!(session.draining.is_some());
+        assert_eq!(calls.lock().unwrap().writes, [(9, 200)]);
+        assert!(matches!(
+            &session.tick(Duration::ZERO, &mut never)[..],
+            [Event::Controls { .. }, Event::Activity]
+        ));
+        assert!(session.draining.is_none());
+        assert_eq!(calls.lock().unwrap().writes, [(9, 200), (0, 4)]);
+    }
+
+    #[test]
+    fn old_clear_cannot_cancel_new_generation_and_reconnect_replays_active_layer_only() {
+        let (deck, _) = fake("A");
+        let mut session = Session::new(Some((deck, "1".into())), None);
+        session.cache(Draw::Key(0, frame(4)));
+        session.cache(saver(1, 200, true));
+        session.tick(Duration::ZERO, &mut never);
+        session.cache(saver(2, 201, true));
+        session.cache(clear_saver(1));
+        session.cache(saver(1, 202, true));
+        session.tick(Duration::ZERO, &mut never);
+        assert_eq!(session.saver.as_ref().unwrap().generation, 2);
+        session.device.as_mut().unwrap().0.read_error = true;
+        assert!(matches!(
+            &session.tick(Duration::ZERO, &mut never)[..],
+            [Event::Disconnected { .. }]
+        ));
+        let (replacement, calls) = fake("A");
+        let mut replacement = Some(replacement);
+        let events = session.tick(RETRY, &mut |_| {
+            Ok((replacement.take().unwrap(), "1".into()))
+        });
+        assert!(matches!(
+            &events[..],
+            [
+                Event::Connected { .. },
+                Event::Controls { .. },
+                Event::Controls { .. },
+                Event::Activity
+            ]
+        ));
+        assert_eq!(calls.lock().unwrap().writes, [(9, 201)]);
+        session.cache(clear_saver(2));
+        session.tick(RETRY, &mut never);
+        assert_eq!(calls.lock().unwrap().writes, [(9, 201), (0, 4)]);
+    }
+
+    #[test]
+    fn fullscreen_write_failure_disconnects_and_stop_flushes_only_the_selected_layer() {
+        let (mut deck, _) = fake("A");
+        deck.write_error = true;
+        let mut session = Session::new(Some((deck, "1".into())), None);
+        session.cache(Draw::Key(0, frame(4)));
+        session.cache(saver(4, 200, true));
+        let events = session.tick(Duration::ZERO, &mut never);
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, Event::Disconnected { .. }))
+        );
+        let (replacement, calls) = fake("A");
+        let mut replacement = Some(replacement);
+        session.tick(RETRY, &mut |_| {
+            Ok((replacement.take().unwrap(), "1".into()))
+        });
+        session.cache(saver(4, 201, true));
+        assert!(matches!(&session.stop(RETRY)[..], [Event::Controls { .. }]));
+        assert_eq!(calls.lock().unwrap().writes, [(9, 200), (9, 201)]);
+        session.cache(clear_saver(4));
+        session.stop(RETRY);
+        assert_eq!(calls.lock().unwrap().writes, [(9, 200), (9, 201), (0, 4)]);
+    }
+
+    #[test]
+    fn timer_baseline_survives_rapid_sleep_wake_cycles_without_host_acknowledgements() {
+        let (deck, calls) = fake("A");
+        let mut session = Session::new(Some((deck, "1".into())), None);
+        session.tick(Duration::ZERO, &mut never);
+        session.cache(saver(1, 200, true));
+        session.tick(Duration::ZERO, &mut never); // Its Controls(0) event is deliberately ignored.
+        session.cache(clear_saver(1));
+        session.cache(saver(2, 201, true));
+        session.tick(Duration::ZERO, &mut never);
+        assert_eq!(session.timer.baseline, Some(600));
+        assert_eq!(calls.lock().unwrap().features, [(1, 0)]);
+        session.cache(clear_saver(2));
+        session.tick(Duration::ZERO, &mut never);
+        assert!(!session.timer.owned);
+        assert_eq!(session.observed_controls.sleep_seconds, Some(600));
+        session.cache(saver(3, 202, true));
+        session.tick(Duration::ZERO, &mut never);
+        session.cache(clear_saver(3));
+        session.stop(Duration::ZERO); // Restore even before the ordinary clear tick.
+        assert_eq!(
+            calls.lock().unwrap().features,
+            [(1, 0), (1, 600), (1, 0), (1, 600)]
+        );
+    }
+
+    #[test]
+    fn wake_queued_inside_zero_setter_then_stop_restores_in_worker_order() {
+        let (mut deck, calls) = fake("A");
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(Draw::SleepPolicy(true)).unwrap();
+        tx.send(Draw::Key(0, frame(4))).unwrap();
+        deck.on_sleep_set = Some(Box::new(move |seconds| {
+            if seconds == 0 {
+                tx.send(Draw::SleepPolicy(false)).unwrap();
+                tx.send(Draw::Stop).unwrap();
+            }
+        }));
+        let (events, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+        worker(Some((deck, "1".into())), None, rx, events, never);
+        assert_eq!(calls.lock().unwrap().features, [(1, 0), (1, 600)]);
+        let observations: Vec<_> = std::iter::from_fn(|| event_rx.try_recv().ok())
+            .filter_map(|event| {
+                if let Event::Controls {
+                    controls,
+                    error: None,
+                } = event
+                {
+                    controls.sleep_seconds
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(observations, [600, 0, 600]);
+    }
+
+    #[test]
+    fn configured_software_policy_restores_explicit_timer_on_stop_without_uncovering_locked_layer()
+    {
+        let (deck, calls) = fake("A");
+        let mut session = Session::new(Some((deck, "1".into())), None);
+        session.cache(Draw::Controls(Controls {
+            brightness: None,
+            sleep_seconds: Some(900),
+        }));
+        session.cache(Draw::SleepPolicy(true));
+        session.cache(Draw::Key(0, frame(4)));
+        session.tick(Duration::ZERO, &mut never);
+        assert_eq!(calls.lock().unwrap().features, [(1, 0)]);
+        assert!(session.timer.owned);
+        session.cache(saver(1, 200, false));
+        session.tick(Duration::ZERO, &mut never);
+        session.cache(saver(1, 201, false));
+        session.stop(Duration::ZERO);
+        assert!(!session.timer.owned);
+        assert!(session.saver.is_some());
+        assert_eq!(calls.lock().unwrap().features, [(1, 0), (1, 900)]);
+        assert_eq!(calls.lock().unwrap().writes, [(0, 4), (9, 200), (9, 201)]);
+    }
+
+    #[test]
+    fn already_zero_timer_deduplicates_disable_and_restore_without_waiting_for_an_event() {
+        let (mut deck, calls) = fake("A");
+        deck.sleep = 0;
+        let mut session = Session::new(Some((deck, "1".into())), None);
+        session.cache(Draw::SleepPolicy(true));
+        session.tick(Duration::ZERO, &mut never);
+        assert!(session.timer.owned);
+        session.cache(Draw::SleepPolicy(false));
+        assert!(session.tick(Duration::ZERO, &mut never).is_empty());
+        assert!(!session.timer.owned);
+        assert!(calls.lock().unwrap().features.is_empty());
+    }
+
+    #[test]
+    fn stop_restores_baseline_even_while_software_policy_remains_enabled_and_awake() {
+        let (deck, calls) = fake("A");
+        let mut session = Session::new(Some((deck, "1".into())), None);
+        session.cache(Draw::SleepPolicy(true));
+        session.tick(Duration::ZERO, &mut never);
+        assert!(session.saver.is_none());
+        assert!(session.timer.policy && session.timer.owned);
+        session.stop(Duration::ZERO);
+        assert!(!session.timer.owned);
+        assert_eq!(calls.lock().unwrap().features, [(1, 0), (1, 600)]);
+    }
+
+    #[test]
+    fn unknown_baseline_defers_zero_and_animation_does_not_retry_failed_feature_writes() {
+        let (mut deck, calls) = fake("A");
+        deck.sleep_read_error = true;
+        let mut session = Session::new(Some((deck, "1".into())), None);
+        session.cache(Draw::SleepPolicy(true));
+        session.cache(saver(1, 200, true));
+        session.tick(Duration::ZERO, &mut never);
+        assert!(calls.lock().unwrap().features.is_empty());
+        assert!(!session.timer.owned);
+        session.cache(Draw::Controls(Controls {
+            brightness: None,
+            sleep_seconds: Some(600),
+        }));
+        session.tick(Duration::ZERO, &mut never); // Explicit target permits zero; readback still fails.
+        assert!(session.timer.owned);
+        assert_eq!(session.timer.baseline, Some(600));
+        for value in 201..210 {
+            session.cache(saver(1, value, true));
+            session.tick(Duration::ZERO, &mut never);
+        }
+        assert_eq!(calls.lock().unwrap().features, [(1, 0)]);
+        session.cache(clear_saver(1));
+        session.cache(Draw::SleepPolicy(false));
+        session.tick(Duration::ZERO, &mut never);
+        assert!(session.timer.owned); // Failed restore does not relinquish ownership.
+        assert_eq!(calls.lock().unwrap().features, [(1, 0), (1, 600)]);
+        session.device.as_mut().unwrap().0.sleep_read_error = false;
+        session.cache(Draw::Controls(Controls::default())); // Removing override cannot lose its fallback.
+        session.tick(Duration::ZERO, &mut never);
+        assert!(!session.timer.owned);
+        assert_eq!(calls.lock().unwrap().features, [(1, 0), (1, 600), (1, 600)]);
+    }
+
+    #[test]
+    fn reconnect_preserves_owned_baseline_but_refreshes_it_after_restoration() {
+        let (deck, _) = fake("A");
+        let mut session = Session::new(Some((deck, "1".into())), None);
+        session.cache(Draw::SleepPolicy(true));
+        session.tick(Duration::ZERO, &mut never);
+        session.device.as_mut().unwrap().0.read_error = true;
+        session.tick(Duration::ZERO, &mut never);
+        let (mut replacement, calls) = fake("A");
+        replacement.sleep = 0;
+        let mut replacement = Some(replacement);
+        session.tick(RETRY, &mut |_| {
+            Ok((replacement.take().unwrap(), "1".into()))
+        });
+        assert_eq!(session.timer.baseline, Some(600));
+        assert!(calls.lock().unwrap().features.is_empty());
+        session.cache(Draw::SleepPolicy(false));
+        session.tick(RETRY, &mut never);
+        assert_eq!(calls.lock().unwrap().features, [(1, 600)]);
+        assert!(!session.timer.owned);
+        session.device.as_mut().unwrap().0.read_error = true;
+        session.tick(RETRY, &mut never);
+        let (mut replacement, calls) = fake("A");
+        replacement.sleep = 900;
+        let mut replacement = Some(replacement);
+        session.tick(RETRY * 2, &mut |_| {
+            Ok((replacement.take().unwrap(), "1".into()))
+        });
+        assert_eq!(session.timer.baseline, Some(900));
+        assert!(calls.lock().unwrap().features.is_empty());
     }
 
     /// Explicitly run only after the normal host has released this device.
@@ -924,13 +1613,21 @@ mod tests {
             fn serial(&self) -> &str {
                 self.deck.serial()
             }
-            fn read(&mut self, timeout_ms: i32) -> Result<Vec<InputEvent>> {
+            fn read_packet(
+                &mut self,
+                timeout_ms: i32,
+                decode: bool,
+            ) -> Result<Option<Vec<InputEvent>>> {
                 ensure!(
                     !self.counts.fail_first_read.swap(false, Ordering::SeqCst),
                     CONTROLLED_ERROR
                 );
                 // Inputs go only to the test's event receiver. No host executes them.
-                self.deck.read_events(timeout_ms)
+                self.deck.read_packet(timeout_ms, decode)
+            }
+            fn write_lcd(&mut self, _: &DynamicImage) -> Result<()> {
+                self.counts.writes.fetch_add(1, Ordering::SeqCst);
+                anyhow::bail!("probe forbids all LCD writes")
             }
             fn write(&mut self, _: usize, _: &DynamicImage) -> Result<()> {
                 self.counts.writes.fetch_add(1, Ordering::SeqCst);
@@ -1011,6 +1708,7 @@ mod tests {
         while Instant::now() < deadline {
             match event_rx.try_recv() {
                 Ok(Event::Input(_)) => input_count += 1,
+                Ok(Event::Activity) => {}
                 Ok(Event::Controls { controls, error }) => eprintln!(
                     "REAL_HID_CLOSE_REOPEN_PROBE read-only metadata={controls:?}, error={error:?}"
                 ),

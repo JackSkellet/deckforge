@@ -17,6 +17,7 @@ use std::{
     time::Duration,
 };
 
+pub const SLEEP: &str = "com.elgato.streamdeck.system.sleep";
 pub const WEBSITE: &str = "com.elgato.streamdeck.system.website";
 pub const OPEN: &str = "com.elgato.streamdeck.system.open";
 pub const HOTKEY: &str = "com.elgato.streamdeck.system.hotkey";
@@ -24,11 +25,12 @@ pub const MULTIMEDIA: &str = "com.elgato.streamdeck.system.multimedia";
 pub fn supported(uuid: &str) -> bool {
     matches!(
         uuid,
-        WEBSITE | OPEN | HOTKEY | MULTIMEDIA | crate::brightness::UUID
+        WEBSITE | OPEN | HOTKEY | MULTIMEDIA | crate::brightness::UUID | SLEEP
     )
 }
 pub fn definitions() -> Vec<(&'static str, &'static str, Value)> {
     vec![
+        (SLEEP, "Sleep", json!({"DeviceUUID":""})),
         (
             crate::brightness::UUID,
             "Device brightness",

@@ -16,6 +16,8 @@ mod preferences;
 mod profile;
 mod render;
 mod resources;
+mod screensaver;
+mod session_activity;
 mod soundboard;
 mod soundboard_editor;
 mod stack_editor;

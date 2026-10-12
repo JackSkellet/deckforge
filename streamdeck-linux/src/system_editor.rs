@@ -12,6 +12,19 @@ const MEDIA: &str = "com.elgato.streamdeck.system.multimedia";
 /// None leaves configuration to the generic editor. Some(false) is a supported
 /// editor with no changes; merely displaying imported settings never rewrites them.
 pub fn edit(ui: &mut egui::Ui, uuid: &str, controller: &str, settings: &mut Value) -> Option<bool> {
+    if uuid == crate::system_actions::SLEEP {
+        if !settings.is_null() && !settings.is_object() {
+            ui.weak("Use advanced settings for this imported configuration.");
+            return Some(false);
+        }
+        return Some(string_field(
+            ui,
+            settings,
+            "DeviceUUID",
+            "Device (leave empty for all)",
+            "All Stream Decks",
+        ));
+    }
     if uuid == crate::brightness::UUID {
         return Some(crate::brightness::edit(ui, controller, settings));
     }

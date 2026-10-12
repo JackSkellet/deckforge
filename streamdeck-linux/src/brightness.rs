@@ -7,6 +7,13 @@ use serde_json::{Value, json};
 pub const UUID: &str = "com.elgato.streamdeck.system.keybrightness";
 pub const DEFAULT: u8 = 80;
 
+/// Original Plus logical brightness mapping. Raw zero is reserved for sleep;
+/// normal UI0..100 maps to firmware4..100 (native min4, max100).
+pub fn hid_value(percent: u8) -> Result<u8> {
+    ensure!(percent <= 100, "Brightness must be between0 and100");
+    Ok(4 + (u16::from(percent) * 96 / 100) as u8)
+}
+
 const MODES: [&str; 7] = [
     "Increase by 10%",
     "Decrease by 10%",
@@ -140,6 +147,20 @@ fn set_mode(settings: &mut Value, chosen: u8) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn original_plus_logical_to_raw_brightness_mapping() {
+        for percent in 0..=100 {
+            assert_eq!(
+                hid_value(percent).unwrap(),
+                (4.0 + 96.0 * f64::from(percent) / 100.0) as u8
+            );
+        }
+        assert_eq!(hid_value(0).unwrap(), 4);
+        assert_eq!(hid_value(50).unwrap(), 52);
+        assert_eq!(hid_value(80).unwrap(), 80);
+        assert_eq!(hid_value(100).unwrap(), 100);
+        assert!(hid_value(101).is_err());
+    }
 
     #[test]
     fn key_modes_defaults_and_clamping_match_the_original_action() {

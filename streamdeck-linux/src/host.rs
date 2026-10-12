@@ -43,6 +43,7 @@ mod inspectors;
 mod library;
 mod multiaction;
 mod resources;
+mod screensaver;
 mod stack;
 mod trigger;
 mod volume;
@@ -67,6 +68,32 @@ impl Controller {
         snapshot(&self.shared.lock().unwrap())
     }
     pub fn command(&self, request: Value) -> Result<()> {
+        if request["command"] == "screensaver" {
+            let (device, previous, path) = {
+                let host = self.shared.lock().unwrap();
+                if !host.running {
+                    bail!("Host has stopped");
+                }
+                if let Some(expected) = request.get("device") {
+                    anyhow::ensure!(
+                        expected.as_str() == Some(host.device.as_str()),
+                        "Selected device changed; try again"
+                    );
+                }
+                (
+                    host.device.clone(),
+                    host.saver_preferences(),
+                    host.state_path.clone(),
+                )
+            };
+            let prepared = screensaver::prepare(&request, &previous, &path)?;
+            let mut host = self.shared.lock().unwrap();
+            anyhow::ensure!(
+                host.running && host.device == device,
+                "Selected device changed or host stopped while loading"
+            );
+            return host.apply_saver(prepared);
+        }
         let mut host = self.shared.lock().unwrap();
         if !host.running {
             bail!("Host has stopped");
@@ -241,6 +268,8 @@ mod image_serde {
 #[derive(Serialize, Deserialize, Default)]
 struct Saved {
     #[serde(default)]
+    screensavers: HashMap<String, screensaver::Preferences>,
+    #[serde(default)]
     device_controls: HashMap<String, device_session::Controls>,
     #[serde(default)]
     device_config: Option<device::Config>,
@@ -258,6 +287,10 @@ enum HeldControl {
     Dial(u8),
 }
 struct Host {
+    screensavers: HashMap<String, screensaver::Preferences>,
+    saver: screensaver::Runtime,
+    session_monitor: Option<crate::session_activity::Worker>,
+    session_state: Option<crate::session_activity::State>,
     brightness_repeats: HashMap<String, (u8, Duration)>,
     device_controls: HashMap<String, device_session::Controls>,
     controls_observed: device_session::Controls,
@@ -338,6 +371,7 @@ impl Host {
         let pending = self.state_path.with_extension("tmp");
         #[derive(Serialize)]
         struct View<'a> {
+            screensavers: &'a HashMap<String, screensaver::Preferences>,
             device_controls: &'a HashMap<String, device_session::Controls>,
             device_config: &'a Option<device::Config>,
             library: &'a Library,
@@ -346,6 +380,7 @@ impl Host {
             globals: &'a HashMap<String, Value>,
         }
         let data = serde_json::to_vec_pretty(&View {
+            screensavers: &self.screensavers,
             device_controls: &self.device_controls,
             device_config: &self.device_config,
             library: &self.library,
@@ -529,6 +564,20 @@ impl Host {
             }
             let _ = hardware.send(Draw::Strip(strip));
         }
+        if self.simulate {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::hash::DefaultHasher::new();
+            for slot in &self.slots {
+                slot.preview.hash(&mut hasher);
+            }
+            let signature = hasher.finish();
+            if self.saver.normal_signature != Some(signature) && !self.saver.active {
+                self.saver.activity = self.multi_clock.elapsed();
+                self.multi_notify.notify_one();
+            }
+            self.saver.normal_signature = Some(signature);
+        }
+        self.render_saver()?;
         if let Some(redraw) = &self.redraw {
             redraw();
         }
@@ -801,6 +850,25 @@ impl Host {
         slot: &Slot,
         trigger: crate::system_actions::Trigger,
     ) -> Result<()> {
+        if slot.uuid == screensaver::UUID {
+            if matches!(trigger, crate::system_actions::Trigger::Up) && slot.controller == "Keypad"
+            {
+                if !self.connected {
+                    bail!("Sleep target device is not connected");
+                }
+                let target = match slot.settings.get("DeviceUUID") {
+                    None | Some(Value::Null) => "",
+                    Some(value) => value
+                        .as_str()
+                        .context("Sleep target must be a device identifier")?,
+                };
+                if !target.is_empty() && target != self.device {
+                    bail!("Sleep target device is not connected");
+                }
+                self.sleep_device("action")?;
+            }
+            return Ok(());
+        }
         if slot.uuid == crate::brightness::UUID {
             return self.brightness_input(slot, trigger);
         }
@@ -849,6 +917,9 @@ impl Host {
         }
     }
     fn input(&mut self, event: InputEvent) -> Result<()> {
+        if self.saver_input(&event)? {
+            return Ok(());
+        }
         self.log(format!("{event:?}"));
         let (index, name, extra) = match event {
             InputEvent::Key { index, pressed } => {
@@ -1157,7 +1228,7 @@ fn slot_snapshot(host: &Host, s: &Slot) -> Value {
         "has_inspector":host.actions.iter().find(|a|a.uuid==s.uuid).is_some_and(|a|a.raw["PropertyInspectorPath"].is_string()||host.plugins.iter().find(|p|p.id==a.plugin).is_some_and(|p|p.manifest["PropertyInspectorPath"].is_string()))})
 }
 fn snapshot(host: &Host) -> Value {
-    json!({"device_settings":{"desired":host.configured_controls(),"applied":host.controls_observed,"error":host.controls_error},"library":host.library.snapshot(),"running":host.running,"device":host.device,"firmware":host.firmware,"simulate":host.simulate,"connected":host.connected && !host.simulate,"device_online":host.connected,"connection_error":host.connection_error,
+    json!({"screensaver":{"active":host.saver.active,"reason":host.saver.reason,"generation":host.saver.generation,"preferences":host.saver_preferences(),"preview":host.saver.preview,"error":host.saver.error,"frames":host.saver.animation.as_ref().map(|animation|animation.len())},"session":host.session_state,"device_settings":{"desired":host.configured_controls(),"applied":host.controls_observed,"error":host.controls_error},"library":host.library.snapshot(),"running":host.running,"device":host.device,"firmware":host.firmware,"simulate":host.simulate,"connected":host.connected && !host.simulate,"device_online":host.connected,"connection_error":host.connection_error,
         "volume":host.volume_state,"volume_error":host.volume_error,"multi_runs":host.multi.snapshot(),"multi_pending":host.multi_pending.len(),"audio_outputs":host.audio_outputs,"audio_active":host.audio_active,"system_status":host.system_status,"slots":host.slots.iter().map(|s|slot_snapshot(host,s)).collect::<Vec<_>>(),
         "inspectors":host.inspectors.values().map(|i|json!({"context":i.context,"plugin":host.plugins[i.plugin].id,"connected":i.sender.is_some()})).collect::<Vec<_>>(),
         "actions":host.actions.iter().map(|a|json!({"uuid":a.uuid,"name":a.name,"plugin":a.plugin,"controllers":a.controllers,"states":a.raw["States"],"supported_in_multi":a.raw["SupportedInMultiActions"]!=false && !multiaction::container(&a.uuid),"multi_only":a.uuid==multiaction::DELAY,"defaults":if a.uuid=="com.elgato.streamdeck.page.goto"{json!({"PageIndex":1})}else if a.uuid==multiaction::DELAY{json!({"delay":1000})}else{crate::audio_output::defaults(&a.uuid).unwrap_or_else(||crate::system_actions::defaults(&a.uuid))}})).collect::<Vec<_>>(),
@@ -1177,11 +1248,17 @@ async fn control(
     headers: HeaderMap,
     Json(request): Json<Value>,
 ) -> Response {
-    let mut host = state.lock().unwrap();
-    if !authorize(&headers, &host) {
+    if !authorize(&headers, &state.lock().unwrap()) {
         return (StatusCode::FORBIDDEN, "Invalid editor token").into_response();
     }
-    match apply_control(&mut host, request) {
+    let result = if request["command"] == "screensaver" {
+        tokio::task::spawn_blocking(move || Controller { shared: state }.command(request))
+            .await
+            .unwrap_or_else(|error| Err(anyhow::anyhow!("Image loader failed: {error}")))
+    } else {
+        apply_control(&mut state.lock().unwrap(), request)
+    };
+    match result {
         Ok(()) => Json(json!({"ok":true})).into_response(),
         Err(e) => (
             StatusCode::BAD_REQUEST,
@@ -1213,6 +1290,19 @@ fn apply_control(host: &mut Host, r: Value) -> Result<()> {
         return host.library_command(&r);
     }
     match command {
+        "sleep_device" => host.sleep_device("manual"),
+        "wake_device" => host.wake_device(),
+        "session_state" => {
+            if !host.simulate || !host.diagnostics {
+                bail!("Session injection is only available in simulated diagnostic mode");
+            }
+            host.session_update(crate::session_activity::State {
+                locked: r["locked"].as_bool(),
+                idle_ms: r["idle_ms"].as_u64(),
+                source: "simulation".into(),
+                error: None,
+            })
+        }
         "device_controls" => host.set_device_controls(serde_json::from_value(
             r.get("settings")
                 .context("Device settings missing")?
@@ -1341,6 +1431,18 @@ fn apply_control(host: &mut Host, r: Value) -> Result<()> {
                     y: u16::try_from(r["y"].as_u64().unwrap_or(50))?,
                     long: r["hold"].as_bool().unwrap_or(false),
                 },
+                "swipe" => {
+                    let point = |key: &str| -> Result<(u16, u16)> {
+                        let x = u16::try_from(r[key][0].as_u64().context("Swipe x missing")?)?;
+                        let y = u16::try_from(r[key][1].as_u64().context("Swipe y missing")?)?;
+                        anyhow::ensure!(x < 800 && y < 100, "Swipe outside touch strip");
+                        Ok((x, y))
+                    };
+                    InputEvent::Swipe {
+                        start: point("start")?,
+                        end: point("end")?,
+                    }
+                }
                 _ => bail!("Invalid simulated event"),
             };
             host.input(event)
@@ -1743,6 +1845,9 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
     } else {
         Saved::default()
     };
+    for preferences in saved.screensavers.values() {
+        preferences.validate()?;
+    }
     for controls in saved.device_controls.values() {
         device::validate_controls(*controls)?;
     }
@@ -1831,6 +1936,10 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
     }
     library.validate()?;
     let slots = library.visible()?;
+    let mut saver_preferences = saved.screensavers;
+    if !simulate {
+        screensaver::adopt_preferences(&mut saver_preferences, previous_device.as_deref(), &device);
+    }
     let mut controls = saved.device_controls;
     if !simulate
         && !controls.contains_key(&device)
@@ -1842,6 +1951,14 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
         controls.insert(device.clone(), previous_controls);
     }
     let mut host = Host {
+        screensavers: saver_preferences,
+        saver: screensaver::Runtime::default(),
+        session_monitor: if simulate {
+            None
+        } else {
+            Some(crate::session_activity::Worker::new())
+        },
+        session_state: None,
         brightness_repeats: HashMap::new(),
         device_controls: controls,
         controls_observed: device_session::Controls::default(),
@@ -1948,6 +2065,9 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
             host.slots[index].background = host.resolve_state_image(&slot, slot.state);
         }
     }
+    if host.saver_preferences().image.is_some() {
+        host.saver_animation()?;
+    }
     // Validate and start plugins before writing any hardware image.
     if let Err(error) = launch_plugins(&mut host, port, &state_dir) {
         stop_plugins(&mut host);
@@ -2053,12 +2173,14 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
                 host.poll_triggers();
                 host.poll_feedback();
                 host.poll_brightness();
+                host.poll_saver();
                 host.multi
                     .next_due()
                     .into_iter()
                     .chain(host.triggers.repeater.next_due())
                     .chain(host.next_feedback())
                     .chain(host.next_brightness())
+                    .chain(host.next_saver())
                     .min()
                     .map(|deadline| deadline.saturating_sub(host.multi_clock.elapsed()))
             };
@@ -2079,6 +2201,7 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
             }
             host.monitor_children();
             host.poll_system_actions();
+            host.poll_session();
             host.poll_audio();
             host.poll_volume();
         }
@@ -2129,6 +2252,11 @@ fn stop_plugins(host: &mut Host) {
 
     if let Some(worker) = &host.system_actions {
         worker.cancel();
+    }
+    if !host.saver.locked
+        && let Err(error) = host.wake_device()
+    {
+        host.log(format!("Restore display on shutdown: {error:#}"));
     }
     host.brightness_repeats.clear();
     host.running = false;
@@ -2208,6 +2336,10 @@ mod tests {
     }
     pub(super) fn fixture(root: &Path) -> Host {
         let mut host = Host {
+            screensavers: HashMap::new(),
+            saver: screensaver::Runtime::default(),
+            session_monitor: None,
+            session_state: None,
             brightness_repeats: HashMap::new(),
             connected: true,
             connection_error: None,

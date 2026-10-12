@@ -1191,6 +1191,7 @@ dependencies = [
  "uuid",
  "webkit2gtk",
  "wry",
+ "zbus",
  "zip",
 ]
 
