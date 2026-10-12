@@ -31,6 +31,12 @@ const slot = {
   multi_children: [],
 } as Slot;
 describe("action drafts", () => {
+  it("does not write an appearance override for action-owned live titles", () => {
+    const draft = reconcileDraft(undefined, slot);
+    expect(saveRequests(slot, draft, false)).toEqual([
+      { command: "settings", context: slot.context, settings: slot.settings },
+    ]);
+  });
   it("does not let live plugin updates erase edited settings or title", () => {
     const first = reconcileDraft(undefined, slot);
     const dirty = editDraft(first, { title: "My counter" });

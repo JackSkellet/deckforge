@@ -54,6 +54,50 @@ return {phase:'edited',title:input.value,dirty:true};
 '''
 
 
+MIXER_SCRIPT = r"""
+const pause=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+const until=async fn=>{for(let i=0;i<150;i++){const value=await fn();if(value)return value;await pause(50)}throw Error('Mixer fixture condition timed out')};
+const bridge=window.deckforge;const draftCase=__DRAFT_CASE__;
+const config={enabled:false,channels:[{id:'music',name:'Music',apps:[],sources:[]},{id:'voice',name:'Voice',apps:[],sources:[]}],mixes:[{id:'monitor',name:'Monitor',outputs:[],volume:85,muted:false},{id:'stream',name:'Stream',outputs:[],volume:100,muted:false}],routes:[{channel:'music',mix:'monitor',volume:55,muted:false},{channel:'music',mix:'stream',volume:35,muted:true},{channel:'voice',mix:'monitor',volume:75,muted:false},{channel:'voice',mix:'stream',volume:90,muted:false}]};
+const route=(config,channel,mix)=>config.routes.find(r=>r.channel===channel&&r.mix===mix);
+const gain=(channel,mix)=>document.querySelector(`input[aria-label="${channel} → ${mix} volume"]`);
+const state=await bridge.request('ui_state_get');
+const retained=state?.formDrafts?.['audio-mixer'];
+if(draftCase&&retained?.dirty&&route(retained.config,'voice','monitor')?.volume===78){
+ const input=await until(()=>gain('Voice','Monitor'));
+ if(input.value!=='78')throw Error('Mixer draft was not restored into native DOM');
+ const host=await bridge.request('snapshot');
+ if(host.mixer.config.enabled||route(host.mixer.config,'voice','monitor').volume!==75)throw Error('Unapplied mixer draft changed saved routing');
+ return {phase:'restored',draftVolume:78,savedVolume:75,enabled:false};
+}
+const before=await bridge.request('snapshot');if(before.simulate!==true)throw Error('Mixer fixture must be simulated');
+await bridge.request('command',{command:'mixer_config',settings:config,expected:before.mixer.config});
+if(!document.querySelector('.audio-mixer'))[...document.querySelectorAll('button')].find(b=>b.textContent.trim()==='Audio mixer').click();
+const input=await until(()=>gain('Music','Monitor'));
+if(input.value!=='55')throw Error('Routing matrix did not load bridge config');
+const enabled=[...document.querySelectorAll('.audio-mixer label')].find(label=>label.textContent.includes('Enable audio routing'))?.querySelector('input');
+if(!enabled||enabled.checked)throw Error('Routing must remain disabled');
+const set=(input,value)=>{Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(input,String(value));input.dispatchEvent(new Event('input',{bubbles:true}));input.dispatchEvent(new Event('change',{bubbles:true}));};
+set(input,62);
+await until(async()=>{const state=await bridge.request('ui_state_get');return route(state?.formDrafts?.['audio-mixer']?.config||{routes:[]},'music','monitor')?.volume===62});
+const unapplied=await bridge.request('snapshot');if(route(unapplied.mixer.config,'music','monitor').volume!==55)throw Error('Mixer changed without explicit Apply');
+const apply=document.querySelector('.audio-mixer button[type="submit"]');await until(()=>!apply.disabled);apply.click();
+const applied=await until(async()=>{const s=await bridge.request('snapshot');return route(s.mixer.config,'music','monitor')?.volume===62&&s});
+if(applied.mixer.config.enabled||applied.mixer.active||applied.mixer.sinks.some(s=>s.owned))throw Error('Disabled fixture created an audio graph');
+if(applied.mixer.config.channels.some(c=>c.apps.length||c.sources.length)||applied.mixer.config.mixes.some(m=>m.outputs.length))throw Error('Fixture selected real audio members');
+await until(()=>document.querySelector('.mixer-footer [role="status"]')?.textContent.includes('Routing settings saved'));
+const applyRect=document.querySelector('.audio-mixer button[type="submit"]').getBoundingClientRect();
+const dialogRect=document.querySelector('dialog[open]').getBoundingClientRect();
+if(applyRect.bottom>dialogRect.bottom+1||applyRect.top<dialogRect.top)throw Error('Mixer Apply button is clipped outside its dialog');
+if(draftCase){
+ set(gain('Voice','Monitor'),78);
+ await until(async()=>{const d=(await bridge.request('ui_state_get'))?.formDrafts?.['audio-mixer'];return d?.dirty&&route(d.config,'voice','monitor')?.volume===78});
+ return {phase:'edited',draftVolume:78,savedVolume:75,enabled:false};
+}
+return {phase:'applied',channels:[...document.querySelectorAll('.mixer-matrix tbody th strong')].map(n=>n.textContent),savedMusicMonitor:62,otherRoutes:applied.mixer.config.routes,enabled:false,active:false,ownedAudioNodes:0,explicitApplyRequired:true,applyButtonBottom:applyRect.bottom,dialogBottom:dialogRect.bottom};
+"""
+
+
 def wait(predicate, description, timeout=20):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -100,6 +144,7 @@ def environment(root):
                 'DECKFORGE_WEBVIEW_TEST_RESULT'):
         env.pop(key, None)
     env['XDG_CONFIG_HOME'] = str(root / 'config')
+    env['XDG_STATE_HOME'] = str(root / 'private-state')
     return env
 
 
@@ -110,6 +155,7 @@ def main():
     parser.add_argument('--samples', type=Path, default=project.parent / 'evidence/official-samples')
     parser.add_argument('--capture', type=Path, help='Keep the actual native WebKit PNG')
     parser.add_argument('--report', type=Path, help='Save fixture and verification metadata')
+    parser.add_argument('--mixer-capture', type=Path, help='Keep the disabled native mixer matrix PNG')
     args = parser.parse_args()
     binary = args.binary.resolve(strict=True)
     samples = args.samples.resolve(strict=True)
@@ -185,6 +231,60 @@ def main():
             finally:
                 cleanup(process)
 
+        # Mixer UI checks keep enabled=false and select no actual app/device.
+        # Opening Audio mixer may read the audio inventory; it creates no graph.
+        for retain_draft in (False, True):
+            suffix = 'mixer-draft' if retain_draft else 'mixer-capture'
+            state = root / suffix
+            script = root / (suffix + '.js')
+            script.write_text(MIXER_SCRIPT.replace('__DRAFT_CASE__', 'true' if retain_draft else 'false'))
+            proof = root / (suffix + '-result.json')
+            env = environment(root)
+            env.update(DECKFORGE_WEBVIEW_TEST_SCRIPT=str(script), DECKFORGE_WEBVIEW_TEST_RESULT=str(proof))
+            mixer_capture = args.mixer_capture.resolve() if args.mixer_capture else root / 'mixer.png'
+            if not retain_draft:
+                mixer_capture.parent.mkdir(parents=True, exist_ok=True)
+                env['DECKFORGE_CAPTURE'] = str(mixer_capture)
+            log_path = root / (suffix + '.log')
+            with log_path.open('w') as log:
+                process = subprocess.Popen([str(binary), 'desktop', '--simulate', '--state', str(state), '--port', '0'],
+                                           env=env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+                try:
+                    if retain_draft:
+                        first = wait(lambda: result(proof, 'edited'), 'unapplied mixer draft')
+                        command(binary, state, 'close')
+                        def mixer_closed():
+                            status = command(binary, state, 'status')
+                            return status if not status['window_open'] else None
+                        before = wait(mixer_closed, 'mixer native window destruction')
+                        command(binary, state, 'show')
+                        second = wait(lambda: result(proof, 'restored'), 'mixer draft restored after reopen')
+                        after = command(binary, state, 'status')
+                        assert before['pid'] == after['pid'] == process.pid
+                        assert after['editor_generation'] == 2
+                        command(binary, state, 'quit')
+                        assert process.wait(timeout=10) == 0, log_path.read_text()
+                        report['mixer_draft'] = {'edited': first, 'restored': second, 'closed': before, 'reopened': after}
+                    else:
+                        assert process.wait(timeout=35) == 0, log_path.read_text()
+                        report['mixer'] = result(proof)
+                        assert report['mixer'], log_path.read_text()
+                        png = mixer_capture.read_bytes()
+                        assert png[:8] == b'\x89PNG\r\n\x1a\n'
+                        width, height = struct.unpack('>II', png[16:24])
+                        report['mixer_capture'] = {'width': width, 'height': height, 'sha256': hashlib.sha256(png).hexdigest()}
+                    saved = json.loads((state / 'session.json').read_text())['mixer']
+                    assert not saved['enabled']
+                    assert next(r for r in saved['routes'] if r['channel'] == 'music' and r['mix'] == 'monitor')['volume'] == 62
+                    assert next(r for r in saved['routes'] if r['channel'] == 'voice' and r['mix'] == 'monitor')['volume'] == 75
+                    assert all(not c['apps'] and not c['sources'] for c in saved['channels'])
+                    assert all(not m['outputs'] for m in saved['mixes'])
+                except Exception:
+                    print(log_path.read_text())
+                    raise
+                finally:
+                    cleanup(process)
+
         state = root / 'headless-state'
         env = environment(root)
         env.pop('DISPLAY', None)
@@ -203,7 +303,7 @@ def main():
     if args.report:
         args.report.parent.mkdir(parents=True, exist_ok=True)
         args.report.write_text(json.dumps(report, indent=2) + '\n')
-    print('PASS: actual native WebKit + unchanged official Counter count7/settings persistence; rendered preview; bridge rejection; unsaved draft survives destruction/recreation; headless background exits cleanly. No USB or OS input.')
+    print('PASS: actual native WebKit + unchanged official Counter count7/settings persistence; rendered preview; bridge rejection; unsaved draft survives destruction/recreation; headless background exits cleanly; disabled mixer matrix edits require Apply and drafts survive reopen. No USB, OS input, or audio routing enabled.')
 
 
 if __name__ == '__main__':

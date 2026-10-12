@@ -18,6 +18,7 @@ import {
 } from "./model";
 import { Field, Check, SettingsFields } from "./Fields";
 import { Sequence } from "./Sequence";
+import { AudioMixer } from "./Mixer";
 import { Modal, Plugins, Preferences } from "./Panels";
 import {
   exportTextDrafts,
@@ -67,9 +68,9 @@ export default function App() {
   const [drafts, setDrafts] = useState<Record<string, Draft>>({});
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<Controller | "All">("All");
-  const [panel, setPanel] = useState<"plugins" | "preferences" | "logs" | null>(
-    null,
-  );
+  const [panel, setPanel] = useState<
+    "plugins" | "preferences" | "logs" | "mixer" | null
+  >(null);
   const [libraryEdit, setLibraryEdit] = useState<{
     kind: "profile" | "page";
     id?: string;
@@ -121,7 +122,7 @@ export default function App() {
             setFilter(state.filter);
           importTextDrafts(state.textDrafts);
           importFormDrafts(state.formDrafts);
-          if (["plugins", "preferences", "logs"].includes(state.panel))
+          if (["plugins", "preferences", "logs", "mixer"].includes(state.panel))
             setPanel(state.panel);
           if (state.libraryEdit) setLibraryEdit(state.libraryEdit);
         }
@@ -213,7 +214,15 @@ export default function App() {
     }));
   }
   async function save() {
-    if (!slot || !draft || !draft.dirty || readonly || saving || !form.current?.reportValidity()) return;
+    if (
+      !slot ||
+      !draft ||
+      !draft.dirty ||
+      readonly ||
+      saving ||
+      !form.current?.reportValidity()
+    )
+      return;
     if (hasTextDrafts(slot.context)) {
       onError(
         new Error(
@@ -226,7 +235,11 @@ export default function App() {
     const savingDraft = draft;
     setSaving(true);
     try {
-      for (const payload of saveRequests(target, savingDraft)) {
+      for (const payload of saveRequests(
+        target,
+        savingDraft,
+        action?.user_title_enabled !== false,
+      )) {
         if (!(await run(payload))) return;
       }
       setDrafts((prev) => ({
@@ -376,7 +389,10 @@ export default function App() {
           <strong>Deckforge</strong>
           <span className="platform-label">LINUX</span>
         </div>
-        <div className="device-status" title={snapshot.connection_error || snapshot.device}>
+        <div
+          className="device-status"
+          title={snapshot.connection_error || snapshot.device}
+        >
           <span className={"dot " + (snapshot.connected ? "online" : "")} />
           <span>
             {snapshot.simulate
@@ -387,6 +403,7 @@ export default function App() {
           </span>
         </div>
         <div className="header-tools">
+          <button onClick={() => setPanel("mixer")}>Audio mixer</button>
           <button onClick={() => setPanel("plugins")}>
             Plugins <span className="count">{snapshot.plugins.length}</span>
           </button>
@@ -699,9 +716,21 @@ export default function App() {
                         )}
                       </div>
                       <div className="appearance-fields">
-                        <Field label="Title">
+                        <Field
+                          label="Title"
+                          hint={
+                            action?.user_title_enabled === false
+                              ? "Updated live by this action."
+                              : undefined
+                          }
+                        >
                           <input
-                            value={draft.title}
+                            disabled={action?.user_title_enabled === false}
+                            value={
+                              action?.user_title_enabled === false
+                                ? slot.title
+                                : draft.title
+                            }
                             onChange={(e) => change({ title: e.target.value })}
                           />
                         </Field>
@@ -738,6 +767,7 @@ export default function App() {
                       )}
                     {isContainer(slot.uuid) ? (
                       <Sequence
+                        mixer={snapshot.mixer?.config}
                         scope={slot.context}
                         runtime={slot}
                         run={run}
@@ -751,6 +781,7 @@ export default function App() {
                       />
                     ) : (
                       <SettingsFields
+                        mixer={snapshot.mixer?.config}
                         editorKey={slot.context}
                         key={slot.context}
                         uuid={slot.uuid}
@@ -988,17 +1019,22 @@ export default function App() {
       </footer>
       {panel && (
         <Modal
-          wide={panel === "plugins" || panel === "logs"}
+          wide={panel === "plugins" || panel === "logs" || panel === "mixer"}
+          className={panel === "mixer" ? "mixer-dialog" : undefined}
           title={
-            panel === "plugins"
-              ? "Plugins"
-              : panel === "preferences"
-                ? "Preferences"
-                : "Activity log"
+            panel === "mixer"
+              ? "Audio mixer"
+              : panel === "plugins"
+                ? "Plugins"
+                : panel === "preferences"
+                  ? "Preferences"
+                  : "Activity log"
           }
           onClose={() => setPanel(null)}
         >
-          {panel === "plugins" ? (
+          {panel === "mixer" ? (
+            <AudioMixer snapshot={snapshot.mixer} run={run} error={error} />
+          ) : panel === "plugins" ? (
             <Plugins snapshot={snapshot} run={run} onError={onError} />
           ) : panel === "preferences" ? (
             <Preferences snapshot={snapshot} run={run} onError={onError} />

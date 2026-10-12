@@ -2,6 +2,7 @@ import { useEffect, useId, useState, type ReactNode } from "react";
 import { pick, command } from "./bridge";
 import { clone, type RecordValue, type Controller } from "./model";
 import { getTextDraft, setTextDraft } from "./transient";
+import type { MixerConfig } from "./Mixer";
 export function Field({
   label,
   children,
@@ -103,15 +104,18 @@ export function Check({
   label,
   checked,
   onChange,
+  disabled = false,
 }: {
   label: string;
   checked: boolean;
   onChange: (v: boolean) => void;
+  disabled?: boolean;
 }) {
   return (
     <label className="check">
       <input
         type="checkbox"
+        disabled={disabled}
         checked={checked}
         onChange={(e) => onChange(e.target.checked)}
       />
@@ -344,8 +348,10 @@ export function SettingsFields({
   outputs = [],
   onError,
   editorKey = uuid,
+  mixer,
 }: {
   editorKey?: string;
+  mixer?: MixerConfig;
   uuid: string;
   controller: Controller;
   settings: RecordValue;
@@ -449,6 +455,57 @@ export function SettingsFields({
     </button>
   );
   let special: ReactNode = null;
+  if (
+    uuid === "com.deckforge.mixer.channel" ||
+    uuid === "com.deckforge.mixer.mix"
+  ) {
+    for (const key of ["channel", "mix", "step", "mode", "volume", "delta"])
+      handled.add(key);
+    special = (
+      <>
+        {uuid.endsWith(".channel") &&
+          select(
+            "channel",
+            "Input group",
+            (mixer?.channels ?? []).map((c) => [c.id, c.name]),
+          )}
+        {select(
+          "mix",
+          "Mix",
+          (mixer?.mixes ?? []).map((m) => [m.id, m.name]),
+          "monitor",
+        )}
+        {controller === "Encoder" ? (
+          <>
+            {num("step", "Volume change per dial tick (%)", 5, 0.1, 100, 0.1)}
+            <p className="hint">Press the dial to toggle mute.</p>
+          </>
+        ) : (
+          <>
+            {select(
+              "mode",
+              "Key action",
+              [
+                ["toggle_mute", "Toggle mute"],
+                ["set_volume", "Set volume"],
+                ["change_volume", "Change volume"],
+              ],
+              "toggle_mute",
+            )}
+            {settings.mode === "set_volume" &&
+              num("volume", "Volume (%)", 50, 0, 100)}
+            {settings.mode === "change_volume" &&
+              num("delta", "Volume change (%)", 5, -100, 100)}
+          </>
+        )}
+        <p className="hint">
+          Configure and enable routes in Audio mixer first. This action only
+          controls existing routes.
+        </p>
+      </>
+    );
+  }
+
   if (uuid.endsWith(".system.website"))
     special = (
       <>

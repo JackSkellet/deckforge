@@ -240,7 +240,7 @@ impl Host {
             }
             return Ok(());
         }
-        if crate::system_actions::supported(&slot.uuid) {
+        if mixer_actions::supported(&slot.uuid) || crate::system_actions::supported(&slot.uuid) {
             if cancelled
                 && !matches!(
                     slot.uuid.as_str(),

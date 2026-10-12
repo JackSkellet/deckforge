@@ -24,6 +24,15 @@ with its own settings panel and artwork. No Wine is used. Notifications, server
 statistics and volume graphics have mock integration coverage. Live authorization
 and real Discord control behavior remain unverified.
 
+## Audio mixer
+
+Open **Audio mixer** to configure independent monitor and stream mixes, input
+groups, application assignments and output devices. Routing is disabled by default;
+changes require **Apply routes**. **Mixer channel** and **Mixer output mix** actions
+provide key/dial controls with configurable steps and live control feedback.
+See [Audio mixer](docs/AUDIO_MIXER.md) for setup, recovery behavior and the remaining
+Wave Link compatibility work. Effects, meters and Wave-device DSP are unfinished.
+
 ## Run the native application
 
 Open **Deckforge** from the Linux application menu, or run:

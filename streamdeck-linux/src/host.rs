@@ -41,6 +41,8 @@ mod export;
 mod feedback;
 mod inspectors;
 mod library;
+mod mixer;
+mod mixer_actions;
 mod multiaction;
 mod plugins;
 mod resources;
@@ -313,6 +315,8 @@ mod image_serde {
 #[derive(Serialize, Deserialize, Default)]
 struct Saved {
     #[serde(default)]
+    mixer: crate::mixer::Config,
+    #[serde(default)]
     screensavers: HashMap<String, screensaver::Preferences>,
     #[serde(default)]
     device_controls: HashMap<String, device_session::Controls>,
@@ -334,6 +338,9 @@ enum HeldControl {
     Dial(u8),
 }
 struct Host {
+    mixer_config: crate::mixer::Config,
+    mixer: Option<crate::mixer::Worker>,
+    mixer_state: crate::mixer::Snapshot,
     reference_app: Option<PathBuf>,
     screensavers: HashMap<String, screensaver::Preferences>,
     saver: screensaver::Runtime,
@@ -419,6 +426,7 @@ impl Host {
         let pending = self.state_path.with_extension("tmp");
         #[derive(Serialize)]
         struct View<'a> {
+            mixer: &'a crate::mixer::Config,
             reference_app: &'a Option<PathBuf>,
             screensavers: &'a HashMap<String, screensaver::Preferences>,
             device_controls: &'a HashMap<String, device_session::Controls>,
@@ -429,6 +437,7 @@ impl Host {
             globals: &'a HashMap<String, Value>,
         }
         let data = serde_json::to_vec_pretty(&View {
+            mixer: &self.mixer_config,
             reference_app: &self.reference_app,
             screensavers: &self.screensavers,
             device_controls: &self.device_controls,
@@ -506,6 +515,7 @@ impl Host {
         self.persist()
     }
     fn render(&mut self) -> Result<()> {
+        self.update_mixer_feedback();
         self.update_volume_feedback();
         self.update_brightness_feedback();
         // Selected container children need the same imported/plugin icon lookup
@@ -681,7 +691,8 @@ impl Host {
                 } else if uuid == crate::dial_stack::UUID {
                     stack::defaults()
                 } else {
-                    crate::audio_output::defaults(uuid)
+                    mixer_actions::defaults(uuid)
+                        .or_else(|| crate::audio_output::defaults(uuid))
                         .unwrap_or_else(|| crate::system_actions::defaults(uuid))
                 }
             },
@@ -876,7 +887,7 @@ impl Host {
             }
             return Ok(());
         }
-        if crate::system_actions::supported(&slot.uuid) {
+        if mixer_actions::supported(&slot.uuid) || crate::system_actions::supported(&slot.uuid) {
             if pressed || owned_release {
                 self.run_system_action(
                     &slot,
@@ -900,6 +911,9 @@ impl Host {
         slot: &Slot,
         trigger: crate::system_actions::Trigger,
     ) -> Result<()> {
+        if mixer_actions::supported(&slot.uuid) {
+            return self.mixer_input(slot, trigger);
+        }
         if slot.uuid == screensaver::UUID {
             if matches!(trigger, crate::system_actions::Trigger::Up) && slot.controller == "Keypad"
             {
@@ -1011,7 +1025,9 @@ impl Host {
                 self.stack_input(&slot, name, extra)?;
             } else if slot.uuid == crate::action_trigger::UUID {
                 self.trigger_input(&slot, name, extra)?;
-            } else if crate::system_actions::supported(&slot.uuid) {
+            } else if mixer_actions::supported(&slot.uuid)
+                || crate::system_actions::supported(&slot.uuid)
+            {
                 let trigger = if name == "dialRotate" {
                     crate::system_actions::Trigger::Rotate(
                         extra["ticks"].as_i64().unwrap_or(0) as i8
@@ -1277,11 +1293,44 @@ fn slot_snapshot(host: &Host, s: &Slot) -> Value {
         "multi_running":host.multi_running(&s.context),"multi_children":s.children.iter().map(|g|g.iter().map(|c|slot_snapshot(host,c)).collect::<Vec<_>>()).collect::<Vec<_>>(),
         "has_inspector":host.actions.iter().find(|a|a.uuid==s.uuid).is_some_and(|a|a.raw["PropertyInspectorPath"].is_string()||host.plugins.iter().find(|p|p.id==a.plugin).is_some_and(|p|p.manifest["PropertyInspectorPath"].is_string()))})
 }
+fn action_snapshot(host: &Host, action: &Action) -> Value {
+    let plugin = host.plugins.iter().find(|p| p.id == action.plugin);
+    let category = if mixer_actions::supported(&action.uuid) {
+        "Audio mixer"
+    } else if crate::system_actions::supported(&action.uuid) {
+        "System"
+    } else if action.uuid.starts_with("com.elgato.streamdeck.soundboard") {
+        "Soundboard"
+    } else {
+        "Navigation & sequences"
+    };
+    let defaults = if action.uuid == "com.elgato.streamdeck.page.goto" {
+        json!({"PageIndex":1})
+    } else if action.uuid == multiaction::DELAY {
+        json!({"delay":1000})
+    } else {
+        mixer_actions::defaults(&action.uuid)
+            .or_else(|| crate::audio_output::defaults(&action.uuid))
+            .unwrap_or_else(|| crate::system_actions::defaults(&action.uuid))
+    };
+    json!({
+        "uuid":action.uuid,"name":action.name,"plugin":action.plugin,
+        "plugin_name":plugin.map(|p|p.name.as_str()).unwrap_or("Deckforge"),
+        "category":plugin.map(|p|p.manifest["Category"].as_str().unwrap_or(&p.name)).unwrap_or(category),
+        "icon":action.raw["Icon"],"plugin_root":plugin.map(|p|p.root.as_path()),
+        "icon_generation":plugin.and_then(|p|p.child.as_ref().map(Child::id)),
+        "tooltip":action.raw["Tooltip"],"user_title_enabled":action.raw["UserTitleEnabled"]!=false,
+        "visible":action.raw["VisibleInActionsList"]!=false,"controllers":action.controllers,
+        "states":action.raw["States"],
+        "supported_in_multi":action.raw["SupportedInMultiActions"]!=false && !multiaction::container(&action.uuid),
+        "multi_only":action.uuid==multiaction::DELAY,"defaults":defaults
+    })
+}
 fn snapshot(host: &Host) -> Value {
-    json!({"screensaver":{"active":host.saver.active,"reason":host.saver.reason,"generation":host.saver.generation,"preferences":host.saver_preferences(),"preview":host.saver.preview,"error":host.saver.error,"frames":host.saver.animation.as_ref().map(|animation|animation.len())},"session":host.session_state,"device_settings":{"desired":host.configured_controls(),"applied":host.controls_observed,"error":host.controls_error},"library":host.library.snapshot(),"running":host.running,"device":host.device,"firmware":host.firmware,"simulate":host.simulate,"connected":host.connected && !host.simulate,"device_online":host.connected,"connection_error":host.connection_error,
+    json!({"mixer":host.mixer_snapshot(),"screensaver":{"active":host.saver.active,"reason":host.saver.reason,"generation":host.saver.generation,"preferences":host.saver_preferences(),"preview":host.saver.preview,"error":host.saver.error,"frames":host.saver.animation.as_ref().map(|animation|animation.len())},"session":host.session_state,"device_settings":{"desired":host.configured_controls(),"applied":host.controls_observed,"error":host.controls_error},"library":host.library.snapshot(),"running":host.running,"device":host.device,"firmware":host.firmware,"simulate":host.simulate,"connected":host.connected && !host.simulate,"device_online":host.connected,"connection_error":host.connection_error,
         "volume":host.volume_state,"volume_error":host.volume_error,"multi_runs":host.multi.snapshot(),"multi_pending":host.multi_pending.len(),"audio_outputs":host.audio_outputs,"audio_active":host.audio_active,"system_status":host.system_status,"slots":host.slots.iter().map(|s|slot_snapshot(host,s)).collect::<Vec<_>>(),
         "reference_app":host.reference_app,"inspectors":host.inspectors.values().map(|i|json!({"context":i.context,"plugin":host.plugins[i.plugin].id,"connected":i.sender.is_some()})).collect::<Vec<_>>(),
-        "actions":host.actions.iter().map(|a|json!({"uuid":a.uuid,"name":a.name,"plugin":a.plugin,"plugin_name":host.plugins.iter().find(|p|p.id==a.plugin).map(|p|p.name.as_str()).unwrap_or("Deckforge"),"category":host.plugins.iter().find(|p|p.id==a.plugin).map(|p|p.manifest["Category"].as_str().unwrap_or(&p.name)).unwrap_or(if crate::system_actions::supported(&a.uuid){"System"}else if a.uuid.starts_with("com.elgato.streamdeck.soundboard"){"Soundboard"}else{"Navigation & sequences"}),"icon":a.raw["Icon"],"plugin_root":host.plugins.iter().find(|p|p.id==a.plugin).map(|p|p.root.as_path()),"icon_generation":host.plugins.iter().find(|p|p.id==a.plugin).and_then(|p|p.child.as_ref().map(Child::id)),"tooltip":a.raw["Tooltip"],"visible":a.raw["VisibleInActionsList"]!=false,"controllers":a.controllers,"states":a.raw["States"],"supported_in_multi":a.raw["SupportedInMultiActions"]!=false && !multiaction::container(&a.uuid),"multi_only":a.uuid==multiaction::DELAY,"defaults":if a.uuid=="com.elgato.streamdeck.page.goto"{json!({"PageIndex":1})}else if a.uuid==multiaction::DELAY{json!({"delay":1000})}else{crate::audio_output::defaults(&a.uuid).unwrap_or_else(||crate::system_actions::defaults(&a.uuid))}})).collect::<Vec<_>>(),
+        "actions":host.actions.iter().map(|action|action_snapshot(host,action)).collect::<Vec<_>>(),
         "logs":host.logs,"plugins":host.plugins.iter().map(Plugin::snapshot).collect::<Vec<_>>()})
 }
 async fn dashboard(State(state): State<Shared>) -> Json<Value> {
@@ -1340,6 +1389,18 @@ fn apply_control(host: &mut Host, r: Value) -> Result<()> {
         return host.library_command(&r);
     }
     match command {
+        "mixer_refresh" => host.ensure_mixer(),
+        "mixer_config" => {
+            let config = serde_json::from_value(
+                r.get("settings").context("Mixer settings missing")?.clone(),
+            )?;
+            let expected = serde_json::from_value(
+                r.get("expected")
+                    .context("Previous mixer settings missing; refresh the editor")?
+                    .clone(),
+            )?;
+            host.set_mixer_config(config, Some(&expected))
+        }
         "sleep_device" => host.sleep_device("manual"),
         "wake_device" => host.wake_device(),
         "session_state" => {
@@ -1917,6 +1978,7 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
     for preferences in saved.screensavers.values() {
         preferences.validate()?;
     }
+    saved.mixer.validate()?;
     for controls in saved.device_controls.values() {
         device::validate_controls(*controls)?;
     }
@@ -1928,6 +1990,7 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
     let (plugins, mut actions) = load_plugins(plugin_paths, saved.reference_app.as_deref())?;
     actions.extend(library::navigation_actions());
     actions.extend(multiaction::definitions());
+    actions.extend(mixer_actions::definitions());
     actions.push(stack::action());
     actions.push(trigger::action());
     for (uuid, name, _) in crate::system_actions::definitions()
@@ -2020,6 +2083,9 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
         controls.insert(device.clone(), previous_controls);
     }
     let mut host = Host {
+        mixer_config: saved.mixer,
+        mixer: None,
+        mixer_state: crate::mixer::Snapshot::default(),
         reference_app: saved.reference_app,
         screensavers: saver_preferences,
         saver: screensaver::Runtime::default(),
@@ -2090,6 +2156,12 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
         retired: VecDeque::new(),
     };
     host.install_bundled_profiles(profile_path.is_none())?;
+    if host.mixer_config.enabled
+        && let Err(error) = host.ensure_mixer()
+    {
+        host.mixer_state.error = Some(error.to_string());
+        host.log(format!("Audio mixer unavailable: {error:#}"));
+    }
     if let Some(path) = profile_path {
         host.import_profile(&path)?;
     } else if host.slots.is_empty() {
@@ -2271,6 +2343,7 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
             host.poll_session();
             host.poll_audio();
             host.poll_volume();
+            host.poll_mixer();
         }
     });
     let stop = async move {
@@ -2291,6 +2364,10 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
     let result = axum::serve(listener, app)
         .with_graceful_shutdown(stop)
         .await;
+    // Worker shutdown can wait for audio-server acknowledgements. Do not hold
+    // the host lock while restoring its explicitly assigned streams.
+    let mixer = shared.lock().unwrap().mixer.take();
+    drop(mixer);
     {
         let mut host = shared.lock().unwrap();
         stop_plugins(&mut host);
@@ -2423,6 +2500,9 @@ mod tests {
     }
     pub(super) fn fixture(root: &Path) -> Host {
         let mut host = Host {
+            mixer_config: crate::mixer::Config::default(),
+            mixer: None,
+            mixer_state: crate::mixer::Snapshot::default(),
             reference_app: None,
             screensavers: HashMap::new(),
             saver: screensaver::Runtime::default(),

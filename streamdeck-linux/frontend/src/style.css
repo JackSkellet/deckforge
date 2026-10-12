@@ -1497,3 +1497,350 @@ summary {
     padding-bottom: 9px;
   }
 }
+dialog.mixer-dialog {
+  width: 1100px;
+}
+.audio-mixer {
+  gap: 18px;
+}
+.mixer-intro {
+  display: flex;
+  gap: 20px;
+  align-items: flex-start;
+  justify-content: space-between;
+}
+.mixer-intro > div {
+  max-width: 680px;
+}
+.mixer-intro p {
+  font-size: 13px;
+  color: #d1e0e8;
+}
+.mixer-intro small {
+  display: block;
+  margin-top: 7px;
+  font-size: 11px;
+  line-height: 1.5;
+}
+.mixer-intro > .status {
+  padding-top: 4px;
+}
+.mixer-editable {
+  border: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  min-width: 0;
+}
+.mixer-toolbar {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+}
+.mixer-toolbar button {
+  font-size: 11px;
+}
+.mixer-toolbar > .check {
+  font-weight: 600;
+  color: #b4e8d3;
+}
+.mixer-matrix-scroll {
+  overflow: auto;
+  border: 1px solid #405763;
+  border-radius: 8px;
+}
+.mixer-matrix {
+  border-collapse: collapse;
+  width: 100%;
+  min-width: 640px;
+  table-layout: fixed;
+  font-size: 12px;
+}
+.mixer-matrix th,
+.mixer-matrix td {
+  vertical-align: top;
+  padding: 15px;
+  border-bottom: 1px solid #405763;
+  border-right: 1px solid #405763;
+  text-align: left;
+  font-weight: 400;
+}
+.mixer-matrix tr > *:last-child {
+  border-right: 0;
+}
+.mixer-matrix tbody tr:last-child > * {
+  border-bottom: 0;
+}
+.mixer-matrix thead th {
+  background: #1b2831;
+}
+.mixer-matrix thead th:first-child {
+  font-size: 15px;
+  font-weight: 600;
+  width: 260px;
+}
+.mixer-matrix thead th:first-child > span {
+  display: block;
+  font-size: 11px;
+  font-weight: 400;
+  color: #92aaba;
+  margin-top: 8px;
+}
+.mixer-matrix tbody th {
+  background: #20303a;
+}
+.mixer-channel-heading {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  justify-content: space-between;
+}
+.mixer-channel-heading strong {
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+.mixer-channel-heading button {
+  padding: 3px 8px;
+  font-size: 18px;
+}
+.mixer-gain {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 15px;
+}
+.mixer-gain .field > span {
+  font-size: 11px;
+  color: #b5cbd6;
+}
+.mixer-gain input {
+  cursor: pointer;
+  height: 18px;
+}
+.mixer-gain button.mute {
+  align-self: flex-start;
+  padding: 5px 11px;
+  font-size: 11px;
+  background: #2b3d48;
+}
+.mixer-gain button.mute.active {
+  background: #81514a;
+  border-color: #c48676;
+  color: #ffe1cf;
+}
+.mixer-output-details,
+.mixer-input-details {
+  margin-top: 14px;
+  font-size: 11px;
+  color: #b5c7d2;
+}
+.mixer-output-details summary,
+.mixer-input-details summary {
+  cursor: pointer;
+  line-height: 1.5;
+}
+.mixer-output-details summary span,
+.mixer-input-details summary span {
+  display: block;
+  font-size: 10px;
+  color: #8da5b5;
+  margin-top: 3px;
+  margin-left: 11px;
+}
+.mixer-output-details .hint {
+  margin-top: 10px;
+  font-size: 10px;
+}
+.mixer-output-details > .danger {
+  margin-top: 10px;
+  font-size: 10px;
+  padding: 3px 0;
+}
+.mixer-device-choices {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 10px;
+  margin-top: 12px;
+  font-weight: 400;
+}
+.mixer-device-choices legend {
+  font-size: 10px;
+}
+.mixer-device-choices .check {
+  font-size: 11px;
+  align-items: flex-start;
+  overflow-wrap: anywhere;
+}
+.mixer-device-choices .check input {
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+.mixer-device-choices .hint {
+  font-size: 10px;
+}
+.mixer-input-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 14px;
+}
+.mixer-input-fields .field {
+  font-size: 11px;
+}
+.mixer-input-fields button,
+.mixer-input-fields input,
+.mixer-input-fields select {
+  font-size: 11px;
+}
+.mixer-input-fields > .mixer-device-choices {
+  margin-top: 0;
+}
+.selector-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.selector-list > div {
+  display: flex;
+  gap: 6px;
+  align-items: flex-start;
+}
+.selector-list > div > span {
+  flex: 1;
+  min-width: 0;
+}
+.selector-list code,
+.missing-audio code {
+  font-family: inherit;
+  display: block;
+  overflow-wrap: anywhere;
+  font-size: 11px;
+  color: #cae3e7;
+  line-height: 1.5;
+}
+.selector-list small,
+.missing-audio small {
+  display: block;
+  font-size: 10px;
+  line-height: 1.4;
+  margin-top: 3px;
+}
+.selector-list button {
+  padding: 0 5px;
+  border: 0;
+  background: transparent;
+}
+.manual-selector {
+  padding: 8px 0;
+  border-top: 1px solid #3f5664;
+}
+.manual-selector summary {
+  font-size: 10px;
+  cursor: pointer;
+  margin-bottom: 10px;
+}
+.manual-selector .field {
+  margin-bottom: 10px;
+}
+.missing-audio {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 9px;
+  background: #493d2e;
+  border-radius: 5px;
+}
+.missing-audio strong {
+  font-size: 10px;
+  color: #eed1a4;
+  display: block;
+  margin-bottom: 4px;
+}
+.missing-audio button {
+  font-size: 10px;
+  align-self: flex-start;
+  padding: 4px 7px;
+}
+.unrouted {
+  font-size: 11px;
+  color: #7d99a9;
+  padding-top: 19px;
+}
+.mixer-empty {
+  text-align: center;
+  padding: 25px 20px;
+  background: #1c2b35;
+  border: 1px dashed #4c6574;
+  border-radius: 8px;
+}
+.mixer-empty h3 {
+  font-size: 14px;
+  color: #c2ddd5;
+  margin-bottom: 8px;
+}
+.mixer-empty p {
+  font-size: 12px;
+  color: #98b2c0;
+  max-width: 550px;
+  margin: 0 auto;
+}
+.mixer-warnings {
+  background: #3c3629;
+  border: 1px solid #6f5f3f;
+  border-radius: 6px;
+  padding: 10px 13px;
+  color: #e1c796;
+  font-size: 11px;
+}
+.mixer-warnings summary {
+  cursor: pointer;
+}
+.mixer-warnings ul {
+  padding-left: 17px;
+  line-height: 1.65;
+  overflow-wrap: anywhere;
+}
+.mixer-footer {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  justify-content: space-between;
+  border-top: 1px solid #415b69;
+  padding-top: 15px;
+  position: sticky;
+  bottom: 0;
+  background: #222e37;
+  padding-bottom: 15px;
+  margin-bottom: 0;
+  z-index: 1;
+}
+.mixer-footer > .hint {
+  max-width: 45%;
+  font-size: 11px;
+}
+.mixer-footer button {
+  font-size: 12px;
+}
+@media (max-width: 1050px) {
+  .mixer-intro {
+    flex-direction: column;
+    gap: 7px;
+  }
+  .mixer-matrix thead th:first-child {
+    width: 220px;
+  }
+  .mixer-matrix th,
+  .mixer-matrix td {
+    padding: 11px;
+  }
+  .mixer-footer {
+    flex-wrap: wrap;
+  }
+  .mixer-footer > .hint {
+    max-width: 100%;
+  }
+}

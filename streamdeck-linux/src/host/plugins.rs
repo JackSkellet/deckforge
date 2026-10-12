@@ -78,7 +78,8 @@ fn parse(path: &Path, reference: Option<&Path>) -> Result<(Plugin, Vec<Action>)>
             .filter(|value| !value.is_empty())
             .context("Action UUID missing")?
             .to_owned();
-        if crate::system_actions::supported(&uuid)
+        if mixer_actions::supported(&uuid)
+            || crate::system_actions::supported(&uuid)
             || crate::audio_output::supported(&uuid)
             || library::navigation_actions().iter().any(|a| a.uuid == uuid)
             || multiaction::container(&uuid)

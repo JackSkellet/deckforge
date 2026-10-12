@@ -12,6 +12,7 @@ mod hardware;
 mod host;
 mod instance;
 mod layout;
+mod mixer;
 mod multi;
 mod multi_editor;
 mod package;

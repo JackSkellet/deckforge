@@ -2,6 +2,7 @@
 export type RecordValue = Record<string, any>;
 export type Controller = "Keypad" | "Encoder";
 export interface Action {
+  user_title_enabled?: boolean;
   uuid: string;
   name: string;
   plugin: string;
@@ -181,7 +182,14 @@ export function replaceChildren(
   } else next.Actions = values;
   return next;
 }
-export function saveRequests(slot: Slot, draft: Draft): RecordValue[] {
+export function saveRequests(
+  slot: Slot,
+  draft: Draft,
+  userTitleEnabled = true,
+): RecordValue[] {
+  const appearance = userTitleEnabled
+    ? [{ command: "appearance", context: slot.context, title: draft.title }]
+    : [];
   if (isContainer(slot.uuid))
     return [
       {
@@ -194,11 +202,11 @@ export function saveRequests(slot: Slot, draft: Draft): RecordValue[] {
         context: slot.context,
         raw: draft.raw,
       },
-      { command: "appearance", context: slot.context, title: draft.title },
+      ...appearance,
     ];
   return [
     { command: "settings", context: slot.context, settings: draft.settings },
-    { command: "appearance", context: slot.context, title: draft.title },
+    ...appearance,
   ];
 }
 export function filteredActions(

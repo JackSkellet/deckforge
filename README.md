@@ -16,7 +16,7 @@ Current working areas include:
 - Profiles, pages, folders, pinned actions, and original-format profile import/export.
 - Node, HTML and native Linux plugins, property inspectors, portable resources, feedback layouts, and a native Rust Discord plugin in development.
 - Multi Actions, Dial Stacks, Action Triggers, Linux desktop actions, and a native soundboard.
-- Live system-volume feedback and configurable volume steps.
+- Live system-volume feedback and configurable volume steps; an [audio mixer](streamdeck-linux/docs/AUDIO_MIXER.md) with independent monitor/stream routes and key/dial controls.
 
 See the [feature-parity ledger](streamdeck-linux/docs/FEATURE_PARITY.md) for the remaining work and the boundaries of the tests. Passing simulation tests is not a claim of complete hardware or Windows compatibility.
 

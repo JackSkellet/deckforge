@@ -72,3 +72,25 @@ HTML dialogs retain focus, forms use labels, and reduced-motion preferences are
 respected. Tests cover these contracts and command payloads independently of
 hardware. Actual hardware rendering and native window integration must also be
 validated through the Rust application.
+
+## Audio mixer
+
+The mixer panel reads `snapshot.mixer` and requests `mixer_refresh` when opened.
+This only enumerates audio devices and playing applications. Editing inputs,
+outputs, volumes, mutes, routes or the enable switch changes a retained local
+draft. **Apply routes** sends `mixer_config` with the full `settings` and the
+original `expected` configuration. External changes leave the draft intact and
+require an explicit reload; object-key ordering does not count as a change.
+
+The input selectors store application IDs/process names and exact source names.
+Transient stream indexes are never saved. Owned mixer devices are excluded from
+assignment, and unavailable saved devices remain visible until removed. Monitor
+and Stream mixes have independent route gains, mute states and master controls.
+The panel displays backend connection, active/pending status and warnings; it
+does not invent audio meters or claim official Wave Link compatibility.
+
+The two native Deckforge mixer actions have structured target and gesture
+settings. Those controls only edit the action; they cannot create or enable
+routes. Actions with `user_title_enabled: false` show a read-only live title and
+never send an appearance override during Save. Mixer tests use synthetic
+inventory and command stubs, without changing the user's audio graph.

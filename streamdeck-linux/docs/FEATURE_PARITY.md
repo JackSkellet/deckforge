@@ -612,3 +612,25 @@ updates, notifications, guild counts, stored-session resume without new consent,
 and release of held mute controls during host shutdown. All Discord service
 responses in these tests are local mocks. Avatar layouts, live authorization and
 actual Discord control behavior remain unverified. GitHub CI remains manual-only.
+
+### Wave Link functionality, 2026-10-12
+
+This is an additional compatibility target requested by the user, not a reason to
+remove any desktop requirements above. The native routing foundation is described
+in [Audio mixer](AUDIO_MIXER.md).
+
+| ID | Required behavior | Current evidence and remaining work |
+| --- | --- | --- |
+| WL-01 | Independent application/input groups, monitor/stream mixes and physical output assignment | **Verified subset, C/T.** Original Rust Pulse-compatible graph, five mixes/twelve groups, exact app/source/output assignments, separate route/master gain and mute, persisted configuration and native TypeScript matrix. Generated virtual PCM verifies separation, levels, mute and routing primitives. Real microphones/speakers and audible acceptance remain unverified. |
+| WL-02 | Mixer key/dial actions and imported official plugin compatibility | **Partial, C/T.** Original Deckforge actions support route/master targets, step size, mute, key set/change operations, Multi Actions and Dial Stacks. Host-process tests verify feedback and restart. Shipped profiles prove six official `com.elgato.wave-link` identities but all settings are empty. Current plugin schema/protocol compatibility remains unresolved; unknown imports remain preserved. |
+| WL-03 | Live metering, immediate faders, fades, linked mixes and output controls | **Partial/Missing.** Key/dial actions change controls live; editor changes currently require Apply. Feedback reflects worker-accepted settings, not measured signal peaks. Audio meters, immediate editor faders, fades, linked controls and per-output gain still need implementation and measured verification. |
+| WL-04 | Effects, effect switching and Wave hardware/DSP controls | **Missing.** No VST/AU effect hosting or proprietary Wave-device DSP implementation is present. These require separate contracts, supported Linux mappings and hardware evidence. |
+| WL-05 | Background operation, disable, shutdown and recovery | **Verified subset, C/T.** Exact owned-node journals and kernel ownership leases preserve parked apps/recorders across normal Quit/restart. Disabled fresh startup leaves audio untouched; explicit Enable recovers matching nodes. Tests verify original-output restoration, respect manual routing changes, silent attached-reader retention and unchanged system defaults. Abrupt crashes and full audio-daemon restart remain unverified. |
+
+`tests/mixer_host_interop.py --run-virtual` uses the actual application, simulated
+key/dial input and silent owned nodes. `tests/mixer_virtual.py --run-virtual`
+measures generated PCM and recovery with temporary streams. Neither captures the
+user's microphone, plays through physical speakers or moves a real application.
+Ownership evidence is recorded under `evidence/wave-link/`; local inventories are
+excluded from the public repository. Core tests pass 343 cases with 11 gated tests
+ignored; frontend tests pass 29 cases. Strict core Clippy passes.

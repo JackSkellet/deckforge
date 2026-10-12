@@ -1,5 +1,6 @@
 // Explicit development-only bridge. Never imported in a production bundle.
 import type { Snapshot, Action, Slot, RecordValue } from "./model";
+import { sameMixerValue } from "./Mixer";
 const icon = (label: string, mark: string, color = "#96dfc4") =>
   "data:image/svg+xml;base64," +
   btoa(
@@ -210,6 +211,71 @@ export function installFixture() {
       active: false,
       preferences: { after_minutes: 0, disable_on_lock: true, image: null },
     },
+    mixer: {
+      config: {
+        enabled: false,
+        channels: [],
+        mixes: [
+          {
+            id: "monitor",
+            name: "Monitor",
+            outputs: [],
+            volume: 100,
+            muted: false,
+          },
+          {
+            id: "stream",
+            name: "Stream",
+            outputs: [],
+            volume: 100,
+            muted: false,
+          },
+        ],
+        routes: [],
+      },
+      connected: true,
+      active: false,
+      sinks: [
+        {
+          name: "fixture.speakers",
+          description: "Desktop speakers",
+          owned: false,
+          monitor: false,
+        },
+        {
+          name: "fixture.headphones",
+          description: "Headphones",
+          owned: false,
+          monitor: false,
+        },
+      ],
+      sources: [
+        {
+          name: "fixture.microphone",
+          description: "USB microphone",
+          owned: false,
+          monitor: false,
+        },
+      ],
+      apps: [
+        {
+          index: 1,
+          name: "Music player",
+          application_id: "org.example.Music",
+          process_binary: "music-player",
+          sink: "fixture.speakers",
+        },
+        {
+          index: 2,
+          name: "Voice chat",
+          application_id: "org.example.Chat",
+          process_binary: "voice-chat",
+          sink: "fixture.headphones",
+        },
+      ],
+      warnings: [],
+      error: null,
+    },
     audio_outputs: [["speakers", "Desktop speakers"]],
     audio_active: {},
     multi_runs: [],
@@ -236,6 +302,21 @@ export function installFixture() {
         return { enabled: payload?.enabled ?? false, this_session: true } as T;
       if (method === "pick_file") return null as T;
       if (method === "command") {
+        if (payload.command === "mixer_config") {
+          if (!sameMixerValue(snapshot.mixer.config, payload.expected))
+            throw new Error(
+              "Mixer settings changed outside this editor. Reload current settings before applying.",
+            );
+          snapshot.mixer.config = structuredClone(payload.settings);
+          snapshot.mixer.applied_config = structuredClone(payload.settings);
+          snapshot.mixer.active = payload.settings.enabled;
+          snapshot.mixer.pending = false;
+        }
+        // Inventory refresh is read-only in this explicit synthetic fixture.
+        if (payload.command === "mixer_refresh") {
+          listener?.(structuredClone(snapshot));
+          return null as T;
+        }
         const slot = snapshot.slots.find((s) => s.context === payload.context);
         if (payload.command === "settings" && slot)
           slot.settings = payload.settings;

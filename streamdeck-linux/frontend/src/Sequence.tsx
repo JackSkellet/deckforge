@@ -1,4 +1,5 @@
 import { useState } from "react";
+import type { MixerConfig } from "./Mixer";
 import {
   children,
   replaceChildren,
@@ -31,8 +32,10 @@ export function Sequence({
   scope = uuid,
   runtime,
   run,
+  mixer,
 }: {
   scope?: string;
+  mixer?: MixerConfig;
   runtime?: Slot;
   run?: (p: RecordValue) => Promise<boolean>;
   raw: RecordValue;
@@ -268,6 +271,7 @@ export function Sequence({
           </Field>
           {!isContainer(selectedEntry.UUID) && (
             <SettingsFields
+              mixer={mixer}
               key={selectedEntry.ActionID ?? selected}
               editorKey={`${scope}/${selectedEntry.ActionID ?? selected}`}
               uuid={selectedEntry.UUID}
@@ -282,6 +286,7 @@ export function Sequence({
           )}
           {isContainer(selectedEntry.UUID) && depth < 8 && (
             <Sequence
+              mixer={mixer}
               key={selectedEntry.ActionID ?? selected}
               scope={`${scope}/${selectedEntry.ActionID ?? selected}`}
               runtime={liveChild ?? undefined}

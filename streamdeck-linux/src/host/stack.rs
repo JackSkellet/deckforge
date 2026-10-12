@@ -87,7 +87,7 @@ impl Host {
         if child.uuid == crate::action_trigger::UUID {
             return self.trigger_input(&child, name, payload);
         }
-        if crate::system_actions::supported(&child.uuid) {
+        if mixer_actions::supported(&child.uuid) || crate::system_actions::supported(&child.uuid) {
             let trigger = if name == "dialRotate" {
                 crate::system_actions::Trigger::Rotate(payload["ticks"].as_i64().unwrap_or(0) as i8)
             } else {
