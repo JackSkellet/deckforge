@@ -5,6 +5,13 @@ is used. The plugin retains the 17 original Elgato Discord action UUIDs and thei
 settings keys so imported profiles can resolve the same controls. Its backend,
 settings panel and SVG artwork are new implementations.
 
+Action icons use distinct microphone, headphones, channel, camera, screen-share,
+soundboard, statistics and volume symbols. Automatic key-state alternation is
+disabled. Mute/deafen and input-mode indicators follow observed Discord state;
+voice-channel selection follows the reported channel. Push-to-talk/mute highlight
+the local held gesture. Video, screen sharing and other actions without reliable
+state readback retain neutral artwork rather than claiming that a command worked.
+
 ## Build and install
 
 From the Deckforge application directory:

@@ -5,12 +5,14 @@ No Discord account/socket/auth operation is requested. All input is simulated.
 """
 import argparse
 import hashlib
+import http.server
 import json
 import os
 from pathlib import Path
 import stat
 import subprocess
 import tempfile
+import threading
 import time
 import zipfile
 
@@ -18,6 +20,91 @@ from system_interop import Host
 from sample_interop import require
 
 ID = 'com.elgato.discord'
+
+
+class InspectorProof:
+    """Observe only offline flags from our temporary inspector, without SDK writes."""
+    def __init__(self, plugin):
+        self.events = []
+        owner = self
+        class Receiver(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                size = int(self.headers.get('Content-Length', '0'))
+                require(0 < size <= 2048, 'Oversized inspector proof')
+                owner.events.append(json.loads(self.rfile.read(size)))
+                self.send_response(204)
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+            def log_message(self, *args):
+                pass
+        self.server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Receiver)
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        endpoint = f'http://127.0.0.1:{self.server.server_port}/offline-proof'
+        # Append a test observer to the installed temporary copy. The native UI,
+        # registration, plugin and Host all execute normally. No auth values or
+        # arbitrary messages are transmitted, and no plugin settings are changed.
+        script = plugin/'ui/app.js'
+        script.write_text(script.read_text() + """
+const fixtureConnect = window.connectElgatoStreamDeckSocket;
+window.connectElgatoStreamDeckSocket = (...args) => {
+ fixtureConnect(...args);
+ const context = JSON.parse(args[4]).context;
+ socket.addEventListener('message', event => {
+  const message = JSON.parse(event.data);
+  if (message.event !== 'sendToPropertyInspector') return;
+  const p = message.payload ?? {};
+  fetch(ENDPOINT, {method:'POST', headers:{'Content-Type':'text/plain'}, body:JSON.stringify({
+   context, disabled:p.disabled===true, unauthorized:p.unauthorized===true,
+   offline:p.auth?.connected===false && p.auth?.authenticated===false,
+   rejected:p.error==="Connect and authorize Discord in this action's settings."
+  })}).catch(()=>{});
+ });
+};
+""".replace('ENDPOINT', json.dumps(endpoint)))
+
+    def wait(self, host, context, field, after=0):
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            host.check_process()
+            if any(e.get('context') == context and e.get(field) is True for e in self.events[after:]):
+                return
+            time.sleep(.02)
+        raise AssertionError(f'No explicit inspector {field} proof for {context}')
+
+    def close(self):
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=2)
+
+
+def assert_offline_icons(host, proof):
+    checked = []
+    for index, suffix in enumerate(('videotoggle', 'streamtoggle', 'channel.text'), 1):
+        action = ID + '.' + suffix
+        host.post({'command':'assign','controller':'Keypad','index':index,'uuid':action})
+        context = next(s['context'] for s in host.state()['slots'] if s['uuid'] == action)
+        host.post({'command':'open_inspector','context':context})
+        proof.wait(host, context, 'offline')
+        proof.wait(host, context, 'disabled')
+        proof.wait(host, context, 'unauthorized')
+        start = len(proof.events)
+        host.post({'command':'input','event':'keyDown','index':index})
+        # Wait for the actual Rust plugin to reject the down event as offline.
+        # Otherwise a delayed setState(0) could mask a host keyUp auto-toggle.
+        proof.wait(host, context, 'rejected', after=start)
+        host.wait(lambda s: next(a for a in s['slots'] if a['context']==context)['state']==0,
+                  suffix+' offline baseline')
+        time.sleep(.1)
+        host.post({'command':'input','event':'keyUp','index':index})
+        until = time.monotonic() + .3
+        while time.monotonic() < until:
+            state = next(s for s in host.state()['slots'] if s['context']==context)['state']
+            require(state == 0, f'{suffix} falsely alternated its offline icon on release')
+            time.sleep(.02)
+        host.post({'command':'close_inspector','context':context})
+        checked.append(suffix)
+    return checked
 
 
 def main():
@@ -37,6 +124,10 @@ def main():
         executable=plugin/'bin/deckforge-discord'
         require(executable.read_bytes()[:4]==b'\x7fELF','Plugin is not a native Linux executable')
         require(executable.stat().st_mode&0o100 != 0,'Installer dropped executable permission')
+        manifest=json.loads((plugin/'manifest.json').read_text())
+        require(all(a.get('DisableAutomaticStates') is True for a in manifest['Actions']),
+                'Discord action manifest permits blind automatic state changes')
+        proof=InspectorProof(plugin)
         host=Host(binary,[plugin],temp/'state',temp/'host.log')
         try:
             host.ready()
@@ -59,6 +150,7 @@ def main():
             private=temp/'state/plugin-data'/hashlib.sha256(ID.encode()).hexdigest()
             require(stat.S_IMODE(private.stat().st_mode)==0o700,'Plugin data directory is not private')
             require(not (private/'discord-auth.json').exists(),'Actions wrote credentials without Connect')
+            report['offline_icons_no_automatic_toggle']=assert_offline_icons(host,proof)
             auth_file=private/'discord-auth.json'
             fixtures=['native-secret-not-exported','native-token-not-exported','native-refresh-not-exported']
             auth_file.write_text(json.dumps({'client_id':'123456789012345678','client_secret':fixtures[0],
@@ -81,6 +173,7 @@ def main():
             require('SDK command rejected' not in (temp/'host.log').read_text(),'Native plugin sent rejected SDK commands')
         finally:
             host.stop()
+            proof.close()
             require(host.process.returncode==0,'Host did not shut down cleanly')
         host=Host(binary,[],temp/'state',temp/'restart.log')
         try:
@@ -92,7 +185,7 @@ def main():
     if args.report:
         args.report.parent.mkdir(parents=True,exist_ok=True)
         args.report.write_text(json.dumps(report,indent=2)+'\n')
-    print('PASS: native ELF package install/registration,17 compatible actions, native inspector, no auto-connect, private data path, child restart/reaping, settings/context retention and credential-free profile export. No real Discord or USB operation.')
+    print('PASS: native ELF package install/registration,17 compatible actions, native inspector, offline video/share/text icons do not auto-toggle, no auto-connect, private data path, child restart/reaping, settings/context retention and credential-free profile export. No real Discord or USB operation.')
 
 
 if __name__=='__main__':

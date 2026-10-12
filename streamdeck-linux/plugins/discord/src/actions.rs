@@ -456,7 +456,7 @@ impl ActionEngine {
         let first = self.held.is_empty();
         self.held.insert(context.into(), mode);
         if !first {
-            return vec![];
+            return self.render(context);
         }
         let mut out = vec![rpc(
             "SET_VOICE_SETTINGS",
@@ -466,6 +466,7 @@ impl ActionEngine {
         if mode == Held::TalkPtt {
             out.push(rpc("PUSH_TO_TALK", json!({"active":true}), Some(context)));
         }
+        out.extend(self.render(context));
         out
     }
     fn release(&mut self, context: &str) -> Vec<Effect> {
@@ -473,7 +474,7 @@ impl ActionEngine {
             return vec![];
         };
         if self.held.values().any(|m| *m == mode) {
-            return vec![];
+            return self.render(context);
         }
         let mut out = vec![rpc(
             "SET_VOICE_SETTINGS",
@@ -483,6 +484,7 @@ impl ActionEngine {
         if mode == Held::TalkPtt {
             out.push(rpc("PUSH_TO_TALK", json!({"active":false}), Some(context)));
         }
+        out.extend(self.render(context));
         out
     }
     fn queries(&self, context: &str, slot: &Slot) -> Vec<Effect> {
@@ -800,10 +802,21 @@ impl ActionEngine {
                 self.users.clear();
                 self.speaker = None;
                 if let Some(id) = data["channel_id"].as_str() {
-                    return vec![rpc("GET_CHANNEL", json!({"channel_id":id}), None)];
+                    extra.push(rpc("GET_CHANNEL", json!({"channel_id":id}), None));
                 }
             }
-            ("GET_CHANNEL", _) => self.set_channel(data),
+            ("GET_CHANNEL", _) => {
+                // A delayed details response must not select a channel that a
+                // newer VOICE_CHANNEL_SELECT event has already replaced.
+                if data["id"].as_str().is_some_and(|id| {
+                    self.selected["channel_id"]
+                        .as_str()
+                        .or(self.selected["id"].as_str())
+                        == Some(id)
+                }) {
+                    self.set_channel(data);
+                }
+            }
             ("SET_USER_VOICE_SETTINGS", _) => {
                 if let Some(id) = data["user_id"].as_str() {
                     merge(self.users.entry(id.into()).or_default(), data);
@@ -883,6 +896,18 @@ impl ActionEngine {
             "pushtotalktoggle" => self.voice["mode"]["type"]
                 .as_str()
                 .map(|m| m == "PUSH_TO_TALK"),
+            // This is a local held-gesture indicator, not an acknowledgement
+            // that Discord has applied the requested remote mute/PTT operation.
+            "pushto.talk" | "pushto.mute" => {
+                Some(self.connected && self.held.contains_key(context))
+            }
+            "channel.voice" => s["channel"].as_str().filter(|id| !id.is_empty()).map(|id| {
+                self.connected
+                    && self.selected["id"]
+                        .as_str()
+                        .or(self.selected["channel_id"].as_str())
+                        == Some(id)
+            }),
             _ => None,
         };
         let users:Vec<Value>=self.users.iter().map(|(id,u)|json!({"id":id,"name":u["nick"].as_str().or(u["user"]["username"].as_str()).unwrap_or(id)})).collect();
@@ -896,9 +921,14 @@ impl ActionEngine {
         let mut out = vec![Effect::Host(
             json!({"event":"sendToPropertyInspector","context":context,"action":slot.action,"payload":payload}),
         )];
-        if let Some(state) = state {
-            out.push(host("setState", context, json!({"state":u8::from(state)})));
-        }
+        // State zero is the baseline artwork when observation is unavailable.
+        // Reset it after disconnect/settings changes rather than retaining a
+        // stale active icon. No video/share/text-selection state is inferred.
+        out.push(host(
+            "setState",
+            context,
+            json!({"state":u8::from(state.unwrap_or(false))}),
+        ));
         if suffix == "notifications" {
             let title = if !self.connected {
                 "Offline".into()
@@ -1218,6 +1248,175 @@ mod tests {
                 }
             })
             .unwrap()
+    }
+    fn icon_state(effects: &[Effect], context: &str) -> Option<u64> {
+        effects
+            .iter()
+            .filter_map(|effect| match effect {
+                Effect::Host(value)
+                    if value["event"] == "setState" && value["context"] == context =>
+                {
+                    value["payload"]["state"].as_u64()
+                }
+                _ => None,
+            })
+            .next_back()
+    }
+    #[test]
+    fn every_manifest_action_disables_automatic_state_alternation() {
+        let manifest: Value = serde_json::from_str(include_str!("../manifest.json")).unwrap();
+        let actions = manifest["Actions"].as_array().unwrap();
+        assert_eq!(actions.len(), 17);
+        for action in actions {
+            assert_eq!(action["DisableAutomaticStates"], true, "{}", action["UUID"]);
+            assert_eq!(action["States"].as_array().unwrap().len(), 2);
+        }
+    }
+    #[test]
+    fn reported_voice_states_drive_icons_and_disconnect_clears_stale_active() {
+        for (action, settings, field) in [
+            ("mute", json!({}), "mute"),
+            ("deafen", json!({}), "deaf"),
+            ("volumecontrolbutton", json!({"device":"input"}), "mute"),
+            ("volumecontrolbutton", json!({"device":"output"}), "deaf"),
+        ] {
+            let mut e = ready(action, settings);
+            let effects = e.rpc_event(&json!({"evt":"VOICE_SETTINGS_UPDATE","data":{field:true}}));
+            assert_eq!(icon_state(&effects, "a"), Some(1));
+            let down = e.host_event(&json!({"event":"keyDown","context":"a"}));
+            assert_eq!(icon_state(&down, "a"), None); // Request is not confirmation.
+            assert_eq!(icon_state(&e.render("a"), "a"), Some(1));
+            let effects = e.rpc_event(&json!({"evt":"VOICE_SETTINGS_UPDATE","data":{field:false}}));
+            assert_eq!(icon_state(&effects, "a"), Some(0));
+            e.rpc_event(&json!({"evt":"VOICE_SETTINGS_UPDATE","data":{field:true}}));
+            assert_eq!(icon_state(&e.connection(false), "a"), Some(0));
+        }
+        let mut e = ready("pushtotalktoggle", json!({}));
+        assert_eq!(
+            icon_state(
+                &e.rpc_event(
+                    &json!({"evt":"VOICE_SETTINGS_UPDATE","data":{"mode":{"type":"PUSH_TO_TALK"}}})
+                ),
+                "a"
+            ),
+            Some(1)
+        );
+        assert_eq!(icon_state(&e.rpc_event(&json!({"evt":"VOICE_SETTINGS_UPDATE","data":{"mode":{"type":"VOICE_ACTIVITY"}}})),"a"),Some(0));
+        let mut e = ready(
+            "uservolumecontrolbutton",
+            json!({"user":"42","mode":"mute"}),
+        );
+        assert_eq!(icon_state(&e.rpc_event(&json!({"cmd":"GET_SELECTED_VOICE_CHANNEL","data":{"id":"v","voice_states":[{"user":{"id":"42"},"mute":true}]}})),"a"),Some(1));
+        assert_eq!(
+            icon_state(
+                &e.rpc_event(
+                    &json!({"cmd":"SET_USER_VOICE_SETTINGS","data":{"user_id":"42","mute":false}})
+                ),
+                "a"
+            ),
+            Some(0)
+        );
+    }
+    #[test]
+    fn held_icons_follow_each_local_gesture_and_cleanup_not_blind_toggle() {
+        for action in ["pushto.talk", "pushto.mute"] {
+            let mut e = ready(action, json!({}));
+            e.host_event(&json!({"event":"willAppear","context":"b","action":format!("com.elgato.discord.{action}"),"payload":{"settings":{}}}));
+            for context in ["a", "b"] {
+                assert_eq!(
+                    icon_state(
+                        &e.host_event(&json!({"event":"keyDown","context":context})),
+                        context
+                    ),
+                    Some(1)
+                );
+                assert!(
+                    e.host_event(&json!({"event":"keyDown","context":context}))
+                        .is_empty()
+                );
+            }
+            assert_eq!(
+                icon_state(&e.host_event(&json!({"event":"keyUp","context":"a"})), "a"),
+                Some(0)
+            );
+            assert_eq!(icon_state(&e.render("b"), "b"), Some(1));
+            assert_eq!(
+                icon_state(
+                    &e.host_event(&json!({"event":"willDisappear","context":"b"})),
+                    "b"
+                ),
+                Some(0)
+            );
+            e.host_event(&json!({"event":"keyDown","context":"a"}));
+            assert_eq!(icon_state(&e.connection(false), "a"), Some(0));
+        }
+    }
+    #[test]
+    fn voice_selection_uses_observed_channel_and_ignores_late_details() {
+        let mut e = ready("channel.voice", json!({"channel":"chosen"}));
+        assert_eq!(icon_state(&e.render("a"), "a"), Some(0));
+        assert_eq!(
+            icon_state(
+                &e.host_event(&json!({"event":"keyDown","context":"a"})),
+                "a"
+            ),
+            None
+        );
+        assert_eq!(
+            icon_state(
+                &e.rpc_event(&json!({"evt":"VOICE_CHANNEL_SELECT","data":{"channel_id":"chosen"}})),
+                "a"
+            ),
+            Some(1)
+        );
+        assert_eq!(
+            icon_state(
+                &e.rpc_event(&json!({"evt":"VOICE_CHANNEL_SELECT","data":{"channel_id":"other"}})),
+                "a"
+            ),
+            Some(0)
+        );
+        assert_eq!(
+            icon_state(
+                &e.rpc_event(&json!({"cmd":"GET_CHANNEL","data":{"id":"chosen"}})),
+                "a"
+            ),
+            Some(0)
+        );
+        assert_eq!(e.selected["channel_id"], "other");
+        assert_eq!(
+            icon_state(
+                &e.rpc_event(&json!({"cmd":"GET_SELECTED_VOICE_CHANNEL","data":{"id":"chosen"}})),
+                "a"
+            ),
+            Some(1)
+        );
+        assert_eq!(
+            icon_state(
+                &e.rpc_event(&json!({"evt":"VOICE_CHANNEL_SELECT","data":{"channel_id":null}})),
+                "a"
+            ),
+            Some(0)
+        );
+    }
+    #[test]
+    fn actions_without_readback_never_claim_active_on_request_or_reply() {
+        for (action, settings) in [
+            ("videotoggle", json!({})),
+            ("streamtoggle", json!({})),
+            ("channel.text", json!({"channel":"text"})),
+        ] {
+            let mut e = ready(action, settings);
+            for _ in 0..2 {
+                let effects = e.host_event(&json!({"event":"keyDown","context":"a"}));
+                assert!(effects.iter().any(|e| matches!(e, Effect::Rpc { .. })));
+                assert_eq!(icon_state(&effects, "a"), None);
+                assert_eq!(
+                    icon_state(&e.rpc_event(&json!({"cmd":"TOGGLE_VIDEO","data":{}})), "a"),
+                    Some(0)
+                );
+            }
+        }
     }
     #[test]
     fn volume_encoding_and_caps() {

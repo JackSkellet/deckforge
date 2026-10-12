@@ -1,1 +1,7 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="120" height="120" viewBox="0 0 120 120"><rect width="120" height="120" rx="22" fill="#191d29"/><g fill="none" stroke="#b7bfff" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"><path d="M32 66V54a28 28 0 0 1 56 0v12M35 55v28h11V55zm39 0v28h11V55z"/></g></svg>
+<svg xmlns="http://www.w3.org/2000/svg" width="120" height="120" viewBox="0 0 120 120" role="img" aria-labelledby="title">
+  <title id="title">Voice activity input mode</title>
+  <rect width="120" height="120" rx="22" fill="#191d29"/>
+  <g color="#b7bfff" fill="none" stroke="currentColor" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round">
+    <g transform="translate(-14 7) scale(.8)"><rect x="50" y="22" width="20" height="36" rx="10"/><path d="M40 48v8a20 20 0 0 0 40 0V48M60 76v10M48 86h24"/></g><path d="M66 46v16M77 36v36M88 43v22"/>
+  </g>
+</svg>

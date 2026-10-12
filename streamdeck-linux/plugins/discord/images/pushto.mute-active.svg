@@ -1,1 +1,7 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="120" height="120" viewBox="0 0 120 120"><rect width="120" height="120" rx="22" fill="#191d29"/><g fill="none" stroke="#5be1af" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"><path d="M32 35h56v42H62L46 89V77H32zM44 49h32M44 61h23"/></g></svg>
+<svg xmlns="http://www.w3.org/2000/svg" width="120" height="120" viewBox="0 0 120 120" role="img" aria-labelledby="title">
+  <title id="title">Held to mute</title>
+  <rect width="120" height="120" rx="22" fill="#191d29"/>
+  <g color="#ed998e" fill="none" stroke="currentColor" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round">
+    <g transform="translate(-13 1) scale(.9)"><rect x="50" y="22" width="20" height="36" rx="10"/><path d="M40 48v8a20 20 0 0 0 40 0V48M60 76v10M48 86h24"/></g><path d="M29 25 64 70" stroke="#191d29" stroke-width="12"/><path d="M29 25 64 70" stroke-width="6"/><path d="M86 24v16M79 33l7 7 7-7"/><rect x="75" y="49" width="22" height="22" rx="5" fill="currentColor"/><path d="M82 60h8" stroke="#191d29"/>
+  </g>
+</svg>

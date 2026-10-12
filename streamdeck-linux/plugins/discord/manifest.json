@@ -40,7 +40,8 @@
           "TitleAlignment": "bottom",
           "FontSize": 12
         }
-      ]
+      ],
+      "DisableAutomaticStates": true
     },
     {
       "UUID": "com.elgato.discord.mute",
@@ -63,7 +64,8 @@
           "TitleAlignment": "bottom",
           "FontSize": 12
         }
-      ]
+      ],
+      "DisableAutomaticStates": true
     },
     {
       "UUID": "com.elgato.discord.deafen",
@@ -86,7 +88,8 @@
           "TitleAlignment": "bottom",
           "FontSize": 12
         }
-      ]
+      ],
+      "DisableAutomaticStates": true
     },
     {
       "UUID": "com.elgato.discord.channel.voice",
@@ -109,7 +112,8 @@
           "TitleAlignment": "bottom",
           "FontSize": 12
         }
-      ]
+      ],
+      "DisableAutomaticStates": true
     },
     {
       "UUID": "com.elgato.discord.channel.text",
@@ -132,7 +136,8 @@
           "TitleAlignment": "bottom",
           "FontSize": 12
         }
-      ]
+      ],
+      "DisableAutomaticStates": true
     },
     {
       "UUID": "com.elgato.discord.pushto.talk",
@@ -155,7 +160,8 @@
           "TitleAlignment": "bottom",
           "FontSize": 12
         }
-      ]
+      ],
+      "DisableAutomaticStates": true
     },
     {
       "UUID": "com.elgato.discord.pushto.mute",
@@ -178,7 +184,8 @@
           "TitleAlignment": "bottom",
           "FontSize": 12
         }
-      ]
+      ],
+      "DisableAutomaticStates": true
     },
     {
       "UUID": "com.elgato.discord.setaudiodevice",
@@ -201,7 +208,8 @@
           "TitleAlignment": "bottom",
           "FontSize": 12
         }
-      ]
+      ],
+      "DisableAutomaticStates": true
     },
     {
       "UUID": "com.elgato.discord.serverstats",
@@ -224,7 +232,8 @@
           "TitleAlignment": "bottom",
           "FontSize": 12
         }
-      ]
+      ],
+      "DisableAutomaticStates": true
     },
     {
       "UUID": "com.elgato.discord.pushtotalktoggle",
@@ -247,7 +256,8 @@
           "TitleAlignment": "bottom",
           "FontSize": 12
         }
-      ]
+      ],
+      "DisableAutomaticStates": true
     },
     {
       "UUID": "com.elgato.discord.notifications",
@@ -270,7 +280,8 @@
           "TitleAlignment": "bottom",
           "FontSize": 12
         }
-      ]
+      ],
+      "DisableAutomaticStates": true
     },
     {
       "UUID": "com.elgato.discord.videotoggle",
@@ -293,7 +304,8 @@
           "TitleAlignment": "bottom",
           "FontSize": 12
         }
-      ]
+      ],
+      "DisableAutomaticStates": true
     },
     {
       "UUID": "com.elgato.discord.streamtoggle",
@@ -316,7 +328,8 @@
           "TitleAlignment": "bottom",
           "FontSize": 12
         }
-      ]
+      ],
+      "DisableAutomaticStates": true
     },
     {
       "UUID": "com.elgato.discord.uservolumecontrolbutton",
@@ -339,7 +352,8 @@
           "TitleAlignment": "bottom",
           "FontSize": 12
         }
-      ]
+      ],
+      "DisableAutomaticStates": true
     },
     {
       "UUID": "com.elgato.discord.uservolumecontroldial",
@@ -370,7 +384,8 @@
           "Push": "Toggle mute",
           "Touch": "Toggle mute"
         }
-      }
+      },
+      "DisableAutomaticStates": true
     },
     {
       "UUID": "com.elgato.discord.volumecontrolbutton",
@@ -393,7 +408,8 @@
           "TitleAlignment": "bottom",
           "FontSize": 12
         }
-      ]
+      ],
+      "DisableAutomaticStates": true
     },
     {
       "UUID": "com.elgato.discord.volumecontrol",
@@ -424,7 +440,8 @@
           "Push": "Toggle mute",
           "Touch": "Toggle mute"
         }
-      }
+      },
+      "DisableAutomaticStates": true
     }
   ]
 }

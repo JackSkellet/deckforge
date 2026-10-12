@@ -1,1 +1,7 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="120" height="120" viewBox="0 0 120 120"><rect width="120" height="120" rx="22" fill="#191d29"/><g fill="none" stroke="#b7bfff" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"><path d="M60 25v42m-17-15v10a17 17 0 0 0 34 0V52M49 90h22M60 79v11"/><rect x="51" y="23" width="18" height="45" rx="9"/></g></svg>
+<svg xmlns="http://www.w3.org/2000/svg" width="120" height="120" viewBox="0 0 120 120" role="img" aria-labelledby="title">
+  <title id="title">Play soundboard sound</title>
+  <rect width="120" height="120" rx="22" fill="#191d29"/>
+  <g color="#b7bfff" fill="none" stroke="currentColor" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round">
+    <rect x="25" y="25" width="70" height="60" rx="7"/><rect x="35" y="35" width="12" height="12" rx="2"/><rect x="54" y="35" width="12" height="12" rx="2"/><rect x="73" y="35" width="12" height="12" rx="2"/><rect x="35" y="59" width="12" height="12" rx="2"/><rect x="54" y="59" width="12" height="12" rx="2"/><path d="m74 58 12 8-12 8z" fill="currentColor" stroke-width="2"/>
+  </g>
+</svg>
