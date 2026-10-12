@@ -1,3 +1,4 @@
+import { newId } from "./ids";
 import type { DeviceGeometry, DeviceCapabilities } from "./device";
 // Vendor action records deliberately remain open: unfamiliar fields must survive editing.
 export type RecordValue = Record<string, any>;
@@ -6,6 +7,8 @@ export interface Action {
   user_title_enabled?: boolean;
   uuid: string;
   name: string;
+  source_name?: string;
+  source_states?: RecordValue[] | null;
   plugin: string;
   plugin_name: string;
   category: string;
@@ -44,6 +47,7 @@ export interface AppearanceEdit {
 export interface Slot {
   appearance?: AppearanceInfo;
   state_count?: number;
+  state_names?: string[];
   context: string;
   uuid: string;
   name: string;
@@ -92,7 +96,15 @@ export interface DeviceRecord {
   selected: boolean;
   online?: boolean;
 }
+export interface PluginLanguageState {
+  preference: string;
+  active: string;
+  resolved: string;
+  restart_required: boolean;
+  options: { value: string; label: string }[];
+}
 export interface Snapshot {
+  plugin_language?: PluginLanguageState;
   application_monitor?: { enabled: boolean; error: string | null };
   devices?: DeviceRecord[];
   page_navigation?: { previous: boolean; next: boolean };
@@ -330,12 +342,16 @@ export function childAllowed(action: Action, parent: string) {
 }
 export function newChild(action: Action): RecordValue {
   const raw: RecordValue = {
-    ActionID: crypto.randomUUID(),
+    ActionID: newId(),
     UUID: action.uuid,
-    Name: action.name,
+    Name: action.source_name ?? action.name,
     Settings: clone(action.defaults ?? {}),
     State: 0,
-    States: clone(action.states ?? []),
+    States: clone(
+      action.source_states !== undefined
+        ? (action.source_states ?? [])
+        : (action.states ?? []),
+    ),
   };
   if (isMulti(action.uuid)) raw.Actions = [{ Actions: [] }, { Actions: [] }];
   if (action.uuid === TRIGGER)

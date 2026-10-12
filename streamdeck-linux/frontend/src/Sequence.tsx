@@ -72,6 +72,17 @@ export function Sequence({
           child.raw?.ActionID === selectedEntry.ActionID,
       )
     : undefined;
+  function childLabel(entry: RecordValue, fallback = "Unassigned") {
+    const action = actions.find((candidate) => candidate.uuid === entry.UUID);
+    if (entry.Name && entry.Name !== action?.source_name) return entry.Name;
+    const child = runtimeEntries.find(
+      (candidate) =>
+        candidate &&
+        candidate.uuid === entry.UUID &&
+        candidate.raw?.ActionID === entry.ActionID,
+    );
+    return child?.name || action?.name || entry.Name || fallback;
+  }
   const compatible = actions.filter(
     (a) => childAllowed(a, uuid) && a.visible !== false,
   );
@@ -160,11 +171,7 @@ export function Sequence({
                 {trigger ? ["↶", "↓", "↷"][index] : index + 1}
               </span>
               <span>
-                <strong>
-                  {entry.Name ||
-                    actions.find((a) => a.uuid === entry.UUID)?.name ||
-                    "Unassigned"}
-                </strong>
+                <strong>{childLabel(entry)}</strong>
                 {trigger && (
                   <small>
                     {["Turn left", "Press / tap", "Turn right"][index]}
@@ -255,7 +262,7 @@ export function Sequence({
       {selectedEntry?.UUID && (
         <div className="child-editor">
           <div className="section-label">
-            {selectedEntry.Name || "Selected action"}
+            {childLabel(selectedEntry, "Selected action")}
           </div>
           {liveChild?.has_inspector && run && (
             <button
@@ -279,7 +286,7 @@ export function Sequence({
             <SettingsFields
               device={device}
               mixer={mixer}
-              key={selectedEntry.ActionID ?? selected}
+              key={`settings:${selectedEntry.ActionID ?? selected}`}
               editorKey={`${scope}/${selectedEntry.ActionID ?? selected}`}
               uuid={selectedEntry.UUID}
               controller={stack ? "Encoder" : "Keypad"}
@@ -296,7 +303,7 @@ export function Sequence({
               encoderDisplay={encoderDisplay}
               device={device}
               mixer={mixer}
-              key={selectedEntry.ActionID ?? selected}
+              key={`sequence:${selectedEntry.ActionID ?? selected}`}
               scope={`${scope}/${selectedEntry.ActionID ?? selected}`}
               runtime={liveChild ?? undefined}
               run={run}
@@ -337,7 +344,7 @@ export function Sequence({
             />
           )}
           <JsonEditor
-            key={selectedEntry.ActionID ?? selected}
+            key={`raw:${selectedEntry.ActionID ?? selected}`}
             editorKey={`${scope}/${selectedEntry.ActionID ?? selected}`}
             label="Advanced action record"
             value={selectedEntry}

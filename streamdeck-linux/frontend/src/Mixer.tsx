@@ -1,3 +1,4 @@
+import { newId } from "./ids";
 import { useEffect, useRef, useState } from "react";
 import { Check, Field, SelectField } from "./Fields";
 import { clone } from "./model";
@@ -551,7 +552,7 @@ export function AudioMixer({
                   channels: [
                     ...config.channels,
                     {
-                      id: crypto.randomUUID(),
+                      id: newId(),
                       name: `Input ${config.channels.length + 1}`,
                       apps: [],
                       sources: [],
@@ -571,7 +572,7 @@ export function AudioMixer({
                   mixes: [
                     ...config.mixes,
                     {
-                      id: crypto.randomUUID(),
+                      id: newId(),
                       name: `Mix ${config.mixes.length + 1}`,
                       outputs: [],
                       volume: 100,

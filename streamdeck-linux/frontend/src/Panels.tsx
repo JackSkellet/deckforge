@@ -4,6 +4,7 @@ import { Field, Check, SelectField } from "./Fields";
 import type { Snapshot, RecordValue } from "./model";
 import { getFormDraft, setFormDraft } from "./transient";
 import { PluginApplications } from "./PluginApplications";
+import { PluginLanguage } from "./PluginLanguage";
 import { deviceName } from "./device";
 export type Run = (payload: RecordValue) => Promise<boolean>;
 export function Modal({
@@ -158,6 +159,11 @@ export function Plugins({
             )}
             <details>
               <summary>Runtime details</summary>
+              {p.localization_warning && (
+                <p className="warning" role="status">
+                  Localization: {p.localization_warning}
+                </p>
+              )}
               <dl>
                 {[
                   ["Plugin folder", p.path],
@@ -227,10 +233,12 @@ export function Preferences({
   snapshot,
   run,
   onError,
+  error = "",
 }: {
   snapshot: Snapshot;
   run: Run;
   onError: (e: unknown) => void;
+  error?: string;
 }) {
   const formKey = `preferences:${snapshot.device}`;
   const saved = getFormDraft(formKey) ?? {};
@@ -352,6 +360,16 @@ export function Preferences({
             />
           ) : (
             <p>Reading startup preference…</p>
+          )}
+          {snapshot.plugin_language && (
+            <>
+              <hr />
+              <PluginLanguage
+                language={snapshot.plugin_language}
+                run={run}
+                error={error}
+              />
+            </>
           )}
           <hr />
           <h3>Deckforge</h3>

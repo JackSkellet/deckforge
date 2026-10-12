@@ -70,6 +70,13 @@ runtime dependencies of this implementation.
 
 ## Verification
 
+Native-window tests now exercise **Add input group** and **Add mix** directly,
+including draft retention after reopening the dialog. The earlier native build
+called an unavailable `crypto.randomUUID` API and those buttons failed before
+creating an item. A shared secure-random UUID fallback fixes both mixer creation
+and nested-action creation. Before/after tests keep routing disabled and do not
+apply routes or alter the audio backend.
+
 `tests/mixer_host_interop.py --run-virtual` exercises the real host, saved config,
 independent routes, simulated keys/dials, control feedback, restart and cleanup.
 `tests/mixer_virtual.py --run-virtual` sends generated PCM through owned temporary

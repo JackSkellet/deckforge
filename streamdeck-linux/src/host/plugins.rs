@@ -250,6 +250,7 @@ impl Host {
             self.actions.extend(incoming);
             plugin.runtime.load_failed = false;
             self.plugins[index] = plugin;
+            self.refresh_localizations();
             for device in self.device_ids() {
                 self.with_device(&device, |host| {
                     host.sync_visible();
@@ -267,7 +268,13 @@ impl Host {
                 })?;
             }
             let devices = self.registration_devices();
-            launch_plugin(&mut self.plugins[index], &devices, self.port, &state)
+            launch_plugin(
+                &mut self.plugins[index],
+                &devices,
+                self.port,
+                &state,
+                self.language,
+            )
         })();
         if let Err(error) = &result {
             self.plugins[index].runtime.fail(format!("{error:#}"));

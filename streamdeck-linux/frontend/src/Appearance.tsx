@@ -254,7 +254,7 @@ export function AppearanceEditor({
               { length: slot.state_count ?? 1 },
               (_, index) => [
                 index,
-                `State ${index + 1}${index === slot.state ? " · live" : ""}`,
+                `${slot.state_names?.[index] || `State ${index + 1}`}${index === slot.state ? " · live" : ""}`,
               ],
             )}
             onChange={(value) => onSelectState(Number(value))}

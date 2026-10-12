@@ -40,4 +40,4 @@ These checks do not suspend the user's computer. Physical suspend/resume
 acceptance remains unverified.
 
 See [application monitoring](PLUGIN_APPLICATIONS.md) for launch and quit events.
-Plugin localization remains separate compatibility work.
+See [plugin localization](PLUGIN_LOCALIZATION.md) for language preferences and labels.

@@ -23,6 +23,7 @@ mod multi;
 mod multi_editor;
 mod package;
 mod plugin_entry;
+mod plugin_localization;
 mod preferences;
 mod profile;
 mod protected_manifest;

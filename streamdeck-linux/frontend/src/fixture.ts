@@ -1,3 +1,4 @@
+import { newId } from "./ids";
 // Explicit development-only bridge. Never imported in a production bundle.
 import type { Snapshot, Action, Slot, RecordValue } from "./model";
 import { sameMixerValue } from "./Mixer";
@@ -438,7 +439,7 @@ export function installFixture(modelId?: string) {
     result.controller = target.controller as Slot["controller"];
     result.index = target.index;
     if (copy) {
-      result.context = crypto.randomUUID();
+      result.context = newId();
       result.raw.ActionID = result.context;
     }
     snapshot.slots = snapshot.slots.filter(
@@ -591,7 +592,7 @@ export function installFixture(modelId?: string) {
                 a.name,
                 a.name.slice(0, 1),
               ),
-              context: crypto.randomUUID(),
+              context: newId(),
               uuid: a.uuid,
               name: a.name,
               controller: payload.controller,

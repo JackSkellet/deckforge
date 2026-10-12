@@ -109,6 +109,11 @@ Mappings are explicit and saved per plugin. See
 behavior. [System-resume events](docs/PLUGIN_SYSTEM_EVENTS.md) replay visible
 actions and notify plugins after logind reports sleep completion.
 
+**Preferences → Startup & about → Plugin language** selects localized plugin and
+action labels and the language supplied to property inspectors. It applies after
+a full app restart; saved profiles and user titles are preserved. See
+[plugin localization](docs/PLUGIN_LOCALIZATION.md).
+
 The tray uses Linux StatusNotifierItem. If your desktop has no tray, reopening
 the launcher still restores the editor through a private local socket. This
 works by closing and recreating the actual native window, including on Wayland.

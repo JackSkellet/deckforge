@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
+  newChild,
   reconcileDraft,
   editDraft,
   finishSave,
@@ -236,4 +237,40 @@ it("searches all terms across category/plugin/name and applies controller filter
   expect(filteredActions([a], "elgato count", "All")).toEqual([a]);
   expect(filteredActions([a], "count missing", "All")).toEqual([]);
   expect(filteredActions([a], "counter", "Encoder")).toEqual([]);
+});
+
+it("creates nested records from original manifest names/states, never translated presentation", () => {
+  const originalStates = [
+    {
+      Name: "Off",
+      Image: "icons/off",
+      Title: "Original title",
+      Future: { keep: 1 },
+    },
+  ];
+  const action = {
+    uuid: "plugin.localized",
+    name: "Auslöser",
+    source_name: "Trigger source",
+    source_states: originalStates,
+    states: [{ Name: "Aus", Image: "icons/off", Title: "Original title" }],
+    defaults: { value: 7 },
+  } as unknown as Action;
+  for (const parent of [MULTI + "routine", STACK, TRIGGER]) {
+    const child = newChild(action);
+    expect(child.Name).toBe("Trigger source");
+    expect(child.States).toEqual(originalStates);
+    const container = replaceChildren({}, parent, [child]);
+    expect(JSON.stringify(container)).not.toContain("Aus");
+    child.States[0].Future.keep = 99;
+    expect(originalStates[0].Future.keep).toBe(1);
+  }
+  expect(newChild({ ...action, source_states: null }).States).toEqual([]);
+  const legacy = { ...action };
+  delete legacy.source_name;
+  delete legacy.source_states;
+  expect(newChild(legacy)).toMatchObject({
+    Name: "Auslöser",
+    States: action.states,
+  });
 });

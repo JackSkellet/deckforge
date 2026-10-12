@@ -52,13 +52,14 @@ impl Host {
         }
         let mut result = serde_json::Map::new();
         if let Some(action) = self.actions.iter().find(|a| a.uuid == slot.uuid) {
+            let presentation = self.presented_action(action);
             for (key, field) in [
                 ("rotate", "Rotate"),
                 ("push", "Push"),
                 ("touch", "Touch"),
                 ("longTouch", "LongTouch"),
             ] {
-                if let Some(text) = action.raw["Encoder"]["TriggerDescription"][field].as_str() {
+                if let Some(text) = presentation["Encoder"]["TriggerDescription"][field].as_str() {
                     result.insert(key.into(), json!(text));
                 }
             }

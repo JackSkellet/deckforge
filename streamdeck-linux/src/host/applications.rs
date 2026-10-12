@@ -84,6 +84,14 @@ fn matches(process: &Process, executable: &str) -> bool {
 impl Host {
     pub(super) fn plugin_snapshot(&self, plugin: &Plugin) -> Value {
         let mut value = plugin.snapshot();
+        let presentation = self.presented_manifest(plugin);
+        value["name"] = json!(presentation["Name"].as_str().unwrap_or(&plugin.name));
+        value["description"] = presentation["Description"].clone();
+        value["localization_warning"] = json!(
+            self.localizations
+                .get(&plugin.id)
+                .and_then(|p| p.warning.as_deref())
+        );
         let mappings = self.application_mappings.get(&plugin.id);
         value["application_mappings"] = json!(mappings.cloned().unwrap_or_default());
         value["applications"] = json!(applications(plugin, mappings)

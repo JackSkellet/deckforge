@@ -46,6 +46,7 @@ mod feedback;
 mod inspectors;
 mod library;
 mod links;
+mod localization;
 mod mixer;
 mod mixer_actions;
 mod multiaction;
@@ -328,6 +329,8 @@ mod image_serde {
 }
 #[derive(Serialize, Deserialize, Default)]
 struct Saved {
+    #[serde(default = "localization::default_preference")]
+    plugin_language: String,
     #[serde(default)]
     application_mappings: applications::Mappings,
     #[serde(default)]
@@ -362,6 +365,9 @@ enum HeldControl {
     Dial(u8),
 }
 struct Host {
+    plugin_language: String,
+    language: &'static str,
+    localizations: HashMap<String, crate::plugin_localization::Presentation>,
     application_mappings: applications::Mappings,
     application_monitor: Option<crate::application_monitor::Worker>,
     application_delivered: HashMap<String, applications::Delivered>,
@@ -499,6 +505,7 @@ impl Host {
             slots: &'a [Slot],
             globals: &'a HashMap<String, Value>,
             application_mappings: &'a applications::Mappings,
+            plugin_language: &'a str,
         }
         let data = serde_json::to_vec_pretty(&View {
             devices: self.device_records(),
@@ -515,6 +522,7 @@ impl Host {
             slots: &self.slots,
             globals: &self.globals,
             application_mappings: &self.application_mappings,
+            plugin_language: &self.plugin_language,
         })?;
         {
             use std::io::Write;
@@ -1571,7 +1579,7 @@ async fn root(
     Html(include_str!("ui.html").replace("__TOKEN__", &token)).into_response()
 }
 fn slot_snapshot(host: &Host, s: &Slot) -> Value {
-    json!({"appearance":appearance::snapshot(s,&host.actions),"state_count":appearance::count(s,&host.actions),"available":host.actions.iter().any(|a|a.uuid==s.uuid),"pinned":s.pinned,"context":s.context,"controller":s.controller,"index":s.index,"uuid":s.uuid,"name":s.name,"settings":s.settings,"resources":s.resources.clone().unwrap_or_default(),"title":s.title,"state":s.state,"feedback":s.feedback,"layout":s.layout,"preview":s.preview,"raw":s.raw,
+    json!({"appearance":appearance::snapshot(s,&host.actions),"state_count":appearance::count(s,&host.actions),"available":host.actions.iter().any(|a|a.uuid==s.uuid),"pinned":s.pinned,"context":s.context,"controller":s.controller,"index":s.index,"uuid":s.uuid,"name":host.presented_slot_name(s),"state_names":host.state_names(s),"settings":s.settings,"resources":s.resources.clone().unwrap_or_default(),"title":s.title,"state":s.state,"feedback":s.feedback,"layout":s.layout,"preview":s.preview,"raw":s.raw,
         "trigger_description":host.trigger_description(s),
         "trigger_children":if s.uuid==crate::action_trigger::UUID {s.children.iter().map(|g|g.first().map(|c|slot_snapshot(host,c)).unwrap_or(Value::Null)).collect::<Vec<_>>()}else{vec![]},
         "stack_children":if s.uuid==crate::dial_stack::UUID {s.children.first().map(|children|children.iter().map(|c|slot_snapshot(host,c)).collect::<Vec<_>>()).unwrap_or_default()}else{vec![]},
@@ -1580,6 +1588,14 @@ fn slot_snapshot(host: &Host, s: &Slot) -> Value {
 }
 fn action_snapshot(host: &Host, action: &Action) -> Value {
     let plugin = host.plugins.iter().find(|p| p.id == action.plugin);
+    let presentation = host.presented_action(action);
+    let plugin_name = plugin
+        .map(|p| {
+            host.presented_manifest(p)["Name"]
+                .as_str()
+                .unwrap_or(&p.name)
+        })
+        .unwrap_or("Deckforge");
     let category = if mixer_actions::supported(&action.uuid) {
         "Audio mixer"
     } else if crate::system_actions::supported(&action.uuid) {
@@ -1599,14 +1615,15 @@ fn action_snapshot(host: &Host, action: &Action) -> Value {
             .unwrap_or_else(|| crate::system_actions::defaults(&action.uuid))
     };
     json!({
-        "uuid":action.uuid,"name":action.name,"plugin":action.plugin,
-        "plugin_name":plugin.map(|p|p.name.as_str()).unwrap_or("Deckforge"),
-        "category":plugin.map(|p|p.manifest["Category"].as_str().unwrap_or(&p.name)).unwrap_or(category),
+        "uuid":action.uuid,"name":presentation["Name"].as_str().unwrap_or(&action.name),"plugin":action.plugin,
+        "source_name":action.name,"source_states":action.raw["States"],
+        "plugin_name":plugin_name,
+        "category":plugin.map(|p|p.manifest["Category"].as_str().unwrap_or(plugin_name)).unwrap_or(category),
         "icon":action.raw["Icon"],"plugin_root":plugin.map(|p|p.root.as_path()),
         "icon_generation":plugin.and_then(|p|p.child.as_ref().map(Child::id)),
-        "tooltip":action.raw["Tooltip"],"user_title_enabled":action.raw["UserTitleEnabled"]!=false,
+        "tooltip":presentation["Tooltip"],"user_title_enabled":action.raw["UserTitleEnabled"]!=false,
         "visible":action.raw["VisibleInActionsList"]!=false,"controllers":action.controllers,
-        "states":action.raw["States"],
+        "states":presentation["States"],
         "supported_in_multi":action.raw["SupportedInMultiActions"]!=false && !multiaction::container(&action.uuid),
         "multi_only":action.uuid==multiaction::DELAY,"defaults":defaults
     })
@@ -1614,7 +1631,7 @@ fn action_snapshot(host: &Host, action: &Action) -> Value {
 fn snapshot(host: &Host) -> Value {
     json!({"devices":host.devices_snapshot(),"page_navigation":host.page_navigation(),"device_model":host.model,"device_name":host.device_display_name(),"device_model_name":host.model.name(),"device_custom_name":host.device_name,"overflow_slots":host.overflow_slots(),"device_capabilities":host.model.capabilities(),"device_geometry":{"columns":host.model.columns(),"rows":host.model.rows(),"keys":host.model.key_count(),"dials":host.model.dial_count(),"key_width":host.model.key_width(),"key_height":host.model.key_height(),"strip_width":host.model.strip_width(),"strip_height":host.model.strip_height()},"clipboard":host.clipboard_snapshot(),"mixer":host.mixer_snapshot(),"screensaver":{"supported":host.model==Model::Plus,"active":host.saver.active,"reason":host.saver.reason,"generation":host.saver.generation,"preferences":host.saver_preferences(),"preview":host.saver.preview,"error":host.saver.error,"frames":host.saver.animation.as_ref().map(|animation|animation.len())},"system_resume":{"available":host.resume_available,"error":host.resume_error,"enabled":host.resume_monitor.is_some()},"session":host.session_state,"device_settings":{"desired":host.configured_controls(),"applied":host.controls_observed,"error":host.controls_error},"library":host.library.snapshot(),"running":host.running,"device":host.device,"firmware":host.firmware,"simulate":host.simulate,"connected":host.connected && !host.simulate,"device_online":host.connected,"connection_error":host.connection_error,
         "volume":host.volume_state,"volume_error":host.volume_error,"multi_runs":host.multi.snapshot(),"multi_pending":host.multi_pending.len(),"audio_outputs":host.audio_outputs,"audio_active":host.audio_active,"system_status":host.system_status,"slots":host.slots.iter().map(|s|slot_snapshot(host,s)).collect::<Vec<_>>(),
-        "reference_app":host.reference_app,"inspectors":host.inspectors.values().map(|i|json!({"context":i.context,"plugin":host.plugins[i.plugin].id,"connected":i.sender.is_some()})).collect::<Vec<_>>(),
+        "plugin_language":host.language_snapshot(),"reference_app":host.reference_app,"inspectors":host.inspectors.values().map(|i|json!({"context":i.context,"plugin":host.plugins[i.plugin].id,"connected":i.sender.is_some()})).collect::<Vec<_>>(),
         "actions":host.actions.iter().map(|action|action_snapshot(host,action)).collect::<Vec<_>>(),
         "logs":host.logs,"application_monitor":{"enabled":host.application_monitor.is_some(),"error":host.application_error},"plugins":host.plugins.iter().map(|p|host.plugin_snapshot(p)).collect::<Vec<_>>()})
 }
@@ -1681,6 +1698,7 @@ fn apply_control(host: &mut Host, r: Value) -> Result<()> {
         "install_plugin"
             | "system_wake"
             | "plugin_applications"
+            | "plugin_language"
             | "restart_plugin"
             | "reference_app"
             | "mixer_config"
@@ -1838,6 +1856,7 @@ fn apply_control_local(host: &mut Host, r: Value) -> Result<()> {
         }
         "restart_plugin" => host.restart_plugin(r["id"].as_str().context("Plugin id missing")?),
         "plugin_applications" => host.save_application_mappings(&r),
+        "plugin_language" => host.save_plugin_language(&r),
         "install_plugin" => {
             let state_dir = host
                 .state_path
@@ -1878,6 +1897,7 @@ fn apply_control_local(host: &mut Host, r: Value) -> Result<()> {
                     &host.registration_devices(),
                     host.port,
                     &state_dir,
+                    host.language,
                 )
             {
                 host.log(format!(
@@ -1887,6 +1907,7 @@ fn apply_control_local(host: &mut Host, r: Value) -> Result<()> {
             }
             host.plugins.extend(plugins);
             host.actions.extend(actions);
+            host.refresh_localizations();
             for device in host.device_ids() {
                 host.with_device(&device, |host| host.install_bundled_profiles(true))?;
             }
@@ -2192,7 +2213,7 @@ fn launch_plugins(host: &mut Host, port: u16, state_dir: &Path) {
         if plugin.runtime.load_failed {
             continue;
         }
-        if let Err(error) = launch_plugin(plugin, &devices, port, state_dir) {
+        if let Err(error) = launch_plugin(plugin, &devices, port, state_dir, host.language) {
             failures.push(format!("Plugin {} could not start: {error:#}", plugin.id));
         }
     }
@@ -2205,6 +2226,7 @@ fn launch_plugin(
     devices: &[Value],
     port: u16,
     state_dir: &Path,
+    language: &str,
 ) -> Result<()> {
     plugin.registration = uuid::Uuid::new_v4().to_string();
     plugin.sender = None;
@@ -2222,7 +2244,7 @@ fn launch_plugin(
             },
             plugin.registration
         )));
-        launch_plugin_process(plugin, devices, port, state_dir, entry)
+        launch_plugin_process(plugin, devices, port, state_dir, entry, language)
     })();
     if let Err(error) = &result {
         plugin.runtime.fail(format!("{error:#}"));
@@ -2230,8 +2252,8 @@ fn launch_plugin(
     result
 }
 
-fn registration_info(plugin: &Plugin, devices: &[Value]) -> Value {
-    json!({"application":{"font":"DejaVu Sans","language":"en","platform":"linux","platformVersion":std::env::consts::OS,"version":"7.6.0"},"plugin":{"uuid":plugin.id,"version":plugin.manifest["Version"]},"devicePixelRatio":1,"colors":{"buttonMouseOverBackgroundColor":"#303030","buttonPressedBackgroundColor":"#303030","buttonPressedBorderColor":"#505050","buttonPressedTextColor":"#ffffff","highlightColor":"#4bd3b0"},"devices":devices})
+fn registration_info(plugin: &Plugin, devices: &[Value], language: &str) -> Value {
+    json!({"application":{"font":"DejaVu Sans","language":language,"platform":"linux","platformVersion":std::env::consts::OS,"version":"7.6.0"},"plugin":{"uuid":plugin.id,"version":plugin.manifest["Version"]},"devicePixelRatio":1,"colors":{"buttonMouseOverBackgroundColor":"#303030","buttonPressedBackgroundColor":"#303030","buttonPressedBorderColor":"#505050","buttonPressedTextColor":"#ffffff","highlightColor":"#4bd3b0"},"devices":devices})
 }
 #[allow(clippy::too_many_arguments)]
 fn spawn_webview(
@@ -2279,8 +2301,9 @@ fn launch_plugin_process(
     port: u16,
     state_dir: &Path,
     entry: crate::plugin_entry::Entry,
+    language: &str,
 ) -> Result<()> {
-    let info = registration_info(plugin, devices);
+    let info = registration_info(plugin, devices, language);
     match entry.kind {
         crate::plugin_entry::Kind::Html => {
             plugin.runtime.runtime_path = Some(std::env::current_exe()?);
@@ -2428,6 +2451,13 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
         plugins
     };
     let (plugins, mut actions) = load_plugins(plugin_paths, saved.reference_app.as_deref())?;
+    let plugin_language = if saved.plugin_language.is_empty() {
+        localization::default_preference()
+    } else {
+        saved.plugin_language.clone()
+    };
+    let language = crate::plugin_localization::resolve(&plugin_language)
+        .context("Invalid saved plugin language")?;
     actions.extend(library::navigation_actions());
     actions.extend(multiaction::definitions());
     actions.extend(mixer_actions::definitions());
@@ -2645,6 +2675,9 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
         slots,
         globals: saved.globals,
         application_mappings: saved.application_mappings,
+        plugin_language,
+        language,
+        localizations: HashMap::new(),
         application_monitor: None,
         application_delivered: HashMap::new(),
         application_error: None,
@@ -2662,6 +2695,7 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
         released: HashSet::new(),
         retired: VecDeque::new(),
     };
+    host.refresh_localizations();
     host.restore_device_records(saved_records, selected_scope)?;
     if has_pool {
         host.startup_device_selection(requested_serial.as_deref(), requested_model)?;
@@ -3184,6 +3218,9 @@ mod tests {
             }],
             globals: HashMap::new(),
             application_mappings: HashMap::new(),
+            plugin_language: "system".into(),
+            language: "en",
+            localizations: HashMap::new(),
             application_monitor: None,
             application_delivered: HashMap::new(),
             application_error: None,

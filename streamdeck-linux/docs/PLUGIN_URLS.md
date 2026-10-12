@@ -80,4 +80,4 @@ All fixtures use isolated state and avoid real authorization pages and USB.
 
 Computer-resume notifications are documented in [Plugin system events](PLUGIN_SYSTEM_EVENTS.md).
 [Application monitoring](PLUGIN_APPLICATIONS.md) supports explicit Linux executable mappings.
-Plugin localization remains separate compatibility work.
+[Plugin localization](PLUGIN_LOCALIZATION.md) supplies matching plugin and inspector languages.

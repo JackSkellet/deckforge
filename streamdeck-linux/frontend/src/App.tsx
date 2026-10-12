@@ -1687,6 +1687,7 @@ export default function App() {
               snapshot={snapshot}
               run={run}
               onError={onError}
+              error={error}
             />
           ) : (
             <pre className="logs">

@@ -287,3 +287,37 @@ it("captures the preview device alongside its context instead of consulting late
     title: "Owned",
   });
 });
+
+it("uses localized state names with fallback and live markers without changing user titles or state indexes", () => {
+  const current = {
+    ...slot,
+    state_count: 3,
+    state_names: ["Ein", "", "Aus"],
+    title: "My personal title",
+  };
+  const callbacks = props(current, reconcileDraft(undefined, current));
+  render(<AppearanceEditor {...callbacks} />);
+  expect(
+    screen
+      .getByRole("option", { name: "Ein · live", hidden: true })
+      .getAttribute("value"),
+  ).toBe("0");
+  expect(
+    screen
+      .getByRole("option", { name: "State 2", hidden: true })
+      .getAttribute("value"),
+  ).toBe("1");
+  expect(
+    screen
+      .getByRole("option", { name: "Aus", hidden: true })
+      .getAttribute("value"),
+  ).toBe("2");
+  fireEvent.change(screen.getByLabelText("Appearance state"), {
+    target: { value: "2" },
+  });
+  expect(callbacks.onSelectState).toHaveBeenCalledWith(2);
+  expect(callbacks.onEdit).not.toHaveBeenCalled();
+  expect((screen.getByLabelText("Title") as HTMLTextAreaElement).value).toBe(
+    "My personal title",
+  );
+});
