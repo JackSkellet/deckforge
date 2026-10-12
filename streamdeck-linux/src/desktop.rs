@@ -7,7 +7,10 @@ use serde_json::{Value, json};
 use std::{
     collections::HashMap,
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -48,7 +51,7 @@ pub fn run(controller: Controller) -> Result<()> {
                 s.text_styles
                     .insert(egui::TextStyle::Heading, egui::FontId::proportional(22.0));
             });
-            let mut app = Desktop::new(controller);
+            let mut app = Desktop::new(controller, cc.egui_ctx.clone());
             if capture_path.is_some()
                 && std::env::var("DECKFORGE_CAPTURE_CONTROL").as_deref() == Ok("dial0")
             {
@@ -171,6 +174,43 @@ fn numeric_strings(settings: &Value) -> HashMap<String, String> {
 fn string<'a>(value: &'a Value, key: &str) -> &'a str {
     value[key].as_str().unwrap_or("")
 }
+/// Descriptions are an effective host snapshot, not inferred manifest defaults.
+fn dial_gesture_descriptions(snapshot: &Value) -> Vec<(&'static str, &str)> {
+    if snapshot["controller"] != "Encoder" {
+        return Vec::new();
+    }
+    [
+        ("rotate", "Turn"),
+        ("push", "Press"),
+        ("touch", "Tap"),
+        ("longTouch", "Hold"),
+    ]
+    .into_iter()
+    .filter_map(|(key, label)| {
+        snapshot["trigger_description"]
+            .get(key)?
+            .as_str()
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .map(|text| (label, text))
+    })
+    .collect()
+}
+
+fn show_dial_gesture_descriptions(ui: &mut egui::Ui, snapshot: &Value) {
+    let descriptions = dial_gesture_descriptions(snapshot);
+    if descriptions.is_empty() {
+        return;
+    }
+    ui.horizontal_wrapped(|ui| {
+        for (label, description) in descriptions {
+            ui.add(
+                egui::Label::new(RichText::new(format!("{label}: {description}")).small()).wrap(),
+            );
+        }
+    });
+}
+
 fn page_label(page: &Value) -> String {
     let name = string(page, "name");
     let name = if name.trim().is_empty() {
@@ -275,6 +315,7 @@ fn nested_container_target(parent: &Value, context: &str) -> Option<NestedContai
 }
 
 struct Desktop {
+    redraw_pending: Arc<AtomicBool>,
     stack_editor: crate::stack_editor::Editor,
     multi_editor: crate::multi_editor::Editor,
     trigger_editor: crate::trigger_editor::Editor,
@@ -297,8 +338,15 @@ struct Desktop {
     capture: Option<Capture>,
 }
 impl Desktop {
-    fn new(controller: Controller) -> Self {
+    fn new(controller: Controller, context: egui::Context) -> Self {
+        let redraw_pending = Arc::new(AtomicBool::new(true));
+        let pending = redraw_pending.clone();
+        controller.on_redraw(move || {
+            pending.store(true, Ordering::Release);
+            context.request_repaint();
+        });
         Self {
+            redraw_pending,
             multi_editor: crate::multi_editor::Editor::default(),
             trigger_editor: crate::trigger_editor::Editor::default(),
             container_navigation: Vec::new(),
@@ -370,7 +418,9 @@ impl Desktop {
         })
     }
     fn refresh(&mut self, ctx: &egui::Context) {
-        if self.last_poll.is_some_and(|last| last.elapsed() < POLL) {
+        if !self.redraw_pending.swap(false, Ordering::AcqRel)
+            && self.last_poll.is_some_and(|last| last.elapsed() < POLL)
+        {
             return;
         }
         self.snapshot = self.controller.snapshot();
@@ -810,6 +860,7 @@ impl Desktop {
                 .and_then(|parent| nested_snapshot(parent, &nested.child_context))
                 .cloned();
             if let Some(child) = child {
+                show_dial_gesture_descriptions(ui, &child);
                 if child["uuid"] == "com.elgato.streamdeck.keys.adaptor" {
                     self.trigger_settings_editor(ui, &child);
                 } else {
@@ -949,6 +1000,7 @@ impl Desktop {
             if ui.text_edit_singleline(&mut draft.title).labelled_by(title_label.id).changed() { draft.dirty = true; }
             ui.add_space(8.0);
             ui.label(RichText::new("Settings").strong());
+            if let Some(slot) = &slot { show_dial_gesture_descriptions(ui, slot); }
             if slot.as_ref().is_some_and(|s| s["uuid"]=="com.elgato.streamdeck.system.multimedia"&&s["controller"]=="Encoder"&&s["settings"]["actionIdx"]==18) {
                 if let Some(volume)=self.snapshot.get("volume").filter(|v|v.is_object()) {
                     ui.label(format!("Current volume: {}{}",slot.as_ref().and_then(|s|s["feedback"]["value"].as_str()).unwrap_or("--"),if volume["muted"]==true {" (muted)"}else{""}));
@@ -1396,6 +1448,46 @@ mod tests {
         );
         assert_eq!(path.pop().unwrap().child_context, "trigger");
         assert!(path.is_empty());
+    }
+
+    #[test]
+    fn dial_descriptions_use_only_present_effective_strings_and_follow_updates() {
+        let mut snapshot = json!({"controller":"Encoder","trigger_description":{
+            "rotate":" Adjust volume ","push":"","touch":"Mute","longTouch":"   ","future":"Ignored"
+        },"raw":{"Encoder":{"TriggerDescription":{"Push":"Must not be inferred"}}}});
+        assert_eq!(
+            dial_gesture_descriptions(&snapshot),
+            vec![("Turn", "Adjust volume"), ("Tap", "Mute")]
+        );
+        snapshot["trigger_description"] = json!({"push":"Play","longTouch":"Reset","rotate":false});
+        assert_eq!(
+            dial_gesture_descriptions(&snapshot),
+            vec![("Press", "Play"), ("Hold", "Reset")]
+        );
+        snapshot["trigger_description"] = json!({});
+        assert!(dial_gesture_descriptions(&snapshot).is_empty());
+        snapshot["trigger_description"] = json!({"rotate":"This is a key action"});
+        snapshot["controller"] = json!("Keypad");
+        assert!(dial_gesture_descriptions(&snapshot).is_empty());
+    }
+
+    #[test]
+    fn nested_encoder_description_render_is_read_only_and_uses_child_snapshot() {
+        let root = json!({"context":"stack","controller":"Encoder","trigger_description":{"push":"Change action"},
+            "stack_children":[{"context":"nested-trigger","controller":"Encoder","uuid":"com.elgato.streamdeck.keys.adaptor",
+                "trigger_description":{"rotate":"Choose item","touch":"Run item"}}]});
+        let child = nested_snapshot(&root, "nested-trigger").unwrap();
+        assert_eq!(
+            dial_gesture_descriptions(child),
+            vec![("Turn", "Choose item"), ("Tap", "Run item")]
+        );
+        let before = root.clone();
+        let context = egui::Context::default();
+        let output = context.run_ui(egui::RawInput::default(), |ui| {
+            show_dial_gesture_descriptions(ui, child)
+        });
+        output.drop_without_applying_deltas();
+        assert_eq!(root, before);
     }
 
     #[test]

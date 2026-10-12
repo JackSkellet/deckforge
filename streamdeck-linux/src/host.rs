@@ -35,6 +35,7 @@ mod audio;
 mod children;
 mod display;
 mod export;
+mod feedback;
 mod inspectors;
 mod library;
 mod multiaction;
@@ -53,6 +54,9 @@ pub struct Controller {
     shared: Shared,
 }
 impl Controller {
+    pub fn on_redraw(&self, callback: impl Fn() + Send + Sync + 'static) {
+        self.shared.lock().unwrap().redraw = Some(Box::new(callback));
+    }
     pub fn snapshot(&self) -> Value {
         snapshot(&self.shared.lock().unwrap())
     }
@@ -249,6 +253,9 @@ enum HeldControl {
     Dial(u8),
 }
 struct Host {
+    redraw: Option<Box<dyn Fn() + Send + Sync>>,
+    badges: HashMap<String, feedback::Badge>,
+    trigger_descriptions: HashMap<String, Value>,
     triggers: trigger::Runtime,
     virtual_suppressed: HashSet<String>,
     volume: Option<crate::volume::Worker>,
@@ -421,7 +428,7 @@ impl Host {
         let mut strip = DynamicImage::ImageRgb8(RgbImage::from_pixel(800, 100, Rgb([14, 21, 29])));
         let mut warnings = Vec::new();
         for slot in &mut self.slots {
-            let picture = if slot.controller == "Encoder" {
+            let mut picture = if slot.controller == "Encoder" {
                 let stacked = slot.uuid == crate::dial_stack::UUID;
                 let index = slot.active_stack_index();
                 let has_child = stacked
@@ -452,7 +459,12 @@ impl Host {
                         display::dial_image(&self.renderer, &mut placeholder, None)?
                     } else {
                         if target.uuid == crate::action_trigger::UUID {
-                            trigger::picture(&self.renderer, target)?
+                            trigger::picture(
+                                &self.renderer,
+                                target,
+                                &self.badges,
+                                self.multi_clock.elapsed(),
+                            )?
                         } else {
                             display::dial_image(&self.renderer, target, root)?
                         }
@@ -468,8 +480,13 @@ impl Host {
                 }
                 picture
             } else {
-                self.renderer.key(&slot.title, slot.background.as_ref())
+                let mut picture = self.renderer.key(&slot.title, slot.background.as_ref());
+                feedback::paint_key(&self.badges, &mut picture, slot, self.multi_clock.elapsed());
+                picture
             };
+            if slot.controller == "Encoder" {
+                feedback::paint_dial(&self.badges, &mut picture, slot, self.multi_clock.elapsed());
+            }
             let mut png = Cursor::new(Vec::new());
             picture.write_to(&mut png, image::ImageFormat::Png)?;
             slot.preview = STANDARD.encode(png.into_inner());
@@ -494,6 +511,9 @@ impl Host {
                 }
             }
             let _ = hardware.send(Draw::Strip(strip));
+        }
+        if let Some(redraw) = &self.redraw {
+            redraw();
         }
         Ok(())
     }
@@ -586,6 +606,8 @@ impl Host {
         self.refresh_page()
     }
     fn remember_removed(&mut self, context: &str, action: &str) {
+        self.trigger_descriptions.remove(context);
+        self.badges.remove(context);
         if let Some(owner) = self
             .actions
             .iter()
@@ -863,6 +885,9 @@ impl Host {
         Ok(())
     }
     fn plugin_message(&mut self, plugin_index: usize, message: Value) -> Result<()> {
+        if !self.running {
+            return Ok(());
+        }
         let event = message["event"].as_str().context("Missing event")?;
         let context = message["context"].as_str().unwrap_or("");
         let payload = message.get("payload").cloned().unwrap_or(json!({}));
@@ -914,6 +939,19 @@ impl Host {
             .any(|a| a.uuid == original.uuid && a.plugin == plugin.id)
         {
             bail!("Plugin does not own this context");
+        }
+        if matches!(event, "showOk" | "showAlert") {
+            return self.show_feedback(
+                &original,
+                if event == "showOk" {
+                    crate::feedback::Kind::Ok
+                } else {
+                    crate::feedback::Kind::Alert
+                },
+            );
+        }
+        if event == "setTriggerDescription" {
+            return self.set_trigger_description(&original, payload);
         }
         if event == "getResources" {
             let reply = self.resources_event(&original, message.get("id"));
@@ -1009,13 +1047,6 @@ impl Host {
                 slot.layout_cache = Some(definition);
                 slot.image_cache.clear();
             }
-            "setTriggerDescription" => {
-                return Ok(());
-            }
-            "showOk" | "showAlert" => {
-                self.log(format!("{event} for {context}"));
-                return Ok(());
-            }
             _ => {
                 bail!("Unsupported plugin command: {event}");
             }
@@ -1098,6 +1129,7 @@ async fn root(
 }
 fn slot_snapshot(host: &Host, s: &Slot) -> Value {
     json!({"available":host.actions.iter().any(|a|a.uuid==s.uuid),"pinned":s.pinned,"context":s.context,"controller":s.controller,"index":s.index,"uuid":s.uuid,"name":s.name,"settings":s.settings,"resources":s.resources.clone().unwrap_or_default(),"title":s.title,"state":s.state,"feedback":s.feedback,"layout":s.layout,"preview":s.preview,"raw":s.raw,
+        "trigger_description":host.trigger_description(s),
         "trigger_children":if s.uuid==crate::action_trigger::UUID {s.children.iter().map(|g|g.first().map(|c|slot_snapshot(host,c)).unwrap_or(Value::Null)).collect::<Vec<_>>()}else{vec![]},
         "stack_children":if s.uuid==crate::dial_stack::UUID {s.children.first().map(|children|children.iter().map(|c|slot_snapshot(host,c)).collect::<Vec<_>>()).unwrap_or_default()}else{vec![]},
         "multi_running":host.multi_running(&s.context),"multi_children":s.children.iter().map(|g|g.iter().map(|c|slot_snapshot(host,c)).collect::<Vec<_>>()).collect::<Vec<_>>(),
@@ -1729,6 +1761,9 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
         volume: None,
         volume_state: None,
         volume_error: None,
+        redraw: None,
+        badges: HashMap::new(),
+        trigger_descriptions: HashMap::new(),
         triggers: trigger::Runtime::default(),
         virtual_suppressed: HashSet::new(),
         stack_gestures: HashMap::new(),
@@ -1825,10 +1860,13 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
     }
     let worker = deck.take().map(|mut deck| {
         std::thread::spawn(move || {
+            let mut displayed_keys: HashMap<u8, DynamicImage> = HashMap::new();
+            let mut displayed_strip: Option<DynamicImage> = None;
             loop {
                 // Coalesce plugin bursts to one latest image for each physical surface.
                 let mut keys: HashMap<u8, DynamicImage> = HashMap::new();
                 let mut strip = None;
+                let mut stopping = false;
                 loop {
                     let draw = match draw_rx.try_recv() {
                         Ok(draw) => draw,
@@ -1836,7 +1874,10 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
                         Err(std::sync::mpsc::TryRecvError::Disconnected) => return,
                     };
                     match draw {
-                        Draw::Stop => return,
+                        Draw::Stop => {
+                            stopping = true;
+                            break;
+                        }
                         Draw::Key(i, img) => {
                             keys.insert(i, img);
                         }
@@ -1844,16 +1885,26 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
                     }
                 }
                 let write: Result<()> = (|| {
+                    // Animation can change one dial without changing any key.
                     for (i, img) in keys {
-                        deck.set_key_image(i, &img)?;
+                        if displayed_keys.get(&i) != Some(&img) {
+                            deck.set_key_image(i, &img)?;
+                            displayed_keys.insert(i, img);
+                        }
                     }
-                    if let Some(img) = strip {
+                    if let Some(img) = strip
+                        && displayed_strip.as_ref() != Some(&img)
+                    {
                         deck.set_touchscreen_image(&img)?;
+                        displayed_strip = Some(img);
                     }
                     Ok(())
                 })();
                 if let Err(e) = write {
                     let _ = events_tx.send(Err(e));
+                    return;
+                }
+                if stopping {
                     return;
                 }
                 match deck.read_events(20) {
@@ -1967,10 +2018,12 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
                 }
                 host.poll_multi();
                 host.poll_triggers();
+                host.poll_feedback();
                 host.multi
                     .next_due()
                     .into_iter()
                     .chain(host.triggers.repeater.next_due())
+                    .chain(host.next_feedback())
                     .min()
                     .map(|deadline| deadline.saturating_sub(host.multi_clock.elapsed()))
             };
@@ -2043,6 +2096,12 @@ fn stop_plugins(host: &mut Host) {
         worker.cancel();
     }
     host.running = false;
+    if !host.badges.is_empty() {
+        host.badges.clear();
+        if let Err(error) = host.render() {
+            host.log(format!("Restore display on shutdown: {error:#}"));
+        }
+    }
     host.close_inspectors(None);
     for plugin in &mut host.plugins {
         stop_child(&mut plugin.child);
@@ -2113,6 +2172,9 @@ mod tests {
             volume: None,
             volume_state: None,
             volume_error: None,
+            redraw: None,
+            badges: HashMap::new(),
+            trigger_descriptions: HashMap::new(),
             triggers: trigger::Runtime::default(),
             virtual_suppressed: HashSet::new(),
             stack_gestures: HashMap::new(),

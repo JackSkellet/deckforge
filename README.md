@@ -20,6 +20,10 @@ Current working areas include:
 
 See the [feature-parity ledger](streamdeck-linux/docs/FEATURE_PARITY.md) for the remaining work and the boundaries of the tests. Passing simulation tests is not a claim of complete hardware or Windows compatibility.
 
+![Native Deckforge editor with temporary plugin feedback and dial hints](streamdeck-linux/assets/screenshots/native-feedback.png)
+
+The native editor above is running in simulation with a generated test plugin.
+
 ## Build and run
 
 The application source is in [`streamdeck-linux/`](streamdeck-linux/).

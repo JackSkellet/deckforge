@@ -21,7 +21,12 @@ pub(super) fn action() -> Action {
         raw: json!({"SupportedInMultiActions":false,"Encoder":{"layout":"$X1"},"States":[{"Title":"Action Trigger"}]}),
     }
 }
-pub(super) fn picture(renderer: &Renderer, slot: &mut Slot) -> Result<DynamicImage> {
+pub(super) fn picture(
+    renderer: &Renderer,
+    slot: &mut Slot,
+    badges: &HashMap<String, feedback::Badge>,
+    now: Duration,
+) -> Result<DynamicImage> {
     let mut canvas = DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
         200,
         100,
@@ -29,7 +34,8 @@ pub(super) fn picture(renderer: &Renderer, slot: &mut Slot) -> Result<DynamicIma
     ));
     for (index, (x, y)) in [(12, 29), (72, 14), (132, 29)].into_iter().enumerate() {
         if let Some(child) = slot.children.get_mut(index).and_then(|g| g.first_mut()) {
-            let key = renderer.key(&child.title, child.background.as_ref());
+            let mut key = renderer.key(&child.title, child.background.as_ref());
+            feedback::paint_key(badges, &mut key, child, now);
             let mut png = Cursor::new(Vec::new());
             key.write_to(&mut png, image::ImageFormat::Png)?;
             child.preview = STANDARD.encode(png.into_inner());

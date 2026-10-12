@@ -2,6 +2,7 @@ mod action_trigger;
 mod audio_output;
 mod desktop;
 mod dial_stack;
+mod feedback;
 mod hardware;
 mod host;
 mod layout;

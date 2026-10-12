@@ -224,6 +224,31 @@ generated plugin and runs native WebKit inspectors. There is no complete officia
 resource sample in the inspected sample repository. Windows import acceptance
 and broader third-party file-picker workflows remain unverified.
 
+## Plugin feedback and dial hints
+
+`showOk` adds a green check to keys and `showAlert` adds a yellow warning triangle.
+Both last three seconds; another request replaces the indicator and restarts its
+timer. The underlying image/title can keep changing and remains after the effect
+ends. Action Trigger children show their own miniature indicators.
+
+Dial warnings follow the original app's separate behavior: a red tint over the
+whole dial cell at 75% opacity for 165 ms, fading out over the next 165 ms. An
+active Dial Stack child warns on its parent cell; inactive children cannot flash
+it. `showOk` is a key-only SDK operation. Multi Action child-to-physical-parent
+indicator routing remains unverified.
+
+Plugins can update **Turn**, **Press**, **Tap**, and **Hold** hints using
+`setTriggerDescription`. A sparse map hides omitted hints; an empty map restores
+manifest defaults. These are runtime hints, separate from saved action settings.
+Native redraw notifications update animations without faster idle polling, and
+unchanged USB images are not retransmitted. Shutdown restores normal frames.
+
+The unchanged official Image Resizer sample exercises both warning feedback and
+successful resizing of a temporary image. It runs in its original sample checkout
+with its Linux Sharp dependencies; this does not establish compatibility with
+Windows-only native plugin binaries. Badge artwork is independently drawn;
+pixel-perfect vendor artwork and new physical feedback acceptance remain open.
+
 ## Commands
 
 ```sh
@@ -282,8 +307,8 @@ completion criterion replaces the desktop parity goal.
 
 1. Broader HTML/property-inspector workflows, local file controls and real-world
    plugin compatibility beyond the tested samples and SDK fixtures.
-2. Separate hardware/editor targets, inactive-state image/title updates, alerts,
-   animation, and native-reference visual validation of layout font/bar details.
+2. Separate hardware/editor targets, inactive-state image/title updates, general
+   image animation, and native-reference visual validation of layout font/bar details.
 3. Windows acceptance of exported profiles, folder auto-exit, physical acceptance
    of Action Trigger, text/hotkey-switch actions, application activation, and automatic profile selection.
 4. Native Windows/macOS plugin binaries and platform-specific dependencies.
@@ -291,9 +316,8 @@ completion criterion replaces the desktop parity goal.
 5. USB reconnect recovery, more device models, plugin supervision, tray/autostart,
    and broader long-running tests. Restart the host after a USB disconnect.
 
-Unsupported messages/options are logged or rejected explicitly. `showOk` and
-`showAlert` are currently logged without displaying overlays; trigger-description
-updates are accepted but not shown in the editor. `application.version` in plugin
+Unsupported messages/options are logged or rejected explicitly. Plugin success and
+warning feedback is visible, and dial trigger descriptions appear in the native editor. `application.version` in plugin
 registration advertises the 7.6 protocol target, not complete 7.6 compatibility;
 `application.platform` is honestly `linux`, which some plugins will not accept.
 
@@ -317,6 +341,9 @@ python tests/stack_interop.py --binary target/release/deckforge
 python tests/volume_interop.py --binary target/release/deckforge
 python tests/trigger_interop.py --binary target/release/deckforge
 python tests/resources_interop.py --binary target/release/deckforge
+python tests/feedback_interop.py --binary target/release/deckforge
+# After building the unchanged official Image Resizer fixture:
+python tests/feedback_interop.py --binary target/release/deckforge --official-image-resizer
 ```
 
 The optional installer test needs the local Windows artifacts. The sample

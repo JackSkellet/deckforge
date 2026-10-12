@@ -72,14 +72,14 @@ The shipped profiles contain real action identifiers and settings; their presenc
 | --- | --- | --- | --- |
 | PL-01 | Node plugins, manifest/runtime version selection and lifecycle | **Verified subset, T.** Unchanged Counter and Layouts register using installed Node 20. Generic CodePath only; installed runtime search is limited. | Test Node 20/24, version mismatch, startup failure, shutdown/restart and plugin supervision; respect manifest versions and platform-specific paths. [Manifest][manifest], [environment][environment] |
 | PL-02 | Legacy HTML plugin runtime | **Verified subset, A/C/T.** Native hidden HTML runtime registers unchanged shipped tutorial; generated HTML backend/PI fixture exchanges real SDK messages. Full tutorial navigation and background-media behavior remain open. | Run untouched tutorial HTML with the expected injected connection callback; verify browser networking, local resources, lifecycle and actual responses. [Artifact findings](../../evidence/elgato-7.6/findings.md) |
-| PL-03 | Native plugins and OS-dependent modules | **Missing/Unresolved, C.** Native executables and platform bindings do not run. | Inventory Windows/macOS-dependent plugins, provide a supported runtime/porting path, and test real native binaries or Linux ports against the same contract. Explicit per-plugin limitations remain until resolved. [WebSocket API][ws], [manifest][manifest] |
+| PL-03 | Native plugins and OS-dependent modules | **Partial/Unresolved, C/T.** Unchanged Image Resizer runs in place with its Linux Sharp native dependency. Windows/macOS executable plugins and platform-only dependencies remain unresolved. | Inventory Windows/macOS-dependent plugins, provide a supported runtime/porting path, and test real native binaries or Linux ports against the same contract. Explicit per-plugin limitations remain until resolved. [WebSocket API][ws], [manifest][manifest] |
 | PL-04 | Property-inspector browser, registration and bidirectional messaging | **Verified subset, C/T.** Native inspector windows register, route messages/settings, enforce per-action context binding and send appearance/disappearance. Original Counter PI registers; its unchanged control code saves via explicit instrumentation. | Unchanged official inspector registers, receives action/settings metadata, exchanges `sendToPlugin`/`sendToPropertyInspector`, and gets appearance/disappearance events. [PI guide][pi] |
 | PL-05 | Device/action lifecycle and physical input events | **Verified subset, C/T/H.** Registration, device-connect and key/dial events work for samples; broader lifecycle incomplete. | Contract fixtures cover disconnect/reconnect, page/folder transitions, simultaneous instances, title changes and touch coordinates; then repeat physical paths. [WebSocket API][ws] |
 | PL-06 | Action/global settings, correlation IDs and persistent isolation | **Verified subset, T.** Sample settings survive restart; global storage and correlated replies exist in code. | Test SDK v1/v2/v3 clients, PI-origin updates, concurrent gets, multi-plugin isolation, malformed settings and crash-safe persistence. [Settings][settings], [SDK 3 changes][sdk3] |
 | PL-07 | Title/image/state commands and separate hardware/software targets | **Partial, C.** Current state and combined target work; inactive-state/separate-target requests are rejected. | Verify all states and targets, user-title precedence, resets and plugin overrides before/after state changes against reference output. [Keys][keys], [WebSocket API][ws] |
 | PL-08 | Image formats, animation and resource path behavior | **Partial, C/T.** PNG/JPEG/GIF and SVG file/data-URI rendering work; SVG transparency is checked. Animation and WebP remain missing. | Test file/data-URI icons, SVG and animated assets, scaling/transparency, frame timing and bounded memory with real devices. [Keys][keys], [6.0.1 release][release601] |
 | PL-09 | All built-in feedback layouts and custom JSON layouts | **Verified subset, C/T.** All six built-ins and four official custom layouts run unchanged with real preview-pixel checks. Incremental properties, SVG, clipping/layers/gradients work. Exact Windows text/bar raster parity remains unverified. | Run every unchanged Layouts sample action; compare text, pixmap, bars, ranges, z-order, clipping, opacity and incremental updates. [Layouts][layouts] |
-| PL-10 | Visual alerts, success feedback and trigger descriptions | **Partial, C.** `showAlert`/`showOk` only log; trigger descriptions are accepted without UI effect. | Observe correct temporary overlays and restoration on keys/dials; inspector descriptions update when requested. [WebSocket API][ws], [dials][dials] |
+| PL-10 | Visual alerts, success feedback and trigger descriptions | **Verified subset, D/A/C/T.** Native-duration key badges, red dial flashes, Trigger miniature feedback, selected Stack forwarding and runtime gesture hints implemented. Generated probes and unchanged Image Resizer warning/success pass. Multi parent routing, pixel-perfect vendor artwork and physical acceptance remain open. | Observe correct temporary overlays and restoration on keys/dials; inspector descriptions update when requested. [WebSocket API][ws], [dials][dials] |
 | PL-11 | Embedded plugin resources | **Verified subset, D/A/C/T.** get/setResources, complete action envelopes, correlated replies, opposite-side PI/plugin notifications and portable files implemented. Generated fixtures call unchanged SDK 2.0.4, including nested bindings, duplication and explicit clears; Windows acceptance remains open. | Save/update resources through unchanged plugin/PI, export profile, import elsewhere and reopen the file successfully. [Resources][resources] |
 | PL-12 | App monitoring, wake notifications, deep links, openURL and localization | **Missing/Partial, C.** `logMessage` exists; external/system callbacks and plugin localization are absent. | Trigger app launch/exit, suspend/resume and routed URI callbacks; test translated metadata/UI and external browser operations. [Monitoring][monitoring], [deep links][deeplinks], [environment][environment] |
 | PL-13 | Plugin crash handling, timeouts, upgrades and removal while actions remain | **Partial, C.** Owned child shutdown exists; restart supervision and replacement policies absent. | Crash one plugin without freezing host/other plugins; recover with action settings intact; test repeated failures and upgrade rollback. [Environment][environment], [6.0.1 fixes][release601] |
@@ -471,3 +471,36 @@ The installed binary reconnects to the attached Plus and all three sample plugin
 its prior session is backed up and saved control settings are preserved. The first
 resource test runs exposed nested controller addressing and duplicate aliases in
 the test's snapshot traversal; their logs are retained with the passing final run.
+
+
+### Plugin feedback evidence update, 2026-10-12
+
+`../../evidence/feedback-command-contracts.json` records official SDK types and
+bounded original native spans. Key effects use a transparent still-overlay layer
+for 3000 ms, replacing/restarting an earlier effect while base images/titles remain
+composited underneath. Action Trigger renders the affected child miniature.
+Encoder errors use a separate full-cell red popup, opacity .75 through 165 ms
+then linearly fading to zero by 330 ms, with a 20 ms timeline update interval.
+Selected Dial Stack children forward to the parent cell; inactive ones do not.
+Multi Action child-to-physical-parent forwarding remains unproven.
+
+The independent badge renderer and timed host composition restore the latest
+underlying image/state. Transient indicators are not exported or restored across
+app restarts. Shutdown clears effects and drains the last normal image before
+stopping the USB writer. The native window receives redraw notifications; the
+hardware worker skips identical images during animation. Gesture descriptions
+use sparse replacement, explicit empty-text hiding and empty-map manifest reset.
+
+`tests/feedback_interop.py` measures actual generated-plugin PNGs and timers,
+including ownership, hidden controls, updates during effects and nested scopes.
+Its optional unchanged Image Resizer fixture runs both invalid-dimension warnings
+and a real temporary-image resize followed by success feedback. Vendor source,
+lockfiles and manifest hashes remain unchanged; Linux Sharp is loaded from the
+sample's existing dependency tree. This is an in-place sample test, not proof
+that Windows-only plugin dependencies work after a package is copied to Linux.
+
+This checkpoint passes 209 non-injection tests plus the gated keyboard test's
+no-op path, strict Rust 1.99 Clippy and fourteen process suites. App-owned native
+capture shows the effects and gesture hints. Evidence, timing samples and source
+hashes are retained in `../../evidence/plugin-feedback/`. Physical effect acceptance
+and broader parity still require the other ledger entries to be resolved.
