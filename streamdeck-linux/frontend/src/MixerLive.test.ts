@@ -7,7 +7,7 @@ import {
   sameMixerConfig,
   patchMixerControl,
 } from "./MixerLive";
-import type { MixerConfig } from "./Mixer";
+import { removeMix, type MixerConfig } from "./Mixer";
 const config: MixerConfig = {
   enabled: true,
   channels: [{ id: "voice", name: "Voice", apps: [], sources: [] }],
@@ -210,4 +210,61 @@ it("normalizes a missing catch-all flag as false but guards a changed default gr
   explicit.channels[0].capture_unassigned = true;
   expect(sameMixerConfig(config, explicit)).toBe(false);
   expect(sameMixerRouting(config, explicit)).toBe(false);
+});
+
+it("rebases monitoring preferences without losing routing drafts or creating false structural conflicts", () => {
+  const before = structuredClone(config),
+    edited = structuredClone(config);
+  edited.channels[0].name = "Voice draft";
+  const incoming = {
+    ...structuredClone(config),
+    monitoring: { output: "headphones", mix: "monitor" },
+  };
+  const result = reconcileMixerDraft(
+    { base: before, config: edited, dirty: true },
+    incoming,
+  );
+  expect(result.config.monitoring).toEqual(incoming.monitoring);
+  expect(result.config.channels[0].name).toBe("Voice draft");
+  expect(sameMixerRouting(before, incoming)).toBe(true);
+  expect(
+    sameMixerConfig(before, {
+      ...before,
+      monitoring: { output: null, mix: null },
+    }),
+  ).toBe(true);
+});
+it("clears a removed monitored mix only in the structural draft and retains later live selections", () => {
+  const before = {
+    ...structuredClone(config),
+    monitoring: { output: "headphones", mix: "monitor" },
+  };
+  const edited = removeMix(before, "monitor");
+  expect(edited.monitoring).toEqual({ output: "headphones", mix: null });
+  expect(before.monitoring.mix).toBe("monitor");
+  let merged = reconcileMixerDraft(
+    { base: before, config: edited, dirty: true },
+    before,
+  );
+  expect(merged.config.monitoring).toEqual({ output: "headphones", mix: null });
+  merged = reconcileMixerDraft(merged, {
+    ...before,
+    monitoring: { output: "headphones", mix: "stream" },
+  });
+  expect(merged.config.monitoring).toEqual({
+    output: "headphones",
+    mix: "stream",
+  });
+  expect(merged.config.mixes.map((m) => m.id)).toEqual(["stream"]);
+});
+it("patches explicit null monitor controls without resetting omitted values", () => {
+  let next = patchMixerControl(
+    config,
+    { kind: "monitor" },
+    { output: "headphones", mix: "monitor" },
+  );
+  next = patchMixerControl(next, { kind: "monitor" }, { mix: null });
+  expect(next.monitoring).toEqual({ output: "headphones", mix: null });
+  next = patchMixerControl(next, { kind: "monitor" }, { output: null });
+  expect(next.monitoring).toEqual({ output: null, mix: null });
 });

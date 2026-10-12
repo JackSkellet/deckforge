@@ -224,6 +224,7 @@ impl Engine {
                         d
                     })
                     .collect();
+                snapshot.recording_sources = self.recording_sources(config, &inv);
                 snapshot.apps = inv
                     .inputs
                     .iter()
@@ -487,6 +488,30 @@ impl Engine {
         }
         Ok(())
     }
+    fn recording_sources(&self, config: &Config, inv: &Inventory) -> BTreeMap<String, String> {
+        let verified = self.verified_ids(inv);
+        config
+            .mixes
+            .iter()
+            .filter_map(|mix| {
+                let name = mix_source(&self.namespace, &mix.id);
+                let key = format!("export:{}", mix.id);
+                inv.sources
+                    .iter()
+                    .find(|source| {
+                        source.device.name == name
+                            && source.module.is_some_and(|id| {
+                                verified.contains(&id)
+                                    && self
+                                        .owned
+                                        .iter()
+                                        .any(|(owned, m)| owned == &key && m.id == id)
+                            })
+                    })
+                    .map(|_| (mix.id.clone(), name))
+            })
+            .collect()
+    }
     fn verified_ids(&self, inv: &Inventory) -> BTreeSet<u32> {
         self.owned
             .iter()
@@ -534,7 +559,12 @@ impl Engine {
         }
         for mix in &config.mixes {
             let source = mix_source(&self.namespace, &mix.id);
-            plan.push(Spec{key:format!("export:{}",mix.id),name:"module-remap-source".into(),args:format!("master={} source_name={} channels=2 channel_map=front-left,front-right source_properties={}",quote(&format!("{}.monitor",mix_sink(&self.namespace,&mix.id))),quote(&source),props(&format!("Deckforge mix {}",mix.id))),sink:None,source:Some(source)});
+            let description = if mix.id == "monitor" {
+                "Deckforge mix monitor (recording)".into()
+            } else {
+                format!("Deckforge mix {}", mix.id)
+            };
+            plan.push(Spec{key:format!("export:{}",mix.id),name:"module-remap-source".into(),args:format!("master={} source_name={} channels=2 channel_map=front-left,front-right source_properties={}",quote(&format!("{}.monitor",mix_sink(&self.namespace,&mix.id))),quote(&source),props(&description)),sink:None,source:Some(source)});
         }
         for r in &config.routes {
             plan.push(self.link(
@@ -575,6 +605,21 @@ impl Engine {
                 }
             }
         }
+        if config.enabled
+            && let (Some(mix), Some(output)) = (&config.monitoring.mix, &config.monitoring.output)
+        {
+            if inv.sinks.iter().any(|sink| sink.device.name == *output) {
+                plan.push(self.link(
+                    "listen:main".into(),
+                    format!("{}.monitor", mix_sink(&self.namespace, mix)),
+                    output.clone(),
+                ));
+            } else {
+                warnings.push(format!(
+                    "Listening output unavailable: {output}; no fallback output selected"
+                ));
+            }
+        }
         plan
     }
     fn link(&self, key: String, source: String, sink: String) -> Spec {
@@ -611,14 +656,7 @@ impl Engine {
         // Retain only identities still present; a new daemon can reuse indices.
         self.owned
             .retain(|(_, m)| inv.modules.iter().any(|actual| actual == m));
-        let changed = plan.iter().any(|p| {
-            !self
-                .owned
-                .iter()
-                .any(|(key, m)| key == &p.key && m.name == p.name && m.args == p.args)
-        }) || self.owned.iter().any(|(key, m)| {
-            !plan.iter().any(|p| &p.key == key) && !self.protected_modules(inv).contains(&m.id)
-        });
+        let changed = graph_requires_pause(&plan, &self.owned, &self.protected_modules(inv));
         if changed {
             for sink in &inv.sinks {
                 if sink
@@ -742,7 +780,10 @@ impl Engine {
         // Capture legs have unity gain. Output trims affect only the owned
         // loopback sink-input, never the destination sink/master volume.
         for (key, module) in &self.owned {
-            if key.starts_with("capture:") || key.starts_with("output:") {
+            if key.starts_with("capture:")
+                || key.starts_with("output:")
+                || key.starts_with("listen:")
+            {
                 let input = inv
                     .inputs
                     .iter()
@@ -1047,6 +1088,26 @@ impl Drop for Engine {
         self.shutdown();
     }
 }
+/// A listening-only switch replaces its one loopback without interrupting the
+/// independent mix buses, fixed outputs, recorders or active peak streams.
+/// Adding/removing a read-only export alias likewise needs no bus suspension.
+fn graph_requires_pause(
+    plan: &[Spec],
+    owned: &[(String, Module)],
+    protected: &BTreeSet<u32>,
+) -> bool {
+    plan.iter()
+        .filter(|p| !p.key.starts_with("listen:") && !p.key.starts_with("export:"))
+        .any(|p| {
+            !owned
+                .iter()
+                .any(|(key, m)| key == &p.key && m.name == p.name && m.args == p.args)
+        })
+        || owned
+            .iter()
+            .filter(|(key, _)| !key.starts_with("listen:") && !key.starts_with("export:"))
+            .any(|(key, m)| !plan.iter().any(|p| &p.key == key) && !protected.contains(&m.id))
+}
 fn meter_keys(config: &Config) -> BTreeSet<String> {
     if !config.enabled {
         return BTreeSet::new();
@@ -1100,6 +1161,14 @@ fn reject_monitor_cycles(config: &Config, inv: &Inventory) -> Result<()> {
                     .entry(sink.clone())
                     .or_default()
                     .extend(mix.outputs.iter().cloned());
+                if config.monitoring.mix.as_ref() == Some(&mix.id)
+                    && let Some(output) = &config.monitoring.output
+                {
+                    edges
+                        .entry(sink.clone())
+                        .or_default()
+                        .insert(output.clone());
+                }
             }
         }
     }
@@ -1340,6 +1409,7 @@ impl Connection {
             .get_sink_info_list(move |r| match r {
                 ListResult::Item(i) => to.borrow_mut().push(Sink {
                     device: Device {
+                        muted: i.mute,
                         name: i.name.as_deref().unwrap_or("").into(),
                         description: i.description.as_deref().unwrap_or("").into(),
                         owned: false,
@@ -1366,6 +1436,7 @@ impl Connection {
                 ListResult::Item(i) => to.borrow_mut().push(Source {
                     index: i.index,
                     device: Device {
+                        muted: i.mute,
                         name: i.name.as_deref().unwrap_or("").into(),
                         description: i.description.as_deref().unwrap_or("").into(),
                         owned: false,
@@ -2000,6 +2071,303 @@ mod tests {
         ));
         resolved.client = Some(3);
         assert!(!saved.same_stream(&resolved));
+    }
+    fn listening_inventory() -> Inventory {
+        Inventory {
+            sinks: ["headphones", "other"]
+                .into_iter()
+                .enumerate()
+                .map(|(index, name)| Sink {
+                    device: Device {
+                        name: name.into(),
+                        ..Default::default()
+                    },
+                    index: index as u32,
+                    module: None,
+                    channels: 2,
+                    volume: ChannelVolumes::default(),
+                    muted: false,
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+    #[test]
+    fn listening_plan_is_explicit_available_and_single_branch() {
+        let engine = Engine::new("fixture".into());
+        let inv = listening_inventory();
+        let mut config = Config {
+            monitoring: Monitoring {
+                output: Some("headphones".into()),
+                mix: Some("monitor".into()),
+            },
+            ..Default::default()
+        };
+        config.validate().unwrap();
+        let mut warnings = vec![];
+        assert!(
+            !engine
+                .plan(&config, &inv, &mut warnings)
+                .iter()
+                .any(|p| p.key.starts_with("listen:"))
+        );
+        config.enabled = true;
+        config.monitoring.mix = None;
+        assert!(
+            !engine
+                .plan(&config, &inv, &mut warnings)
+                .iter()
+                .any(|p| p.key.starts_with("listen:"))
+        );
+        config.monitoring.mix = Some("monitor".into());
+        config.monitoring.output = None;
+        assert!(
+            !engine
+                .plan(&config, &inv, &mut warnings)
+                .iter()
+                .any(|p| p.key.starts_with("listen:"))
+        );
+        config.monitoring.output = Some("missing".into());
+        assert!(
+            !engine
+                .plan(&config, &inv, &mut warnings)
+                .iter()
+                .any(|p| p.key.starts_with("listen:"))
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|s| s.contains("Listening output unavailable: missing"))
+        );
+        config.monitoring.output = Some("headphones".into());
+        let plan = engine.plan(&config, &inv, &mut vec![]);
+        let listeners = plan
+            .iter()
+            .filter(|p| p.key.starts_with("listen:"))
+            .collect::<Vec<_>>();
+        assert_eq!(listeners.len(), 1);
+        let listener = listeners[0];
+        assert!(
+            listener
+                .args
+                .contains("source=\"deckforge.fixture.mix.monitor.monitor\"")
+        );
+        assert!(listener.args.contains("sink=\"headphones\""));
+        assert!(
+            listener
+                .args
+                .contains("source_dont_move=true sink_dont_move=true")
+        );
+        assert_eq!(output_gain(&config, &listener.key), (100.0, false));
+    }
+    #[test]
+    fn listening_switch_does_not_pause_or_replace_other_graph_nodes() {
+        let engine = Engine::new("fixture".into());
+        let inv = listening_inventory();
+        let mut config = Config {
+            enabled: true,
+            monitoring: Monitoring {
+                output: Some("headphones".into()),
+                mix: Some("monitor".into()),
+            },
+            ..Default::default()
+        };
+        let initial = engine.plan(&config, &inv, &mut vec![]);
+        let owned = initial
+            .iter()
+            .enumerate()
+            .map(|(index, p)| {
+                (
+                    p.key.clone(),
+                    Module {
+                        id: index as u32,
+                        name: p.name.clone(),
+                        args: p.args.clone(),
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        for monitoring in [
+            Monitoring {
+                output: Some("headphones".into()),
+                mix: Some("stream".into()),
+            },
+            Monitoring {
+                output: Some("other".into()),
+                mix: Some("stream".into()),
+            },
+            Monitoring {
+                output: Some("headphones".into()),
+                mix: None,
+            },
+        ] {
+            config.monitoring = monitoring;
+            let plan = engine.plan(&config, &inv, &mut vec![]);
+            assert!(!graph_requires_pause(&plan, &owned, &BTreeSet::new()));
+            let other = |plans: &[Spec]| {
+                plans
+                    .iter()
+                    .filter(|p| !p.key.starts_with("listen:"))
+                    .map(|p| (p.key.clone(), p.name.clone(), p.args.clone()))
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(other(&initial), other(&plan));
+        }
+        config.mixes.remove(1);
+        assert!(graph_requires_pause(
+            &engine.plan(&config, &inv, &mut vec![]),
+            &owned,
+            &BTreeSet::new()
+        ));
+    }
+    #[test]
+    fn legacy_export_with_reader_is_retained_beside_canonical_alias_without_pausing_mix() {
+        let mut engine = Engine::new("fixture".into());
+        let config = Config {
+            enabled: true,
+            ..Default::default()
+        };
+        let plan = engine.plan(&config, &Inventory::default(), &mut vec![]);
+        engine.owned = plan
+            .iter()
+            .enumerate()
+            .map(|(index, p)| {
+                (
+                    p.key.clone(),
+                    Module {
+                        id: index as u32 + 1,
+                        name: p.name.clone(),
+                        args: p.args.clone(),
+                    },
+                )
+            })
+            .collect();
+        let mix = engine
+            .owned
+            .iter()
+            .find(|(key, _)| key == "mix:monitor")
+            .unwrap()
+            .1
+            .clone();
+        let canonical = engine
+            .owned
+            .iter()
+            .find(|(key, _)| key == "export:monitor")
+            .unwrap()
+            .1
+            .clone();
+        let legacy_name = "deckforge.fixture.source.monitor";
+        let mut legacy = canonical.clone();
+        legacy.id = 100;
+        legacy.args = legacy
+            .args
+            .replace(&mix_source("fixture", "monitor"), legacy_name)
+            .replace("Deckforge mix monitor (recording)", "Deckforge mix monitor");
+        engine.owned.retain(|(_, module)| module.id != canonical.id);
+        engine.owned.push(("export:monitor".into(), legacy.clone()));
+        let mut inv = Inventory {
+            modules: engine.owned.iter().map(|(_, m)| m.clone()).collect(),
+            sources: vec![Source {
+                index: 200,
+                device: Device {
+                    name: legacy_name.into(),
+                    ..Default::default()
+                },
+                module: Some(legacy.id),
+                monitor_sink: None,
+            }],
+            captures: vec![Capture {
+                client: Some(999),
+                source: 200,
+                module: None,
+            }],
+            ..Default::default()
+        };
+        let protected = engine.protected_modules(&inv);
+        assert!(protected.contains(&legacy.id));
+        assert!(protected.contains(&mix.id));
+        assert!(!graph_requires_pause(&plan, &engine.owned, &protected));
+        assert!(
+            !engine
+                .recording_sources(&config, &inv)
+                .contains_key("monitor"),
+            "Do not advertise unsafe retained alias"
+        );
+        // Reconciliation can add the new export without replacing the old key;
+        // the journal stores owned modules as a Vec, so both identities persist.
+        engine
+            .owned
+            .push(("export:monitor".into(), canonical.clone()));
+        inv.modules.push(canonical.clone());
+        inv.sources.push(Source {
+            index: 201,
+            device: Device {
+                name: mix_source("fixture", "monitor"),
+                ..Default::default()
+            },
+            module: Some(canonical.id),
+            monitor_sink: None,
+        });
+        assert_eq!(
+            engine.recording_sources(&config, &inv)["monitor"],
+            mix_source("fixture", "monitor")
+        );
+        let protected = engine.protected_modules(&inv);
+        assert!(protected.contains(&legacy.id));
+        assert!(!protected.contains(&canonical.id));
+        inv.captures.clear();
+        assert!(
+            !engine.protected_modules(&inv).contains(&legacy.id),
+            "Legacy alias can be removed after its real reader leaves"
+        );
+        inv.modules.retain(|m| m.id != canonical.id);
+        assert!(
+            !engine
+                .recording_sources(&config, &inv)
+                .contains_key("monitor"),
+            "Names alone never prove export ownership"
+        );
+    }
+    #[test]
+    fn listening_output_cannot_feed_its_own_mix_through_monitor_capture() {
+        let mut config = Config {
+            enabled: true,
+            monitoring: Monitoring {
+                output: Some("headphones".into()),
+                mix: Some("monitor".into()),
+            },
+            channels: vec![Channel {
+                id: "system".into(),
+                name: "System".into(),
+                sources: vec!["headphones.monitor".into()],
+                ..Default::default()
+            }],
+            routes: vec![Route {
+                channel: "system".into(),
+                mix: "monitor".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let inv = Inventory {
+            sources: vec![Source {
+                index: 2,
+                device: Device {
+                    name: "headphones.monitor".into(),
+                    monitor: true,
+                    ..Default::default()
+                },
+                module: None,
+                monitor_sink: Some("headphones".into()),
+            }],
+            ..Default::default()
+        };
+        config.validate().unwrap();
+        assert!(reject_monitor_cycles(&config, &inv).is_err());
+        config.monitoring.mix = Some("stream".into());
+        assert!(reject_monitor_cycles(&config, &inv).is_ok());
+        config.monitoring.mix = None;
+        assert!(reject_monitor_cycles(&config, &inv).is_ok());
     }
     #[test]
     fn rejects_feedback_through_foreign_sink_monitors() {

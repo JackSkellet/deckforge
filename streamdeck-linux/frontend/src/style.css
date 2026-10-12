@@ -2959,3 +2959,67 @@ dialog.mixer-dialog {
 .mixer-global-settings > .hint {
   font-size: 11px;
 }
+
+.mixer-listening-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.mixer-listening-toolbar .field {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  width: 310px;
+  max-width: 100%;
+}
+.mixer-listening-toolbar .field > span {
+  flex-shrink: 0;
+  font-size: 11px;
+}
+.mixer-listening-toolbar select {
+  min-width: 0;
+  font-size: 11px;
+}
+.mixer-listening-toolbar > .hint {
+  flex: 1;
+  font-size: 11px;
+}
+.mixer-listening-toolbar > button {
+  font-size: 11px;
+}
+.mixer-console-heading .mixer-listen-toggle {
+  margin-left: auto;
+  display: grid;
+  place-content: center;
+  padding: 5px;
+  border-radius: 4px;
+}
+.mixer-console-heading .mixer-listen-toggle[aria-pressed="true"] {
+  background: #315448;
+  color: #b4f5d6;
+}
+
+.mixer-recording-input {
+  margin-block: 14px;
+  font-size: 11px;
+  color: #a2bbc3;
+}
+.mixer-recording-input > span,
+.mixer-recording-input strong,
+.mixer-recording-input code {
+  display: block;
+  margin-top: 5px;
+}
+.mixer-recording-input strong {
+  font-weight: 500;
+  color: #d1e7e8;
+}
+.mixer-recording-input code {
+  overflow-wrap: anywhere;
+  user-select: text;
+  -webkit-user-select: text;
+  font-size: 10px;
+  line-height: 1.5;
+}

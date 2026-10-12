@@ -173,8 +173,15 @@ fn write(
     Ok(())
 }
 
-/// Routing equality ignores display order/names and every control parameter.
+/// Includes listening destinations: changing those requires graph reconciliation.
+/// Display order, names and level/mute controls do not change routing.
 pub fn same_routing(a: &Config, b: &Config) -> bool {
+    a.monitoring == b.monitoring && same_base_routing(a, b)
+}
+
+// Listening selection does not change the identities of existing gain targets,
+// so their active ramps can continue while the output branch is reconciled.
+fn same_base_routing(a: &Config, b: &Config) -> bool {
     fn channels(config: &Config) -> Vec<(&str, bool, Vec<&super::AppSelector>, Vec<&str>)> {
         let mut result: Vec<_> = config
             .channels
@@ -272,7 +279,7 @@ impl Fades {
         for target in changes.keys() {
             read(&config, target)?;
         }
-        if immediate || !same_routing(&self.target, &config) {
+        if immediate || !same_base_routing(&self.target, &config) {
             self.target = config;
             self.ramps.clear();
             return Ok(());
@@ -620,5 +627,81 @@ mod tests {
         assert_eq!(level(&sampled, &mix()), 100.);
         assert_eq!(level(&fades.sample(seconds(8)), &headphones), 20.);
         assert!(!fades.active());
+    }
+
+    #[test]
+    fn listening_switches_reconcile_routing_without_restarting_unrelated_fades() {
+        let initial = config();
+        let mut fades = Fades::new(initial.clone());
+        let mut target = initial.clone();
+        patch(&mut target, &route("monitor"), Some(100.), None).unwrap();
+        patch(&mut target, &mix(), Some(0.), None).unwrap();
+        fades
+            .submit(
+                target,
+                [(route("monitor"), seconds(10)), (mix(), seconds(20))].into(),
+                false,
+                seconds(0),
+            )
+            .unwrap();
+
+        for (at, output, selected, route_level, master_level) in [
+            (2, Some("headphones"), Some("monitor"), 52., 90.),
+            (4, Some("headphones"), Some("stream"), 64., 80.),
+            (6, Some("headphones"), None, 76., 70.),
+            (8, None, None, 88., 60.),
+        ] {
+            let mut next = fades.target().clone();
+            next.monitoring = super::super::Monitoring {
+                output: output.map(str::to_owned),
+                mix: selected.map(str::to_owned),
+            };
+            assert!(!same_routing(fades.target(), &next));
+            fades
+                .submit(next.clone(), BTreeMap::new(), false, seconds(at))
+                .unwrap();
+            let current = fades.sample(seconds(at));
+            assert_eq!(current.monitoring, next.monitoring);
+            assert_eq!(level(&current, &route("monitor")), route_level);
+            assert_eq!(level(&current, &mix()), master_level);
+            assert!(fades.active());
+        }
+        // Endpoint times remain relative to the original request, not the last
+        // listening switch. The longer independent master ramp continues.
+        let at_ten = fades.sample(seconds(10));
+        assert_eq!(level(&at_ten, &route("monitor")), 100.);
+        assert_eq!(level(&at_ten, &mix()), 50.);
+        assert!(fades.active());
+        assert_eq!(level(&fades.sample(seconds(20)), &mix()), 0.);
+        assert!(!fades.active());
+    }
+
+    #[test]
+    fn listening_change_does_not_hide_a_real_graph_change_or_explicit_cancel() {
+        for structural in [false, true] {
+            let mut fades = Fades::new(config());
+            let mut target = fades.target().clone();
+            patch(&mut target, &route("monitor"), Some(100.), None).unwrap();
+            fades
+                .submit(
+                    target.clone(),
+                    change(route("monitor"), 10),
+                    false,
+                    seconds(0),
+                )
+                .unwrap();
+            target.monitoring = super::super::Monitoring {
+                output: Some("headphones".into()),
+                mix: Some("stream".into()),
+            };
+            if structural {
+                target.channels[0].sources.push("microphone".into());
+            }
+            fades
+                .submit(target, BTreeMap::new(), !structural, seconds(3))
+                .unwrap();
+            assert!(!fades.active());
+            assert_eq!(level(&fades.sample(seconds(3)), &route("monitor")), 100.);
+        }
     }
 }

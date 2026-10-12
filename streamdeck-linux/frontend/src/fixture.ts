@@ -487,7 +487,7 @@ export function installFixture(modelId?: string) {
           payload.target,
           payload,
         );
-        if (["channel", "preferences"].includes(payload.target.kind))
+        if (["channel", "preferences", "monitor"].includes(payload.target.kind))
           snapshot.mixer.revision!++;
         listener?.(structuredClone(snapshot));
         return structuredClone(snapshot.mixer) as T;

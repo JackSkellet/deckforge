@@ -8,12 +8,15 @@ export type MixerControlTarget =
   | { kind: "mix"; mix: string }
   | { kind: "output"; mix: string; output: string }
   | { kind: "channel"; channel: string }
-  | { kind: "preferences" };
+  | { kind: "preferences" }
+  | { kind: "monitor" };
 export type MixerControlPatch = {
   volume?: number;
   muted?: boolean;
   linked?: boolean;
   fade_ms?: number;
+  output?: string | null;
+  mix?: string | null;
 };
 export interface MixerDraftState {
   config: MixerConfig;
@@ -34,7 +37,7 @@ const equal = (a: unknown, b: unknown) =>
   JSON.stringify(canonical(a)) === JSON.stringify(canonical(b));
 /** Graph membership stays guarded; immediate control values can rebase independently. */
 export function mixerRoutingShape(config: MixerConfig) {
-  const { fade_ms: _fade, ...rest } = config;
+  const { fade_ms: _fade, monitoring: _monitoring, ...rest } = config;
   return {
     ...rest,
     channels: config.channels.map(({ linked: _linked, ...channel }) => ({
@@ -60,6 +63,10 @@ function semanticConfig(config: MixerConfig) {
   return {
     ...config,
     fade_ms: config.fade_ms ?? 0,
+    monitoring: {
+      output: config.monitoring?.output ?? null,
+      mix: config.monitoring?.mix ?? null,
+    },
     channels: config.channels.map((channel) => ({
       ...channel,
       linked: channel.linked ?? false,
@@ -106,6 +113,31 @@ export function reconcileMixerDraft(
     base = previous.base;
   if ((config.fade_ms ?? 0) === (base.fade_ms ?? 0))
     config.fade_ms = incoming.fade_ms;
+  const beforeMonitor = {
+    output: base.monitoring?.output ?? null,
+    mix: base.monitoring?.mix ?? null,
+  };
+  const editedMonitor = {
+    output: config.monitoring?.output ?? null,
+    mix: config.monitoring?.mix ?? null,
+  };
+  const nextMonitor = {
+    output: incoming.monitoring?.output ?? null,
+    mix: incoming.monitoring?.mix ?? null,
+  };
+  if (editedMonitor.output === beforeMonitor.output)
+    editedMonitor.output = nextMonitor.output;
+  const implicitRemoval =
+    !!beforeMonitor.mix &&
+    !config.mixes.some((m) => m.id === beforeMonitor.mix) &&
+    editedMonitor.mix === null;
+  if (editedMonitor.mix === beforeMonitor.mix || implicitRemoval)
+    editedMonitor.mix =
+      nextMonitor.mix && config.mixes.some((m) => m.id === nextMonitor.mix)
+        ? nextMonitor.mix
+        : null;
+  if (base.monitoring || incoming.monitoring || config.monitoring)
+    config.monitoring = editedMonitor;
   for (const next of incoming.channels) {
     const before = base.channels.find((c) => c.id === next.id),
       edited = config.channels.find((c) => c.id === next.id);
@@ -177,6 +209,7 @@ export const controlKey = (target: MixerControlTarget) =>
 export function savedControl(config: MixerConfig, target: MixerControlTarget) {
   switch (target.kind) {
     case "preferences":
+    case "monitor":
       return true;
     case "channel":
       return config.channels.some((c) => c.id === target.channel);
@@ -200,6 +233,15 @@ export function patchMixerControl(
   saved: MixerConfig = config,
 ): MixerConfig {
   const next = structuredClone(config);
+  if (target.kind === "monitor") {
+    next.monitoring = {
+      output: next.monitoring?.output ?? null,
+      mix: next.monitoring?.mix ?? null,
+    };
+    if (patch.output !== undefined) next.monitoring.output = patch.output;
+    if (patch.mix !== undefined) next.monitoring.mix = patch.mix;
+    return next;
+  }
   if (target.kind === "preferences") {
     next.fade_ms = patch.fade_ms;
     return next;

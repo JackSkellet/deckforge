@@ -73,6 +73,36 @@ impl Host {
                     .linked = linked;
             }
             Some("preferences") => next.fade_ms = fade.context("Missing fade duration")?,
+            Some("monitor") => {
+                anyhow::ensure!(
+                    request.get("output").is_some() || request.get("mix").is_some(),
+                    "Choose a listening device or mix"
+                );
+                if let Some(value) = request.get("output") {
+                    next.monitoring.output = if value.is_null() {
+                        None
+                    } else {
+                        Some(
+                            value
+                                .as_str()
+                                .context("Listening output must be a device name or null")?
+                                .to_owned(),
+                        )
+                    };
+                }
+                if let Some(value) = request.get("mix") {
+                    next.monitoring.mix = if value.is_null() {
+                        None
+                    } else {
+                        Some(
+                            value
+                                .as_str()
+                                .context("Listening mix must be a mix ID or null")?
+                                .to_owned(),
+                        )
+                    };
+                }
+            }
             _ => {
                 let target: Target = serde_json::from_value(target.clone())?;
                 let volume = request
@@ -376,6 +406,71 @@ mod tests {
             assert_eq!(host.mixer_config, before);
             assert_eq!(host.mixer_revision, 0);
             assert!(host.mixer_save_due.is_none());
+            assert!(host.mixer.is_none());
+        }
+    }
+
+    #[test]
+    fn listening_preferences_save_while_inactive_without_starting_audio() {
+        let root = tempfile::tempdir().unwrap();
+        let mut host = configured_without_audio(root.path());
+        host.mixer_control(
+            json!({"revision":0,"target":{"kind":"monitor"},"output":"headphones","mix":"monitor"}),
+        )
+        .unwrap();
+        assert!(host.mixer.is_none());
+        assert!(!host.mixer_config.enabled);
+        assert_eq!(
+            host.mixer_config.monitoring.output.as_deref(),
+            Some("headphones")
+        );
+        assert_eq!(host.mixer_revision, 1);
+        assert!(
+            host.mixer_control(json!({"revision":0,"target":{"kind":"monitor"},"mix":"stream"}))
+                .is_err()
+        );
+        host.mixer_control(json!({"revision":1,"target":{"kind":"monitor"},"mix":"stream"}))
+            .unwrap();
+        assert_eq!(host.mixer_config.monitoring.mix.as_deref(), Some("stream"));
+        assert_eq!(
+            host.mixer_config.monitoring.output.as_deref(),
+            Some("headphones")
+        );
+        host.mixer_control(json!({"revision":2,"target":{"kind":"monitor"},"mix":null}))
+            .unwrap();
+        assert!(host.mixer_config.monitoring.mix.is_none());
+        assert_eq!(
+            host.mixer_config.monitoring.output.as_deref(),
+            Some("headphones")
+        );
+        host.persist().unwrap();
+        let saved: Saved = serde_json::from_slice(&fs::read(&host.state_path).unwrap()).unwrap();
+        assert_eq!(saved.mixer.monitoring, host.mixer_config.monitoring);
+        assert!(host.mixer.is_none());
+    }
+
+    #[test]
+    fn invalid_or_duplicate_listening_destination_cannot_change_intent() {
+        let root = tempfile::tempdir().unwrap();
+        let mut host = configured_without_audio(root.path());
+        host.mixer_config.mixes[0].outputs = vec!["fixed-speakers".into()];
+        let before = host.mixer_config.clone();
+        for values in [
+            json!({}),
+            json!({"mix":false}),
+            json!({"mix":"missing"}),
+            json!({"output":"fixed-speakers"}),
+            json!({"output":"@DEFAULT_SINK@"}),
+            json!({"output":"deckforge.another.mix.monitor"}),
+        ] {
+            let mut request = json!({"revision":0,"target":{"kind":"monitor"}});
+            request
+                .as_object_mut()
+                .unwrap()
+                .extend(values.as_object().unwrap().clone());
+            assert!(host.mixer_control(request).is_err());
+            assert_eq!(host.mixer_config, before);
+            assert_eq!(host.mixer_revision, 0);
             assert!(host.mixer.is_none());
         }
     }

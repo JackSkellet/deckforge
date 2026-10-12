@@ -20,8 +20,8 @@ const initial=await bridge.request('snapshot');if(!initial.simulate||initial.mix
 const config={enabled:false,fade_ms:0,channels:[{id:'fixture-voice',name:'Voice',apps:[],sources:[],linked:false}],mixes:[{id:'monitor',name:'Monitor',outputs:['fixture.output'],volume:90,muted:false,output_controls:{}},{id:'stream',name:'Stream',outputs:[],volume:100,muted:false,output_controls:{}}],routes:[{channel:'fixture-voice',mix:'monitor',volume:40,muted:false},{channel:'fixture-voice',mix:'stream',volume:60,muted:false}]};
 await bridge.request('command',{command:'mixer_config',settings:config,expected:initial.mixer.config});
 const button=name=>[...document.querySelectorAll('button')].find(b=>b.textContent.trim()===name);
-const input=label=>document.querySelector(`[aria-label="${label}"]`)||[...document.querySelectorAll('label')].find(l=>l.textContent.trim()===label)?.querySelector('input');
-const set=(node,value)=>{if(!node)throw Error('Missing control');Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(node,String(value));node.dispatchEvent(new Event('input',{bubbles:true}));node.dispatchEvent(new Event('change',{bubbles:true}));};
+const input=label=>document.querySelector(`[aria-label="${label}"]`)||[...document.querySelectorAll('label')].find(l=>l.querySelector('span')?.textContent.trim()===label)?.querySelector('input,select');
+const set=(node,value)=>{if(!node)throw Error('Missing control');Object.getOwnPropertyDescriptor(node.tagName==='SELECT'?HTMLSelectElement.prototype:HTMLInputElement.prototype,'value').set.call(node,String(value));node.dispatchEvent(new Event('input',{bubbles:true}));node.dispatchEvent(new Event('change',{bubbles:true}));};
 const saved=async()=>(await bridge.request('snapshot')).mixer;
 const draft=async()=>(await bridge.request('ui_state_get'))?.formDrafts?.['audio-mixer'];
 button('Audio mixer').click();await until(()=>input('Voice → Monitor volume'),'mixer visible');
@@ -40,13 +40,31 @@ input('Mute Monitor output · fixture.output').click();await until(async()=>(awa
 button('Routing setup').click();await pause(50);set(input('Default fade (ms)'),250);await until(async()=>(await saved()).config.fade_ms===250,'default fade');button('Mixer').click();await pause(50);
 for(const value of [63,64,65,66])set(input('Voice → Monitor volume'),value);
 await until(async()=>(await saved()).config.routes[0].volume===66,'rapid final value');
+const availableOutput=(await saved()).sinks.find(output=>!output.owned&&!output.monitor&&!output.name.startsWith('deckforge.')&&output.name!=='fixture.output');
+if(!availableOutput)throw Error('Listening selector fixture requires read-only audio inventory with an available output');
+set(input('Listen on'),availableOutput.name);await until(async()=>(await saved()).config.monitoring?.output===availableOutput.name,'saved listening output');
+document.querySelector('[aria-label="Listen to Monitor"]').click();await until(async()=>(await saved()).config.monitoring?.mix==='monitor','monitor listen button');
+document.querySelector('[aria-label="Listen to Stream"]').click();await until(async()=>(await saved()).config.monitoring?.mix==='stream','stream listen button');
+await until(()=>document.querySelector('[aria-label="Listen to Stream"]').getAttribute('aria-pressed')==='true','selected listening state');
+if(document.querySelector('[aria-label="Listen to Monitor"]').getAttribute('aria-pressed')!=='false')throw Error('Listening selection is not exclusive');
+if(!document.querySelector('[aria-label="Listen to Mix 3"]').disabled)throw Error('Unapplied mix must not be listenable');
+button('Routing setup').click();await pause(60);
+const reserved=[...document.querySelectorAll('.mixer-device-choices label')].filter(label=>label.textContent.includes('used by Listen on')).map(label=>label.querySelector('input'));
+if(!reserved.length||reserved.some(control=>!control.disabled))throw Error('Listening device not reserved against fixed outputs');
+button('Mixer').click();await pause(50);document.querySelector('[aria-label="Listen to Stream"]').click();await until(async()=>(await saved()).config.monitoring?.mix===null,'toggle listening off');
+if((await saved()).config.monitoring.output!==availableOutput.name)throw Error('Stop listening cleared chosen device');
+set(input('Listen on'),'');await until(async()=>(await saved()).config.monitoring?.output===null,'clear listening output');
+let current=await saved();await bridge.request('mixer_control',{revision:current.revision,target:{kind:'monitor'},output:'fixture.offline.monitor',mix:'monitor'});
+await until(()=>input('Listen on')?.value==='fixture.offline.monitor','offline output retained');
+if(!document.querySelector('.mixer-listening-toolbar').textContent.includes('Unavailable output'))throw Error('Offline monitor output not marked unavailable');
+set(input('Listen on'),availableOutput.name);await until(async()=>(await saved()).config.monitoring?.output===availableOutput.name,'restore saved output without routing');
 const pending=await draft();if(!pending.dirty||pending.config.mixes.length!==3||(await saved()).config.mixes.length!==2)throw Error('Live updates lost or saved the draft mix');
 document.querySelector('[aria-label="Close Audio mixer"]').click();await pause(100);button('Audio mixer').click();await until(()=>input('Voice → Monitor volume'),'reopened mixer');
 if((await draft()).config.mixes.length!==3)throw Error('Reopening lost topology draft');
 const snapshot=await saved();if(snapshot.active||snapshot.config.enabled)throw Error('Inactive preset controls enabled audio');
 if(!document.querySelector('[aria-label="Voice: meter unavailable"]'))throw Error('Unavailable meter must not display invented silence');
 const dialog=document.querySelector('dialog[open]');if(dialog.scrollWidth>dialog.clientWidth+2)throw Error('Dialog has horizontal overflow');
-return{actual_controls:['route volume','linked levels','independent route mute','master volume','output gain','output mute','default fade','rapid fader updates'],saved:snapshot.config,revision:snapshot.revision,draft_retained:true,draft_mixes:3,saved_mixes:2,meters_unavailable:true,dialog_no_horizontal_overflow:true,routing_enabled:false,usb_access:false};
+return{actual_controls:['route volume','linked levels','independent route mute','master volume','output gain','output mute','default fade','rapid fader updates','listening output selector','exclusive mix listen toggles','reserved output conflicts','offline output retention'],saved:snapshot.config,revision:snapshot.revision,draft_retained:true,draft_mixes:3,saved_mixes:2,meters_unavailable:true,dialog_no_horizontal_overflow:true,routing_enabled:false,usb_access:false};
 '''
 
 

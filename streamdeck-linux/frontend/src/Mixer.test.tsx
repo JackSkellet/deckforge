@@ -6,6 +6,7 @@ import {
   cleanup,
   waitFor,
   fireEvent,
+  within,
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import {
@@ -891,4 +892,169 @@ it("keeps fade preferences in setup and exposes saving/fading status in both vie
     screen.getByRole("spinbutton", { name: "Default fade (ms)" }),
   ).toBeTruthy();
   expect(screen.getByText("Fading…")).toBeTruthy();
+});
+
+it("saves listening preferences in order while retaining routing drafts and guarding fixed outputs", async () => {
+  const user = userEvent.setup(),
+    run = vi.fn(async (_p: Record<string, any>) => true);
+  let live = { ...inventory(), revision: 5 };
+  live.sinks.push({
+    name: "headphones",
+    description: "Headphones",
+    owned: false,
+    monitor: false,
+    muted: true,
+  });
+  const calls: any[] = [];
+  window.deckforge = {
+    onSnapshot: () => () => {},
+    request: vi.fn(async (method, payload: any) => {
+      expect(method).toBe("mixer_control");
+      expect(payload.revision).toBe(live.revision);
+      calls.push(payload);
+      live = {
+        ...live,
+        revision: live.revision + 1,
+        config: patchMixerControl(live.config, payload.target, payload),
+      };
+      return structuredClone(live) as any;
+    }),
+  };
+  render(<AudioMixer snapshot={live} run={run} />);
+  setupView();
+  fireEvent.change(screen.getByRole("textbox", { name: "Monitor mix name" }), {
+    target: { value: "Pending name" },
+  });
+  dailyView();
+  await user.selectOptions(
+    screen.getByRole("combobox", { name: "Listen on" }),
+    "headphones",
+  );
+  await user.click(screen.getByRole("button", { name: "Listen to Stream" }));
+  await waitFor(() => expect(calls).toHaveLength(2));
+  expect(calls.map((c) => c.revision)).toEqual([5, 6]);
+  expect(live.config.monitoring).toEqual({
+    output: "headphones",
+    mix: "stream",
+  });
+  expect(live.config.enabled).toBe(false);
+  expect(screen.getByText(/Listening device is muted/)).toBeTruthy();
+  expect(
+    screen.queryByRole("option", {
+      name: "Unavailable · missing.speakers",
+    }) as HTMLOptionElement | null,
+  ).toBeNull();
+  setupView();
+  expect(
+    (
+      screen.getAllByRole("checkbox", {
+        name: "Headphones · used by Listen on",
+      })[0] as HTMLInputElement
+    ).disabled,
+  ).toBe(true);
+  expect(
+    (
+      screen.getByRole("textbox", {
+        name: "Pending name mix name",
+      }) as HTMLInputElement
+    ).value,
+  ).toBe("Pending name");
+  dailyView();
+  await user.click(screen.getByRole("button", { name: "Listen to Stream" }));
+  await waitFor(() => expect(live.config.monitoring?.mix).toBeNull());
+  expect(live.config.monitoring?.output).toBe("headphones");
+  await user.selectOptions(
+    screen.getByRole("combobox", { name: "Listen on" }),
+    "",
+  );
+  await waitFor(() => expect(live.config.monitoring?.output).toBeNull());
+  expect(screen.getByText("No listening output")).toBeTruthy();
+});
+it("keeps unavailable monitoring output explicit and uses applied monitoring to show switching", () => {
+  const snapshot = { ...inventory(), revision: 1, active: true };
+  snapshot.config.monitoring = { output: "gone.headphones", mix: "monitor" };
+  const view = render(
+    <AudioMixer snapshot={snapshot} run={vi.fn(async () => true)} />,
+  );
+  expect(
+    screen.getByText("Unavailable output · saved selection kept"),
+  ).toBeTruthy();
+  expect(
+    (screen.getByRole("combobox", { name: "Listen on" }) as HTMLSelectElement)
+      .value,
+  ).toBe("gone.headphones");
+  const next = structuredClone(snapshot);
+  next.config.monitoring = { output: "physical.output", mix: "monitor" };
+  next.applied_config = {
+    ...structuredClone(next.config),
+    monitoring: { output: null, mix: null },
+  };
+  view.rerender(<AudioMixer snapshot={next} run={vi.fn(async () => true)} />);
+  expect(screen.getByText("Switching listening output…")).toBeTruthy();
+  next.applied_config = structuredClone(next.config);
+  view.rerender(
+    <AudioMixer
+      snapshot={{ ...next, pending: true, fading: true }}
+      run={vi.fn(async () => true)}
+    />,
+  );
+  expect(screen.getByText("Listening to Monitor")).toBeTruthy();
+  expect(screen.queryByText("Switching listening output…")).toBeNull();
+});
+it("disables listening to draft mixes and selecting fixed outputs", async () => {
+  const user = userEvent.setup(),
+    snapshot = { ...inventory(), revision: 1 };
+  snapshot.config.mixes[0].outputs.push("physical.output");
+  render(<AudioMixer snapshot={snapshot} run={vi.fn(async () => true)} />);
+  expect(
+    (
+      screen.getByRole("option", {
+        name: "Desktop speakers · fixed output of Monitor",
+      }) as HTMLOptionElement
+    ).disabled,
+  ).toBe(true);
+  setupView();
+  await user.click(screen.getByRole("button", { name: "＋ Add mix" }));
+  dailyView();
+  expect(
+    (
+      screen.getByRole("button", {
+        name: "Listen to Mix 3",
+      }) as HTMLButtonElement
+    ).disabled,
+  ).toBe(true);
+});
+
+it("shows only the canonical recording input and never substitutes a legacy monitor source", () => {
+  const snapshot = inventory(),
+    run = vi.fn(async () => true);
+  const legacy = {
+    name: "deckforge.fixture.source.monitor",
+    description: "Legacy mix monitor",
+    owned: true,
+    monitor: true,
+  };
+  const canonical = {
+    name: "deckforge.fixture.source.monitor.input",
+    description: "Deckforge mix monitor (recording)",
+    owned: true,
+    monitor: false,
+  };
+  snapshot.sources = [...snapshot.sources, legacy, canonical];
+  snapshot.recording_sources = { monitor: canonical.name };
+  const view = render(<AudioMixer snapshot={snapshot} run={run} />);
+  setupView();
+  const card = screen.getByRole("region", { name: "Monitor output setup" });
+  expect(within(card).getByText(canonical.description)).toBeTruthy();
+  expect(
+    within(card).getByText(canonical.name, { selector: "code" }),
+  ).toBeTruthy();
+  expect(within(card).queryByText(legacy.description)).toBeNull();
+  view.rerender(
+    <AudioMixer snapshot={{ ...snapshot, sources: [legacy] }} run={run} />,
+  );
+  expect(
+    within(card).getByText("Enable routing to create this input."),
+  ).toBeTruthy();
+  expect(within(card).queryByText(legacy.name)).toBeNull();
 });

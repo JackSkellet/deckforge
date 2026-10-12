@@ -345,6 +345,7 @@ mod tests {
     fn config() -> Config {
         Config {
             fade_ms: 0,
+            monitoring: crate::mixer::Monitoring::default(),
             enabled: true,
             channels: vec![Channel {
                 id: "music".into(),

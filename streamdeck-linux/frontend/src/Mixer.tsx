@@ -45,6 +45,7 @@ export interface MixerRoute {
   muted: boolean;
 }
 export interface MixerConfig {
+  monitoring?: { output: string | null; mix: string | null };
   fade_ms?: number;
   enabled: boolean;
   channels: MixerChannel[];
@@ -56,6 +57,7 @@ export interface AudioDevice {
   description: string;
   owned: boolean;
   monitor: boolean;
+  muted?: boolean;
 }
 export interface AudioApp {
   index: number;
@@ -66,6 +68,7 @@ export interface AudioApp {
   desktop_application?: string | null;
 }
 export interface MixerSnapshot {
+  recording_sources?: Record<string, string>;
   applications?: { id: string; name: string; detected: boolean }[];
   revision?: number;
   controls_unsaved?: boolean;
@@ -143,6 +146,9 @@ export function removeMix(config: MixerConfig, id: string): MixerConfig {
   return {
     ...config,
     mixes: config.mixes.filter((m) => m.id !== id),
+    ...(config.monitoring?.mix === id
+      ? { monitoring: { ...config.monitoring, mix: null } }
+      : {}),
     routes: config.routes.filter((r) => r.mix !== id),
   };
 }
@@ -303,6 +309,30 @@ function Gain({
     </div>
   );
 }
+function RecordingInput({
+  name,
+  sources,
+}: {
+  name?: string;
+  sources: AudioDevice[];
+}) {
+  const source = name
+    ? sources.find((source) => source.name === name)
+    : undefined;
+  return (
+    <div className="mixer-recording-input">
+      <span>Recording input</span>
+      {source ? (
+        <>
+          <strong>{source.description || source.name}</strong>
+          <code>{source.name}</code>
+        </>
+      ) : (
+        <p className="hint">Enable routing to create this input.</p>
+      )}
+    </div>
+  );
+}
 function DeviceChoices({
   label,
   selected,
@@ -310,6 +340,7 @@ function DeviceChoices({
   onChange,
   unavailableHint,
   assigned = [],
+  assignmentLabel = "assigned elsewhere",
 }: {
   label: string;
   selected: string[];
@@ -317,6 +348,7 @@ function DeviceChoices({
   onChange: (names: string[]) => void;
   unavailableHint: string;
   assigned?: string[];
+  assignmentLabel?: string;
 }) {
   const available = devices.filter(
     (device) => !device.owned && !device.name.startsWith("deckforge."),
@@ -334,7 +366,7 @@ function DeviceChoices({
             (assigned.includes(device.name) || selected.length >= 8)
           }
           key={device.name}
-          label={`${device.description || device.name}${assigned.includes(device.name) && !selected.includes(device.name) ? " · assigned elsewhere" : ""}`}
+          label={`${device.description || device.name}${assigned.includes(device.name) && !selected.includes(device.name) ? ` · ${assignmentLabel}` : ""}`}
           checked={selected.includes(device.name)}
           onChange={(checked) => {
             if (!checked)
@@ -760,6 +792,47 @@ export function AudioMixer({
     setCreateOpen(false);
     setNavigation((current) => ({ ...current, view: "setup" }));
   };
+  const liveConfig = (queue.current?.intents ?? []).reduce(
+    (current, intent) =>
+      patchMixerControl(current, intent.target, intent.patch),
+    snapshot.config,
+  );
+  const monitoring = {
+    output: liveConfig.monitoring?.output ?? null,
+    mix: liveConfig.monitoring?.mix ?? null,
+  };
+  const listenDevices = snapshot.sinks.filter(
+    (device) =>
+      !device.owned && !device.monitor && !device.name.startsWith("deckforge."),
+  );
+  const missingListenOutput =
+    !!monitoring.output &&
+    !listenDevices.some((device) => device.name === monitoring.output);
+  const listeningMix = snapshot.config.mixes.find(
+    (m) => m.id === monitoring.mix,
+  );
+  const appliedMonitoring = {
+    output: snapshot.applied_config?.monitoring?.output ?? null,
+    mix: snapshot.applied_config?.monitoring?.mix ?? null,
+  };
+  const listenStatus = missingListenOutput
+    ? "Unavailable output · saved selection kept"
+    : snapshot.active && !same(monitoring, appliedMonitoring)
+      ? "Switching listening output…"
+      : !monitoring.output
+        ? "No listening output"
+        : !monitoring.mix
+          ? "No mix selected"
+          : snapshot.active
+            ? `Listening to ${listeningMix?.name ?? monitoring.mix}`
+            : `Saved: ${listeningMix?.name ?? monitoring.mix} · routing off`;
+  const outputOwners = (output: string) => [
+    ...new Set(
+      [...snapshot.config.mixes, ...config.mixes]
+        .filter((m) => m.outputs.includes(output))
+        .map((m) => m.name),
+    ),
+  ];
   const pendingControls = queue.current?.pending ?? 0;
   const stale = !sameMixerRouting(draft.base, snapshot.config);
   function control(target: MixerControlTarget, patch: MixerControlPatch) {
@@ -992,6 +1065,60 @@ export function AudioMixer({
                 </button>
               </div>
             )}
+            <div className="mixer-listening-toolbar">
+              <Field label="Listen on">
+                <select
+                  disabled={snapshot.revision === undefined}
+                  value={monitoring.output ?? ""}
+                  onChange={(e) =>
+                    control(
+                      { kind: "monitor" },
+                      { output: e.target.value || null },
+                    )
+                  }
+                >
+                  <option value="">No output</option>
+                  {missingListenOutput && (
+                    <option value={monitoring.output!}>
+                      Unavailable · {monitoring.output}
+                    </option>
+                  )}
+                  {listenDevices.map((device) => {
+                    const owners = outputOwners(device.name);
+                    return (
+                      <option
+                        key={device.name}
+                        value={device.name}
+                        disabled={owners.length > 0}
+                      >
+                        {device.description || device.name}
+                        {owners.length
+                          ? ` · fixed output of ${owners.join(", ")}`
+                          : ""}
+                      </option>
+                    );
+                  })}
+                </select>
+              </Field>
+              <span className="hint" role="status">
+                {listenStatus}
+                {monitoring.output &&
+                listenDevices.find(
+                  (device) => device.name === monitoring.output,
+                )?.muted
+                  ? " · Listening device is muted"
+                  : ""}
+              </span>
+              {monitoring.mix && (
+                <button
+                  type="button"
+                  className="quiet"
+                  onClick={() => control({ kind: "monitor" }, { mix: null })}
+                >
+                  Stop listening
+                </button>
+              )}
+            </div>
             <div className="mixer-console-scroll">
               <table
                 className="mixer-console"
@@ -1007,6 +1134,47 @@ export function AudioMixer({
                       <th key={m.id} scope="col">
                         <div className="mixer-console-heading">
                           <strong>{m.name}</strong>
+                          <button
+                            type="button"
+                            className="mixer-listen-toggle"
+                            aria-label={`Listen to ${m.name}`}
+                            aria-pressed={monitoring.mix === m.id}
+                            disabled={
+                              snapshot.revision === undefined ||
+                              !snapshot.config.mixes.some(
+                                (saved) => saved.id === m.id,
+                              )
+                            }
+                            title={
+                              !snapshot.config.mixes.some(
+                                (saved) => saved.id === m.id,
+                              )
+                                ? "Apply this mix before listening"
+                                : monitoring.mix === m.id
+                                  ? "Stop listening to this mix"
+                                  : "Listen to this mix"
+                            }
+                            onClick={() =>
+                              control(
+                                { kind: "monitor" },
+                                { mix: monitoring.mix === m.id ? null : m.id },
+                              )
+                            }
+                          >
+                            <svg
+                              width="17"
+                              height="17"
+                              viewBox="0 0 20 20"
+                              aria-hidden="true"
+                            >
+                              <path
+                                d="M3 12V9a7 7 0 0 1 14 0v3M3 10h3v7H3zM14 10h3v7h-3z"
+                                fill="none"
+                                stroke="currentColor"
+                                strokeWidth="1.5"
+                              />
+                            </svg>
+                          </button>
                           <button
                             type="button"
                             aria-label={`${m.name} mix settings`}
@@ -1325,7 +1493,7 @@ export function AudioMixer({
                 <p className="hint">
                   {selectedMix.outputs.length
                     ? "Device levels affect only this mix’s output to each device."
-                    : "Virtual output only. Assign a listening device in Routing setup."}
+                    : "No fixed output. Use Listen on above, or assign a fixed output in Routing setup."}
                 </p>
               </aside>
             )}
@@ -1503,14 +1671,17 @@ export function AudioMixer({
                   </Field>
                   <DeviceChoices
                     label={`${m.name} outputs`}
+                    assigned={monitoring.output ? [monitoring.output] : []}
+                    assignmentLabel="used by Listen on"
                     selected={m.outputs}
                     devices={snapshot.sinks}
                     unavailableHint="This saved output is kept. No replacement device is chosen automatically."
                     onChange={(outputs) => mix({ ...m, outputs })}
                   />
-                  <p className="hint">
-                    Also available as a virtual input while routing is active.
-                  </p>
+                  <RecordingInput
+                    name={snapshot.recording_sources?.[m.id]}
+                    sources={snapshot.sources}
+                  />
                   <button
                     className="danger quiet"
                     type="button"

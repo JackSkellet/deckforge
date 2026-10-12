@@ -64,6 +64,26 @@ again. Turning the default option off restores streams Deckforge moved to it.
 This does not automatically capture microphones or loop Deckforge's own mixer
 streams into themselves. Input devices still require explicit selection.
 
+## Listening to a mix
+
+Choose **Listen on** in the Mixer view, then use the listen button beside a saved
+mix name. Clicking the selected button again, or **Stop listening**, selects no
+mix. These choices save immediately, including while routing is off; they never
+enable routing themselves. New, unapplied mixes cannot be monitored yet.
+
+This main listening destination is separate from fixed per-mix outputs and virtual
+recording inputs. Switching it replaces only the listening connection: mix buses,
+recordings, fixed output feeds and in-progress level fades continue. A missing
+destination stays selected and unavailable until that same named device returns;
+Deckforge never substitutes the system default. Its current system mute state is
+shown, but choosing a mix does not change the device's system volume or mute.
+
+An output reserved for listening cannot simultaneously be assigned as a fixed mix
+output. Remove its fixed assignment and Apply before choosing it under Listen on.
+This prevents two feeds into the same destination. Existing routing drafts survive
+listening changes. Deleting the selected mix clears its listening selection when
+that deletion is applied and retains the chosen output device.
+
 ## Live controls and meters
 
 Saved route, mix master and per-output levels/mutes apply immediately. With routing
@@ -103,6 +123,21 @@ Device actions never enable the mixer or create routes. Their displays show the
 last level accepted by the mixer worker, with pending and unavailable states.
 This is control feedback, not an audio level meter. The action IDs and settings
 are original Deckforge definitions, not guessed Elgato settings.
+
+## Recording input names
+
+Routing setup displays each mix's verified recording input description and exact
+name. Use that input in your recording application. The default Monitor mix now
+uses an input ending in `.source.monitor.input`, labelled **Deckforge mix monitor
+(recording)**. Other mix input names are unchanged.
+
+The old `.source.monitor` name conflicts with [PipeWire's reserved `.monitor`
+suffix](https://github.com/PipeWire/pipewire/blob/1.6.9/src/modules/module-protocol-pulse/pulse-server.c#L2114): a client requesting it by name can be redirected to a sink monitor or the
+default input. Applications configured with that old name should reselect the
+corrected input. Deckforge does not retarget other applications' recording streams.
+An actual reader still attached to the old source keeps that endpoint during the
+upgrade; the canonical input is advertised separately, and the old endpoint is
+retired after its last reader releases it.
 
 ## Lifetime and recovery
 
@@ -165,6 +200,19 @@ meter cleanup. `frontend/tests/native_mixer_controls_interop.py` exercises the a
 native sliders, links, output controls and fade preference with routing disabled,
 including preservation of an unapplied mix. Physical audio acceptance and full
 Wave Link parity remain unverified.
+
+`tests/mixer_listening_interop.py` runs a private audio server and generated tones
+through the real host. It measures mix/output switching, No mix silence,
+uninterrupted recording windows, fade continuation, endpoint identity preservation,
+output disconnect/reconnect, unchanged device controls and inactive restart.
+These are functional checks on a private server without real-time scheduling.
+One run concurrent with frontend tests showed a transient gap in a fixed output;
+isolated runs passed. Timing under CPU load and physical-device acceptance remain
+unverified and are part of the user's reliability testing.
+It also verifies each recorder's actual source identity and signal frequency.
+`tests/mixer_recording_migration_interop.py` compares a supplied previous binary
+with the current build on that private server, retaining a numeric legacy reader
+while creating the corrected named input and retiring the old alias afterward.
 
 ## Reference behavior
 

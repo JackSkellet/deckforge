@@ -634,7 +634,7 @@ in [Audio mixer](AUDIO_MIXER.md).
 | WL-03 | Live metering, immediate faders, fades, linked mixes and output controls | **Verified subset, C/T.** Native immediate route/master/output faders and mutes, linked percentage-point deltas, retargetable linear fades, and measured stereo peak meters. Native-window tests cover controls and routing-draft preservation. Virtual PCM verifies meters, fade progression, output gains and cleanup; actual-host tests cover intermediate fades, retargeting, persistence and revision guards. Vendor curve/link equivalence and physical audio acceptance remain unverified. |
 | WL-04 | Effects, effect switching and Wave hardware/DSP controls | **Deferred.** No VST/AU effect hosting or proprietary Wave-device DSP implementation is present. These require separate contracts, supported Linux mappings and hardware evidence. |
 | WL-05 | Background operation, disable, shutdown and recovery | **Verified subset, C/T.** Exact owned-node journals and kernel ownership leases preserve parked apps/recorders across normal Quit/restart. Disabled fresh startup leaves audio untouched; explicit Enable recovers matching nodes. Tests verify original-output restoration, respect manual routing changes, silent attached-reader retention and unchanged system defaults. Abrupt crashes and full audio-daemon restart remain unverified. |
-| WL-06 | Main listening output and monitored mix selection | **Missing, A.** Wave Link 3.3 resources describe one main listening device, an ear selector and a no-mix state. Deckforge currently uses explicit per-mix output assignments. The separate monitoring workflow remains to implement and verify. |
+| WL-06 | Main listening output and monitored mix selection | **Verified subset, A/C/T.** Main listening device and per-mix listen buttons are implemented with No mix, inactive preference saving, fixed-output reservation and read-only device mute status. Private PCM tests verify isolated listening switches, continuing recordings/fades, stable bus IDs, output disconnect/reconnect, unchanged system controls and restart. Native controls preserve routing drafts. Isolated audio checks pass; a concurrent-test run showed a transient fixed-output gap. CPU-load timing and physical headphones/speakers acceptance remain unverified. |
 | WL-07 | Channel master controls and detailed meter behavior | **Partial/Unresolved, A/C/T.** Measured channel/mix peaks exist. Shipped resources distinguish channel, route and mix mute/zero-level issues; native names also reference stereo dB peaks, per-route peak hold and meter decay. Separate channel master controls and exact vendor meter timing/curves are not established by the current implementation. See [reference investigation](WAVE_LINK_REFERENCE.md). |
 
 `tests/mixer_host_interop.py --run-virtual` uses the actual application, simulated
@@ -699,3 +699,15 @@ Font matching/loading runs outside the shared render-cache lock. Windows font
 metrics, complex shaping, per-character fallback and animated key playback are
 not established. The user's next priority is other devices, then plugins, then
 Wave Link meters. Long-running reliability checks are delegated to the user.
+
+### Recording input identity correction
+
+A private PipeWire 1.6.9 probe and its pinned `pulse-server.c` confirmed that names
+ending in `.monitor` are interpreted as sink-monitor targets. The default mix's
+old exported name therefore did not reliably bind a recorder to that mix.
+The canonical export now ends in `.source.monitor.input`; all other mix names
+stay stable. The GUI exposes the backend's verified recording source map. Legacy
+readers actually attached to the old source retain it without being moved, and
+its alias is removed only after they release it. Measured identity/frequency and
+migration tests accompany this correction; it is separate from vendor gain-curve
+or hardware parity claims.

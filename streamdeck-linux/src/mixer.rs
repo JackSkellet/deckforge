@@ -23,6 +23,7 @@ use std::{
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct Config {
+    pub monitoring: Monitoring,
     pub fade_ms: u32,
     pub enabled: bool,
     pub channels: Vec<Channel>,
@@ -32,6 +33,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            monitoring: Monitoring::default(),
             fade_ms: 0,
             enabled: false,
             channels: vec![],
@@ -50,6 +52,12 @@ impl Default for Config {
             routes: vec![],
         }
     }
+}
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct Monitoring {
+    pub output: Option<String>,
+    pub mix: Option<String>,
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
@@ -134,6 +142,7 @@ impl Default for Route {
 }
 #[derive(Clone, Debug, Default, Serialize, PartialEq)]
 pub struct Device {
+    pub muted: bool,
     pub name: String,
     pub description: String,
     pub owned: bool,
@@ -156,6 +165,7 @@ pub struct InstalledApplication {
 }
 #[derive(Clone, Debug, Default, Serialize, PartialEq)]
 pub struct Snapshot {
+    pub recording_sources: BTreeMap<String, String>,
     pub applications: Vec<InstalledApplication>,
     pub levels: Levels,
     pub fading: bool,
@@ -254,6 +264,20 @@ impl Config {
                 ensure!(outputs.insert(output), "Duplicate output assignment");
             }
         }
+        if let Some(output) = &self.monitoring.output {
+            valid_external(output)?;
+            ensure!(
+                !output.starts_with('@') && !output.starts_with("deckforge."),
+                "Listening requires an exact external output"
+            );
+            ensure!(
+                !self.mixes.iter().any(|mix| mix.outputs.contains(output)),
+                "The listening output is already assigned as a fixed mix output"
+            );
+        }
+        if let Some(mix) = &self.monitoring.mix {
+            ensure!(mixes.contains(mix), "Listening refers to an unknown mix");
+        }
         let mut routes = BTreeSet::new();
         ensure!(self.routes.len() <= 60, "Too many mixer routes");
         for r in &self.routes {
@@ -306,7 +330,14 @@ pub fn mix_sink(namespace: &str, id: &str) -> String {
     format!("deckforge.{namespace}.mix.{id}")
 }
 pub fn mix_source(namespace: &str, id: &str) -> String {
-    format!("deckforge.{namespace}.source.{id}")
+    // PipeWire's Pulse protocol treats every trailing .monitor as a sink
+    // monitor selector, even when an Audio/Source with that exact name exists.
+    // IDs contain no dots: this escape cannot collide with another mix ID.
+    if id == "monitor" {
+        format!("deckforge.{namespace}.source.monitor.input")
+    } else {
+        format!("deckforge.{namespace}.source.{id}")
+    }
 }
 
 struct Update {
@@ -512,6 +543,56 @@ mod tests {
             }],
             ..Config::default()
         }
+    }
+    #[test]
+    fn recording_source_names_escape_only_reserved_monitor_suffix() {
+        assert_eq!(
+            mix_source("fixture", "monitor"),
+            "deckforge.fixture.source.monitor.input"
+        );
+        assert_eq!(
+            mix_source("fixture", "stream"),
+            "deckforge.fixture.source.stream"
+        );
+        assert_eq!(
+            mix_source("fixture", "my-monitor"),
+            "deckforge.fixture.source.my-monitor"
+        );
+        assert!(valid_id("monitor.input").is_err());
+    }
+    #[test]
+    fn listening_preferences_are_opt_in_validated_and_backward_compatible() {
+        let mut config: Config = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(config.monitoring, Monitoring::default());
+        assert!(!config.enabled);
+        config.monitoring = Monitoring {
+            output: Some("Headphones with spaces".into()),
+            mix: Some("monitor".into()),
+        };
+        config.validate().unwrap();
+        assert!(!config.enabled);
+        let restored: Config =
+            serde_json::from_value(serde_json::to_value(&config).unwrap()).unwrap();
+        assert_eq!(config, restored);
+        for output in [
+            "",
+            "@DEFAULT_SINK@",
+            "deckforge.other.mix.monitor",
+            "line\nbreak",
+        ] {
+            config.monitoring.output = Some(output.into());
+            assert!(config.validate().is_err());
+        }
+        config.monitoring.output = Some("Headphones".into());
+        config.monitoring.mix = Some("missing".into());
+        assert!(config.validate().is_err());
+        config.monitoring.mix = None;
+        config.validate().unwrap();
+        config.mixes[1].outputs.push("Headphones".into());
+        assert!(
+            config.validate().is_err(),
+            "Duplicate listening/fixed output rejected even while inactive"
+        );
     }
     #[test]
     fn pending_controls_preserve_metadata_ramps_but_clear_overridden_levels() {
