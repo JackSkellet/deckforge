@@ -1,6 +1,8 @@
 //! Native application preferences; changes use the same implementation as CLI.
 use crate::startup::{Startup, Status};
+use crate::{device_session::Controls, host::Controller};
 use eframe::egui;
+use serde_json::{Value, json};
 use std::path::Path;
 
 pub struct Preferences {
@@ -8,6 +10,10 @@ pub struct Preferences {
     startup: Result<Startup, String>,
     status: Option<Status>,
     error: String,
+    device_id: String,
+    brightness: u8,
+    device_dirty: bool,
+    device_error: String,
 }
 impl Preferences {
     pub fn new(state: &Path, simulate: bool) -> Self {
@@ -16,10 +22,15 @@ impl Preferences {
             startup: Startup::current(state, simulate).map_err(|error| format!("{error:#}")),
             status: None,
             error: String::new(),
+            device_id: String::new(),
+            brightness: crate::brightness::DEFAULT,
+            device_dirty: false,
+            device_error: String::new(),
         }
     }
     pub fn show(&mut self) {
         self.open = true;
+        self.device_dirty = false;
         self.refresh();
     }
     fn refresh(&mut self) {
@@ -51,14 +62,80 @@ impl Preferences {
             }
         }
     }
-    pub fn ui(&mut self, ctx: &egui::Context) {
+    fn device(&mut self, ui: &mut egui::Ui, snapshot: &Value, controller: &Controller) {
+        ui.heading("Device brightness");
+        let desired: Controls =
+            serde_json::from_value(snapshot["device_settings"]["desired"].clone())
+                .unwrap_or_default();
+        let device = snapshot["device"].as_str().unwrap_or_default();
+        if self.device_id != device {
+            self.device_id = device.into();
+            self.device_dirty = false;
+            self.device_error.clear();
+        }
+        if !self.device_dirty {
+            self.brightness = desired.brightness.unwrap_or(crate::brightness::DEFAULT);
+        }
+        if ui
+            .add(
+                egui::Slider::new(&mut self.brightness, 0..=100)
+                    .suffix("%")
+                    .text("Brightness"),
+            )
+            .changed()
+        {
+            self.device_dirty = true;
+        }
+        if desired.brightness.is_none() {
+            ui.weak(
+                "No brightness setting saved yet. Apply a value to restore it after reconnecting.",
+            );
+        }
+        if ui
+            .add_enabled(
+                self.device_dirty
+                    || desired.brightness.is_none()
+                    || snapshot["device_settings"]["error"].is_string(),
+                egui::Button::new("Apply brightness"),
+            )
+            .clicked()
+        {
+            let controls = Controls {
+                brightness: Some(self.brightness),
+                ..desired
+            };
+            match controller.command(json!({"command":"device_controls","settings":controls})) {
+                Ok(()) => {
+                    self.device_dirty = false;
+                    self.device_error.clear();
+                }
+                Err(error) => self.device_error = format!("{error:#}"),
+            }
+        }
+        if snapshot["simulate"] == true {
+            ui.weak("Simulation: no device settings are sent.");
+        } else if snapshot["connected"] != true {
+            ui.weak("Saved settings apply when the device reconnects.");
+        } else if let Some(value) = snapshot["device_settings"]["applied"]["brightness"].as_u64() {
+            ui.weak(format!("Sent to device: {value}%"));
+        }
+        if let Some(error) = snapshot["device_settings"]["error"].as_str() {
+            ui.colored_label(egui::Color32::LIGHT_RED, error);
+        }
+        if !self.device_error.is_empty() {
+            ui.colored_label(egui::Color32::LIGHT_RED, &self.device_error);
+        }
+    }
+    pub fn ui(&mut self, ctx: &egui::Context, snapshot: &Value, controller: &Controller) {
         if !self.open {
             return;
         }
         let mut open = self.open;
         egui::Window::new("Preferences").open(&mut open).collapsible(false)
             .resizable(false).default_width(460.0)
-            .default_pos(ctx.content_rect().center() - egui::vec2(230.0, 200.0)).show(ctx,|ui| {
+            .default_pos(ctx.content_rect().center() - egui::vec2(230.0, 280.0)).show(ctx,|ui| {
+                self.device(ui, snapshot, controller);
+                ui.separator();
                 ui.heading("Startup");
                 let mut enabled=self.status.as_ref().is_some_and(|s|s.enabled&&s.this_session);
                 if ui.add_enabled(self.status.is_some(),egui::Checkbox::new(&mut enabled,"Start this session when I log in")).changed() {

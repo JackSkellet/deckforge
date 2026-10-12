@@ -241,7 +241,12 @@ impl Host {
             return Ok(());
         }
         if crate::system_actions::supported(&slot.uuid) {
-            if cancelled && slot.uuid != crate::system_actions::HOTKEY {
+            if cancelled
+                && !matches!(
+                    slot.uuid.as_str(),
+                    crate::system_actions::HOTKEY | crate::brightness::UUID
+                )
+            {
                 return Ok(());
             }
             return self.run_system_action(

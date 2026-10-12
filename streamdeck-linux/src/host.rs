@@ -33,6 +33,7 @@ use std::{
 use tokio::sync::mpsc;
 
 mod audio;
+mod brightness;
 mod children;
 mod device;
 mod display;
@@ -240,6 +241,8 @@ mod image_serde {
 #[derive(Serialize, Deserialize, Default)]
 struct Saved {
     #[serde(default)]
+    device_controls: HashMap<String, device_session::Controls>,
+    #[serde(default)]
     device_config: Option<device::Config>,
     #[serde(default)]
     library: Option<Library>,
@@ -255,6 +258,10 @@ enum HeldControl {
     Dial(u8),
 }
 struct Host {
+    brightness_repeats: HashMap<String, (u8, Duration)>,
+    device_controls: HashMap<String, device_session::Controls>,
+    controls_observed: device_session::Controls,
+    controls_error: Option<String>,
     connected: bool,
     connection_error: Option<String>,
     device_config: Option<device::Config>,
@@ -331,6 +338,7 @@ impl Host {
         let pending = self.state_path.with_extension("tmp");
         #[derive(Serialize)]
         struct View<'a> {
+            device_controls: &'a HashMap<String, device_session::Controls>,
             device_config: &'a Option<device::Config>,
             library: &'a Library,
             plugins: Vec<&'a Path>,
@@ -338,6 +346,7 @@ impl Host {
             globals: &'a HashMap<String, Value>,
         }
         let data = serde_json::to_vec_pretty(&View {
+            device_controls: &self.device_controls,
             device_config: &self.device_config,
             library: &self.library,
             plugins: self.plugins.iter().map(|p| p.root.as_path()).collect(),
@@ -413,6 +422,7 @@ impl Host {
     }
     fn render(&mut self) -> Result<()> {
         self.update_volume_feedback();
+        self.update_brightness_feedback();
         // Selected container children need the same imported/plugin icon lookup
         // as direct assignments. Keep inactive child caches without drawing them.
         let missing: Vec<_> = self
@@ -635,6 +645,7 @@ impl Host {
             .map(|(control, context)| (*control, context.clone()))
             .collect();
         for (control, context) in departing {
+            self.brightness_repeats.remove(&context);
             if let Some(slot) = self.slots.iter().find(|slot| slot.context == context)
                 && slot.uuid == crate::system_actions::HOTKEY
                 && let Some(worker) = &self.system_actions
@@ -790,6 +801,9 @@ impl Host {
         slot: &Slot,
         trigger: crate::system_actions::Trigger,
     ) -> Result<()> {
+        if slot.uuid == crate::brightness::UUID {
+            return self.brightness_input(slot, trigger);
+        }
         if volume::is_volume(slot) {
             return self.volume_input(slot, trigger);
         }
@@ -1143,7 +1157,7 @@ fn slot_snapshot(host: &Host, s: &Slot) -> Value {
         "has_inspector":host.actions.iter().find(|a|a.uuid==s.uuid).is_some_and(|a|a.raw["PropertyInspectorPath"].is_string()||host.plugins.iter().find(|p|p.id==a.plugin).is_some_and(|p|p.manifest["PropertyInspectorPath"].is_string()))})
 }
 fn snapshot(host: &Host) -> Value {
-    json!({"library":host.library.snapshot(),"running":host.running,"device":host.device,"firmware":host.firmware,"simulate":host.simulate,"connected":host.connected && !host.simulate,"device_online":host.connected,"connection_error":host.connection_error,
+    json!({"device_settings":{"desired":host.configured_controls(),"applied":host.controls_observed,"error":host.controls_error},"library":host.library.snapshot(),"running":host.running,"device":host.device,"firmware":host.firmware,"simulate":host.simulate,"connected":host.connected && !host.simulate,"device_online":host.connected,"connection_error":host.connection_error,
         "volume":host.volume_state,"volume_error":host.volume_error,"multi_runs":host.multi.snapshot(),"multi_pending":host.multi_pending.len(),"audio_outputs":host.audio_outputs,"audio_active":host.audio_active,"system_status":host.system_status,"slots":host.slots.iter().map(|s|slot_snapshot(host,s)).collect::<Vec<_>>(),
         "inspectors":host.inspectors.values().map(|i|json!({"context":i.context,"plugin":host.plugins[i.plugin].id,"connected":i.sender.is_some()})).collect::<Vec<_>>(),
         "actions":host.actions.iter().map(|a|json!({"uuid":a.uuid,"name":a.name,"plugin":a.plugin,"controllers":a.controllers,"states":a.raw["States"],"supported_in_multi":a.raw["SupportedInMultiActions"]!=false && !multiaction::container(&a.uuid),"multi_only":a.uuid==multiaction::DELAY,"defaults":if a.uuid=="com.elgato.streamdeck.page.goto"{json!({"PageIndex":1})}else if a.uuid==multiaction::DELAY{json!({"delay":1000})}else{crate::audio_output::defaults(&a.uuid).unwrap_or_else(||crate::system_actions::defaults(&a.uuid))}})).collect::<Vec<_>>(),
@@ -1199,6 +1213,11 @@ fn apply_control(host: &mut Host, r: Value) -> Result<()> {
         return host.library_command(&r);
     }
     match command {
+        "device_controls" => host.set_device_controls(serde_json::from_value(
+            r.get("settings")
+                .context("Device settings missing")?
+                .clone(),
+        )?),
         "export_profile" => host.export_profile(Path::new(
             r["path"].as_str().context("Export path missing")?,
         )),
@@ -1724,6 +1743,9 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
     } else {
         Saved::default()
     };
+    for controls in saved.device_controls.values() {
+        device::validate_controls(*controls)?;
+    }
     let plugin_paths = if plugins.is_empty() {
         saved.plugins.clone()
     } else {
@@ -1746,14 +1768,14 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
             name: name.into(),
             controllers: if matches!(
                 uuid,
-                crate::system_actions::HOTKEY | crate::system_actions::MULTIMEDIA
+                crate::system_actions::HOTKEY | crate::system_actions::MULTIMEDIA | crate::brightness::UUID
             ) {
                 vec!["Keypad".into(), "Encoder".into()]
             } else {
                 vec!["Keypad".into()]
             },
             plugin: "deckforge.system".into(),
-            raw: json!({"States":[{"Title":if uuid==crate::system_actions::OPEN {"Open"} else {name}}],"Encoder":{"layout":"$X1"}}),
+            raw: json!({"States":[{"Title":if uuid==crate::system_actions::OPEN {"Open"} else if uuid==crate::brightness::UUID {"Brightness"} else {name}}],"Encoder":{"layout":"$X1"}}),
         });
     }
     let remembered = device::Config::remembered(&saved);
@@ -1809,7 +1831,21 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
     }
     library.validate()?;
     let slots = library.visible()?;
+    let mut controls = saved.device_controls;
+    if !simulate
+        && !controls.contains_key(&device)
+        && let Some(previous) = previous_device
+            .as_ref()
+            .filter(|id| id.starts_with("offline-streamdeck-plus-"))
+        && let Some(previous_controls) = controls.remove(previous)
+    {
+        controls.insert(device.clone(), previous_controls);
+    }
     let mut host = Host {
+        brightness_repeats: HashMap::new(),
+        device_controls: controls,
+        controls_observed: device_session::Controls::default(),
+        controls_error: None,
         connected,
         connection_error,
         device_config: if simulate {
@@ -1927,6 +1963,7 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
             events_tx,
         ))
     };
+    host.send_device_controls();
     host.sync_visible();
     host.hydrate_library_children();
     host.hydrate_resources();
@@ -2015,11 +2052,13 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
                 host.poll_multi();
                 host.poll_triggers();
                 host.poll_feedback();
+                host.poll_brightness();
                 host.multi
                     .next_due()
                     .into_iter()
                     .chain(host.triggers.repeater.next_due())
                     .chain(host.next_feedback())
+                    .chain(host.next_brightness())
                     .min()
                     .map(|deadline| deadline.saturating_sub(host.multi_clock.elapsed()))
             };
@@ -2091,6 +2130,7 @@ fn stop_plugins(host: &mut Host) {
     if let Some(worker) = &host.system_actions {
         worker.cancel();
     }
+    host.brightness_repeats.clear();
     host.running = false;
     if let Some(redraw) = &host.redraw {
         redraw();
@@ -2168,9 +2208,13 @@ mod tests {
     }
     pub(super) fn fixture(root: &Path) -> Host {
         let mut host = Host {
+            brightness_repeats: HashMap::new(),
             connected: true,
             connection_error: None,
             device_config: None,
+            device_controls: HashMap::new(),
+            controls_observed: device_session::Controls::default(),
+            controls_error: None,
             volume: None,
             volume_state: None,
             volume_error: None,

@@ -1575,7 +1575,7 @@ impl eframe::App for Desktop {
             });
         self.deletion_dialog(ui.ctx());
         if let Some(preferences) = &mut self.preferences {
-            preferences.ui(ui.ctx());
+            preferences.ui(ui.ctx(), &self.snapshot, &self.controller);
         }
     }
 }

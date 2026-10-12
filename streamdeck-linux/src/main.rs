@@ -1,5 +1,6 @@
 mod action_trigger;
 mod audio_output;
+mod brightness;
 mod desktop;
 mod device_session;
 mod dial_stack;

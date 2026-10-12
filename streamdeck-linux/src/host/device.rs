@@ -1,6 +1,7 @@
 //! Connection state is separate from the editor's visible action instances.
 use super::*;
 use crate::device_session::Event;
+use anyhow::ensure;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub(super) struct Config {
@@ -59,7 +60,61 @@ impl Config {
 pub(super) fn info() -> Value {
     json!({"name":"Stream Deck +","type":7,"size":{"columns":4,"rows":2}})
 }
+pub(super) fn validate_controls(controls: device_session::Controls) -> Result<()> {
+    ensure!(
+        controls.brightness.is_none_or(|value| value <= 100),
+        "Brightness must be between 0 and 100"
+    );
+    ensure!(
+        controls
+            .sleep_seconds
+            .is_none_or(|value| value <= i32::MAX as u32),
+        "Device idle timer is out of range"
+    );
+    Ok(())
+}
 impl Host {
+    pub(super) fn configured_controls(&self) -> device_session::Controls {
+        self.device_controls
+            .get(&self.device)
+            .copied()
+            .unwrap_or_default()
+    }
+    pub(super) fn send_device_controls(&mut self) {
+        // An offline placeholder must not reach an as-yet unidentified deck.
+        // Its serial-specific saved settings take precedence when it connects.
+        if self
+            .device_config
+            .as_ref()
+            .is_some_and(|config| config.serial.is_some())
+            && let Some(hardware) = &self.hardware
+            && let Err(error) = hardware.send(Draw::Controls(self.configured_controls()))
+        {
+            self.controls_error = Some(format!("Device settings delivery failed: {error}"));
+        }
+    }
+    pub(super) fn set_device_controls(&mut self, controls: device_session::Controls) -> Result<()> {
+        validate_controls(controls)?;
+        let previous = self.device_controls.insert(self.device.clone(), controls);
+        if let Err(error) = self.persist() {
+            match previous {
+                Some(value) => {
+                    self.device_controls.insert(self.device.clone(), value);
+                }
+                None => {
+                    self.device_controls.remove(&self.device);
+                }
+            }
+            return Err(error);
+        }
+        self.controls_error = None;
+        self.send_device_controls();
+        self.render()?;
+        if let Some(redraw) = &self.redraw {
+            redraw();
+        }
+        Ok(())
+    }
     fn device_broadcast(&self, event: Value) {
         for plugin in &self.plugins {
             if let Some(sender) = &plugin.sender {
@@ -80,6 +135,16 @@ impl Host {
             return Ok(());
         }
         match event {
+            Event::Controls { controls, error } => {
+                self.controls_observed = controls;
+                if let Some(error) = &error {
+                    self.system_status = format!("Device settings failed: {error}");
+                    self.log(self.system_status.clone());
+                } else if self.system_status.starts_with("Device settings failed:") {
+                    self.system_status.clear();
+                }
+                self.controls_error = error;
+            }
             Event::Input(input) => {
                 if self.connected {
                     self.input(input)?;
@@ -94,6 +159,7 @@ impl Host {
             Event::Disconnected { reason } => {
                 if self.connected {
                     self.connected = false;
+                    self.controls_observed = device_session::Controls::default();
                     self.device_broadcast(
                         json!({"event":"deviceDidDisconnect","device":self.device}),
                     );
@@ -114,6 +180,13 @@ impl Host {
                 let changed = self.device != serial;
                 let announce = changed || !self.connected;
                 if changed {
+                    if self.device.starts_with("offline-streamdeck-plus-")
+                        && !self.device_controls.contains_key(&serial)
+                        && let Some(controls) = self.device_controls.remove(&self.device)
+                    {
+                        self.device_controls.insert(serial.clone(), controls);
+                    }
+                    self.controls_observed = device_session::Controls::default();
                     if self.connected {
                         self.device_broadcast(
                             json!({"event":"deviceDidDisconnect","device":self.device}),
@@ -149,6 +222,9 @@ impl Host {
                         self.emit(slot, "willAppear", json!({}));
                     }
                 }
+                if changed {
+                    self.send_device_controls();
+                }
                 self.render()?;
                 self.persist()?;
                 if announce {
@@ -169,6 +245,54 @@ impl Host {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn unidentified_offline_overrides_wait_for_serial_specific_selection() {
+        let root = tempfile::tempdir().unwrap();
+        let mut host = crate::host::tests::fixture(root.path());
+        host.simulate = false;
+        let offline = Config::select(None, None);
+        host.device = offline.id.clone();
+        host.device_config = Some(offline);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        host.hardware = Some(sender);
+        host.set_device_controls(device_session::Controls {
+            brightness: Some(20),
+            sleep_seconds: None,
+        })
+        .unwrap();
+        assert!(
+            !receiver
+                .try_iter()
+                .any(|event| matches!(event, Draw::Controls(_)))
+        );
+        host.device_controls
+            .insert("real-a".into(), device_session::Controls::default());
+        host.device_event(Event::Connected {
+            serial: "real-a".into(),
+            firmware: "test".into(),
+        })
+        .unwrap();
+        let commands: Vec<_> = receiver
+            .try_iter()
+            .filter_map(|event| match event {
+                Draw::Controls(controls) => Some(controls),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(commands, vec![device_session::Controls::default()]);
+        assert_eq!(host.configured_controls().brightness, None);
+        host.device_event(Event::Connected {
+            serial: "real-a".into(),
+            firmware: "test".into(),
+        })
+        .unwrap();
+        assert!(
+            !receiver
+                .try_iter()
+                .any(|event| matches!(event, Draw::Controls(_)))
+        );
+    }
+
     #[test]
     fn offline_identity_is_reused_and_explicit_serial_does_not_inherit_another_firmware() {
         let first = Config::select(None, None);

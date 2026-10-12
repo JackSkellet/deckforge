@@ -127,6 +127,34 @@ System actions and plugins can still perform their normal OS/network operations.
 Close/Open Application activation, text entry, hotkey switch and other desktop
 actions remain on the parity ledger.
 
+## Device brightness
+
+**Preferences → Device brightness** applies a value from 0–100%. The value is
+saved for the selected device and restored after reconnecting. Existing sessions
+without an override keep their hardware brightness until you apply a setting or
+use a brightness action.
+
+Assign **Device brightness** to a key for increase/decrease by 10 points or fixed
+100%, 75%, 50%, 25% and 0% values. The original action UUID and `actionIdx` settings
+are supported, including shipped null settings. A held increase/decrease key
+repeats after 500 ms, then every 100 ms. These are the original app's fallback
+timings; its Windows keyboard-repeat preference integration is not reproduced on
+Linux yet. Releases, page changes, cancellation and disconnects stop affected
+held actions.
+
+On a dial, turn to the next/previous 5% boundary; hold while turning for 1% steps.
+Press or tap alone does nothing. The touch strip shows the requested percentage.
+When no brightness has been chosen, the first relative action starts from the
+original app's default of 80%. Elgato documents a brightness setter but no getter,
+so this percentage is a requested value, not a physical luminance measurement.
+
+The device's raw idle timer getter/setter is also implemented and was tested on
+the connected Plus with a temporary 60-second value, restored and independently
+read back as 0. Firmware can briefly report a stale value after a setter; readback
+verification waits up to 100 ms. This timer is not yet presented as the app's
+Sleep After feature. Desktop idle, lock, screensaver selection and exact wake
+behavior still need implementation and verification.
+
 ## Soundboard
 
 Assign **Play audio** to a key, choose a file, and select Play/Stop, Overlap,
@@ -492,3 +520,10 @@ exact state/simulation arguments, background startup, quit and disable behavior.
 The test requires `gio` and `desktop-file-validate`; it does not change the real
 user's startup preference or perform a desktop logout/login. Actual next-login
 acceptance remains a separate check.
+
+`python tests/brightness_interop.py --binary target/release/deckforge` covers the
+real simulated host's key modes, held-repeat timing, dial adjustment, rendered
+feedback, nested action cancellation, per-device settings and restart. The
+explicitly gated hardware sleep tests require exclusive device ownership and a
+selected serial; ordinary test runs do not write settings to a physical device.
+The protocol implementation follows [Elgato's HID reference](https://docs.elgato.com/streamdeck/hid/general/).

@@ -12,6 +12,9 @@ const MEDIA: &str = "com.elgato.streamdeck.system.multimedia";
 /// None leaves configuration to the generic editor. Some(false) is a supported
 /// editor with no changes; merely displaying imported settings never rewrites them.
 pub fn edit(ui: &mut egui::Ui, uuid: &str, controller: &str, settings: &mut Value) -> Option<bool> {
+    if uuid == crate::brightness::UUID {
+        return Some(crate::brightness::edit(ui, controller, settings));
+    }
     if (controller != "Keypad" && !(controller == "Encoder" && matches!(uuid, HOTKEY | MEDIA)))
         || !matches!(uuid, WEBSITE | OPEN | HOTKEY | MEDIA)
     {

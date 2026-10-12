@@ -40,6 +40,22 @@ pub struct Deck {
     input: InputState,
 }
 
+// Firmware2.0.3.4 can return the previous value immediately after a setter.
+// Retry only readback, not the write, with a bounded100ms settling window.
+fn verify_sleep_readback(expected: u32, mut read: impl FnMut() -> Result<u32>) -> Result<()> {
+    let mut observed = 0;
+    for attempt in 0..=20 {
+        observed = read()?;
+        if observed == expected {
+            return Ok(());
+        }
+        if attempt < 20 {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+    bail!("sleep duration readback mismatch: requested {expected}, observed {observed}")
+}
+
 /// Prefer a descriptor match; only probe descriptor-less devices when needed to
 /// identify a requested serial. Probes read serial metadata, never images/input.
 fn select_candidate<T>(
@@ -179,6 +195,33 @@ impl Deck {
         ascii_string(&report[6..14])
     }
 
+    /// HID acceptance only: the protocol documents no brightness getter.
+    pub fn set_brightness(&self, brightness: u8) -> Result<()> {
+        self.device
+            .send_feature_report(&brightness_report(brightness)?)
+            .context("set Stream Deck + backlight brightness")
+    }
+
+    /// Read the documented idle sleep duration. Zero disables device sleep.
+    pub fn sleep_seconds(&self) -> Result<u32> {
+        let mut report = [0u8; 32];
+        report[0] = 0x0a;
+        let size = self
+            .device
+            .get_feature_report(&mut report)
+            .context("read Stream Deck + sleep duration")?;
+        ensure!(size <= report.len(), "oversized sleep duration response");
+        decode_sleep_duration(&report[..size])
+    }
+
+    /// Set and verify the documented sleep duration. Never changes firmware.
+    pub fn set_sleep_seconds(&self, seconds: u32) -> Result<()> {
+        self.device
+            .send_feature_report(&sleep_report(seconds)?)
+            .context("set Stream Deck + sleep duration")?;
+        verify_sleep_readback(seconds, || self.sleep_seconds())
+    }
+
     /// Returns state transitions only. Timeout returns an empty vector.
     /// A 50 ms timeout is recommended by Elgato. Negative timeouts are rejected.
     pub fn read_events(&mut self, timeout_ms: i32) -> Result<Vec<InputEvent>> {
@@ -228,6 +271,29 @@ fn ascii_string(bytes: &[u8]) -> Result<String> {
         "empty or non-ASCII device string"
     );
     Ok(String::from_utf8(bytes.to_vec())?)
+}
+
+// Main protocol setter reports are exactly 32 bytes, padded with zeroes.
+fn brightness_report(brightness: u8) -> Result<[u8; 32]> {
+    ensure!(brightness <= 100, "brightness must be between 0 and 100");
+    let mut report = [0; 32];
+    report[..3].copy_from_slice(&[0x03, 0x08, brightness]);
+    Ok(report)
+}
+fn sleep_report(seconds: u32) -> Result<[u8; 32]> {
+    let seconds = i32::try_from(seconds).context("sleep duration exceeds signed 32-bit seconds")?;
+    let mut report = [0; 32];
+    report[..2].copy_from_slice(&[0x03, 0x0d]);
+    report[2..6].copy_from_slice(&seconds.to_le_bytes());
+    Ok(report)
+}
+fn decode_sleep_duration(report: &[u8]) -> Result<u32> {
+    ensure!(
+        (6..=32).contains(&report.len()) && report[0] == 0x0a && report[1] == 4,
+        "invalid sleep duration response"
+    );
+    let seconds = i32::from_le_bytes(report[2..6].try_into().unwrap());
+    u32::try_from(seconds).context("device returned a negative sleep duration")
 }
 
 fn encode_jpeg(image: &DynamicImage, width: u32, height: u32) -> Result<Vec<u8>> {
@@ -374,6 +440,122 @@ fn touch_position(data: &[u8], offset: usize) -> Result<(u16, u16)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn sleep_setter_readback_tolerates_stale_values_but_bounds_mismatch() {
+        let mut calls = 0;
+        verify_sleep_readback(60, || {
+            calls += 1;
+            Ok(if calls < 3 { 0 } else { 60 })
+        })
+        .unwrap();
+        assert_eq!(calls, 3);
+        let mut calls = 0;
+        assert!(
+            verify_sleep_readback(60, || {
+                calls += 1;
+                Ok(0)
+            })
+            .is_err()
+        );
+        assert_eq!(calls, 21);
+    }
+    #[test]
+    #[ignore = "Explicit serial gate; read-only metadata query on exclusively owned device"]
+    fn real_device_sleep_duration_read_only() {
+        let Ok(serial) = std::env::var("DECKFORGE_REAL_DEVICE_SLEEP_SERIAL") else {
+            return;
+        };
+        let deck = Deck::connect(Some(&serial)).unwrap();
+        let value = deck.sleep_seconds().unwrap();
+        eprintln!(
+            "Read-only sleep duration: {value} seconds, device {}",
+            deck.serial()
+        );
+        if let Ok(expected) = std::env::var("DECKFORGE_REAL_DEVICE_SLEEP_EXPECT") {
+            assert_eq!(value, expected.parse::<u32>().unwrap());
+        }
+    }
+
+    #[test]
+    #[ignore = "Requires explicit serial gate and exclusive ownership of the real deck"]
+    fn real_device_sleep_duration_roundtrip_and_restore() {
+        let Ok(serial) = std::env::var("DECKFORGE_REAL_DEVICE_SLEEP_SERIAL") else {
+            return;
+        };
+        let deck = Deck::connect(Some(&serial)).unwrap();
+        let original = deck.sleep_seconds().unwrap();
+        struct Restore<'a> {
+            deck: &'a Deck,
+            original: u32,
+            active: bool,
+        }
+        impl Drop for Restore<'_> {
+            fn drop(&mut self) {
+                if self.active
+                    && let Err(error) = self.deck.set_sleep_seconds(self.original)
+                {
+                    eprintln!(
+                        "Failed to restore original device sleep timer {}: {error:#}",
+                        self.original
+                    );
+                }
+            }
+        }
+        let mut restore = Restore {
+            deck: &deck,
+            original,
+            active: true,
+        };
+        let temporary = if original <= i32::MAX as u32 - 60 {
+            original + 60
+        } else {
+            original - 60
+        };
+        deck.set_sleep_seconds(temporary).unwrap();
+        assert_eq!(deck.sleep_seconds().unwrap(), temporary);
+        deck.set_sleep_seconds(original).unwrap();
+        assert_eq!(deck.sleep_seconds().unwrap(), original);
+        restore.active = false;
+        eprintln!(
+            "Device {} sleep timer: {original} -> {temporary} -> {original} seconds, each getter-verified. No brightness/image/reset/firmware writes.",
+            deck.serial()
+        );
+    }
+
+    #[test]
+    fn control_feature_packets_match_documented_offsets_padding_and_limits() {
+        for brightness in [0, 37, 100] {
+            let report = brightness_report(brightness).unwrap();
+            assert_eq!(&report[..3], &[3, 8, brightness]);
+            assert_eq!(&report[3..], &[0; 29]);
+        }
+        assert!(brightness_report(101).is_err());
+        for seconds in [0, 60, 0x01020304, i32::MAX as u32] {
+            let report = sleep_report(seconds).unwrap();
+            assert_eq!(&report[..2], &[3, 13]);
+            assert_eq!(&report[2..6], &(seconds as i32).to_le_bytes());
+            assert_eq!(&report[6..], &[0; 26]);
+        }
+        assert!(sleep_report(i32::MAX as u32 + 1).is_err());
+    }
+    #[test]
+    fn sleep_duration_decode_rejects_negative_truncated_or_malformed_reports() {
+        for seconds in [0i32, 600, i32::MAX] {
+            let mut report = [0u8; 32];
+            report[..2].copy_from_slice(&[10, 4]);
+            report[2..6].copy_from_slice(&seconds.to_le_bytes());
+            assert_eq!(decode_sleep_duration(&report).unwrap(), seconds as u32);
+            assert_eq!(decode_sleep_duration(&report[..6]).unwrap(), seconds as u32);
+            assert!((0..6).all(|length| decode_sleep_duration(&report[..length]).is_err()));
+            for length in [0, 3, 5, 30] {
+                report[1] = length;
+                assert!(decode_sleep_duration(&report).is_err());
+            }
+        }
+        assert!(decode_sleep_duration(&[10, 4, 255, 255, 255, 255]).is_err());
+        assert!(decode_sleep_duration(&[11, 4, 0, 0, 0, 0]).is_err());
+        assert!(decode_sleep_duration(&[0; 33]).is_err());
+    }
     #[test]
     fn descriptor_missing_serial_can_be_selected_after_first_connection() {
         let serials = [None];
