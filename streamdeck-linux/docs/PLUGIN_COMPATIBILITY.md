@@ -32,8 +32,11 @@ creating partial files. Manifest authentication alone is not package validation.
 At the user's request, Discord execution uses a new [native Rust plugin](../plugins/discord/README.md).
 It preserves the original action/settings identities and supplies its own settings
 panel and artwork. No Wine or original Windows/macOS backend is used. The native
-replacement has host/process and mock-RPC evidence; actual Discord authorization
-and live controls remain unverified.
+replacement has host/process and mock-RPC evidence. A user-authorized live check
+completed consent, token exchange, RPC authentication and a voice-settings read.
+Physical action acceptance remains open. An empty Discord application redirect
+list caused the reported RPC 5000 error; registering a redirect and saving the
+same value in the plugin resolved that authorization failure.
 
 ## Remaining runtime work
 

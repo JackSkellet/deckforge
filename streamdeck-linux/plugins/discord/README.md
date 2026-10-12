@@ -19,7 +19,14 @@ it is separate from the downloaded Elgato Marketplace package.
 
 Select a Discord action and open **Plugin settings…**. Under **Application
 credentials**, enter your own Discord application client ID and client secret,
-then choose **Save and connect**. Discord requires RPC approval or tester access
+and a registered redirect URI, then choose **Save and connect**. In the Discord
+Developer Portal, first add a URL under **OAuth2 → Redirects** and save it. For
+local use, `http://127.0.0.1/callback` is one option. Enter exactly the same URL in
+the plugin. An empty portal redirect list can cause RPC error 5000 with a missing
+`redirect_uri` detail before credentials are exchanged. The OAuth2 URL Generator's
+scope checkboxes do not configure this plugin's requested permissions.
+
+Discord requires RPC approval or tester access
 for the application. The [official RPC guide](https://docs.discord.com/developers/topics/rpc)
 describes authorization and restrictions. Elgato's private authorization service
 and signing credentials are not reused.
@@ -56,5 +63,12 @@ Unit and mock integration tests exercise IPC framing, ping/reconnect, OAuth agai
 a local test server, command routing, held-control cleanup and private storage.
 The actual Deckforge host installs and launches the Linux executable, discovers
 all 17 actions, opens the native inspector and retains settings across restart.
-Live Discord authorization and real control behavior have not yet been verified.
-No test requires an actual Discord account or sends a real Discord command.
+The automated regression tests require no Discord account and send no real
+Discord commands. A separate user-authorized live check on 12 October 2026
+completed consent, token exchange, RPC authentication and a read-only voice
+settings query through this Rust backend. Tokens remained in private storage.
+Physical control actions and all 17 features still require live acceptance.
+
+Authentication failures now identify the failing command and RPC code. Recognized
+OAuth causes receive specific setup guidance; unknown reasons remain unknown.
+The plugin never echoes arbitrary server error text, credentials or tokens.

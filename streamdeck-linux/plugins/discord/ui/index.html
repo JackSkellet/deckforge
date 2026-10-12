@@ -11,7 +11,7 @@
 <details><summary>Application credentials</summary><p class="hint">Stored privately by this plugin. Credentials are excluded from profiles and action settings.</p>
 <label for="client-id">Application client ID</label><input id="client-id" autocomplete="off" inputmode="numeric">
 <label for="client-secret">Application client secret</label><input id="client-secret" type="password" autocomplete="off">
-<label for="redirect">Redirect URI (if configured)</label><input id="redirect" type="url" autocomplete="off" placeholder="https://…">
+<label for="redirect">Registered redirect URI</label><input id="redirect" type="url" autocomplete="off" placeholder="http://127.0.0.1/callback"><p class="hint">For new authorization, add a redirect under OAuth2 → Redirects in your Discord application settings, save it there, and enter the exact same URL here. A local example is http://127.0.0.1/callback. Leave blank only to keep the previously saved value.</p>
 <label for="scopes">Additional scopes (advanced)</label><input id="scopes" value="rpc identify rpc.voice.read rpc.voice.write" spellcheck="false"><p class="hint">Known permissions for active actions are included when you choose Save and connect. Some permissions require application approval.</p>
 <div class="buttons"><button class="primary" id="connect-new">Save and connect</button><button id="forget">Forget private credentials</button></div>
 </details><p class="hint"><a href="https://discord.com/developers/applications" target="_blank" rel="noopener">Discord application settings</a></p></section>

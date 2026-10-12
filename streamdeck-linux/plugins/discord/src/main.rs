@@ -1,6 +1,7 @@
 //! Independent native Discord plugin. No Discord connection exists before Connect.
 mod actions;
 mod auth;
+mod auth_error;
 mod config;
 mod graphics;
 mod ipc;
@@ -593,10 +594,7 @@ impl Runtime {
                 }
                 if evt == "ERROR" && ["AUTHORIZE", "AUTHENTICATE"].contains(&cmd.as_str()) {
                     let replacement_failed = cmd == "AUTHORIZE" || self.candidate_token.is_some();
-                    let message = format!(
-                        "Discord authorization failed (code {}). Check application approval/scopes, then Connect again.",
-                        frame["data"]["code"].as_i64().unwrap_or(0)
-                    );
+                    let message = auth_error::describe(&cmd, &frame["data"]);
                     self.authenticated = false;
                     let effects = self.engine.connection(false);
                     self.effects(effects).await?;
@@ -1047,6 +1045,39 @@ mod integration {
                 panic!("unexpected fixture flush")
             }
         }
+    }
+    #[tokio::test]
+    async fn repeated_auth_errors_keep_safe_details_without_changing_saved_credentials() {
+        let (mut runtime, mut rpc, _host, _dir) = runtime_fixture();
+        let before = std::fs::read(&runtime.config_path).unwrap();
+        for _ in 0..2 {
+            runtime
+                .request(
+                    "AUTHENTICATE",
+                    json!({"access_token":"fixture-token"}),
+                    None,
+                    None,
+                )
+                .await
+                .unwrap();
+            let request = queued_frame(&mut rpc).await;
+            runtime
+                .on_rpc(ipc::Event::Frame(json!({
+                    "cmd":"AUTHENTICATE", "evt":"ERROR", "nonce":request["nonce"],
+                    "data":{"code":5000,"error":{"message":"invalid_scope: NEVER_ECHO_SECRET"}}
+                })))
+                .await
+                .unwrap();
+            assert!(
+                runtime
+                    .message
+                    .contains("AUTHENTICATE failed (RPC code 5000)")
+            );
+            assert!(runtime.message.contains("invalid_scope"));
+            assert!(!runtime.message.contains("NEVER_ECHO_SECRET"));
+            assert!(!runtime.authenticated);
+        }
+        assert_eq!(std::fs::read(&runtime.config_path).unwrap(), before);
     }
     #[tokio::test]
     async fn explicit_permission_upgrade_preserves_previous_token_until_acceptance() {
