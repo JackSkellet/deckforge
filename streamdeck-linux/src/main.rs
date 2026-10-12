@@ -36,6 +36,7 @@ mod startup;
 mod system_actions;
 mod system_editor;
 mod system_keyboard;
+mod system_resume;
 mod tray;
 mod trigger_editor;
 mod volume;

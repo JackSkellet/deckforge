@@ -53,6 +53,7 @@ mod resources;
 mod screensaver;
 mod settings;
 mod stack;
+mod system_events;
 mod transfer;
 mod trigger;
 mod volume;
@@ -378,6 +379,9 @@ struct Host {
     saver: screensaver::Runtime,
     session_monitor: Option<crate::session_activity::Worker>,
     session_state: Option<crate::session_activity::State>,
+    resume_monitor: Option<crate::system_resume::Worker>,
+    resume_available: bool,
+    resume_error: Option<String>,
     brightness_repeats: HashMap<String, (u8, Duration)>,
     device_controls: HashMap<String, device_session::Controls>,
     controls_observed: device_session::Controls,
@@ -1599,7 +1603,7 @@ fn action_snapshot(host: &Host, action: &Action) -> Value {
     })
 }
 fn snapshot(host: &Host) -> Value {
-    json!({"devices":host.devices_snapshot(),"page_navigation":host.page_navigation(),"device_model":host.model,"device_name":host.device_display_name(),"device_model_name":host.model.name(),"device_custom_name":host.device_name,"overflow_slots":host.overflow_slots(),"device_capabilities":host.model.capabilities(),"device_geometry":{"columns":host.model.columns(),"rows":host.model.rows(),"keys":host.model.key_count(),"dials":host.model.dial_count(),"key_width":host.model.key_width(),"key_height":host.model.key_height(),"strip_width":host.model.strip_width(),"strip_height":host.model.strip_height()},"clipboard":host.clipboard_snapshot(),"mixer":host.mixer_snapshot(),"screensaver":{"supported":host.model==Model::Plus,"active":host.saver.active,"reason":host.saver.reason,"generation":host.saver.generation,"preferences":host.saver_preferences(),"preview":host.saver.preview,"error":host.saver.error,"frames":host.saver.animation.as_ref().map(|animation|animation.len())},"session":host.session_state,"device_settings":{"desired":host.configured_controls(),"applied":host.controls_observed,"error":host.controls_error},"library":host.library.snapshot(),"running":host.running,"device":host.device,"firmware":host.firmware,"simulate":host.simulate,"connected":host.connected && !host.simulate,"device_online":host.connected,"connection_error":host.connection_error,
+    json!({"devices":host.devices_snapshot(),"page_navigation":host.page_navigation(),"device_model":host.model,"device_name":host.device_display_name(),"device_model_name":host.model.name(),"device_custom_name":host.device_name,"overflow_slots":host.overflow_slots(),"device_capabilities":host.model.capabilities(),"device_geometry":{"columns":host.model.columns(),"rows":host.model.rows(),"keys":host.model.key_count(),"dials":host.model.dial_count(),"key_width":host.model.key_width(),"key_height":host.model.key_height(),"strip_width":host.model.strip_width(),"strip_height":host.model.strip_height()},"clipboard":host.clipboard_snapshot(),"mixer":host.mixer_snapshot(),"screensaver":{"supported":host.model==Model::Plus,"active":host.saver.active,"reason":host.saver.reason,"generation":host.saver.generation,"preferences":host.saver_preferences(),"preview":host.saver.preview,"error":host.saver.error,"frames":host.saver.animation.as_ref().map(|animation|animation.len())},"system_resume":{"available":host.resume_available,"error":host.resume_error,"enabled":host.resume_monitor.is_some()},"session":host.session_state,"device_settings":{"desired":host.configured_controls(),"applied":host.controls_observed,"error":host.controls_error},"library":host.library.snapshot(),"running":host.running,"device":host.device,"firmware":host.firmware,"simulate":host.simulate,"connected":host.connected && !host.simulate,"device_online":host.connected,"connection_error":host.connection_error,
         "volume":host.volume_state,"volume_error":host.volume_error,"multi_runs":host.multi.snapshot(),"multi_pending":host.multi_pending.len(),"audio_outputs":host.audio_outputs,"audio_active":host.audio_active,"system_status":host.system_status,"slots":host.slots.iter().map(|s|slot_snapshot(host,s)).collect::<Vec<_>>(),
         "reference_app":host.reference_app,"inspectors":host.inspectors.values().map(|i|json!({"context":i.context,"plugin":host.plugins[i.plugin].id,"connected":i.sender.is_some()})).collect::<Vec<_>>(),
         "actions":host.actions.iter().map(|action|action_snapshot(host,action)).collect::<Vec<_>>(),
@@ -1666,6 +1670,7 @@ fn apply_control(host: &mut Host, r: Value) -> Result<()> {
     let global = matches!(
         command,
         "install_plugin"
+            | "system_wake"
             | "restart_plugin"
             | "reference_app"
             | "mixer_config"
@@ -1746,6 +1751,13 @@ fn apply_control_local(host: &mut Host, r: Value) -> Result<()> {
         }
         "sleep_device" => host.sleep_device("manual"),
         "wake_device" => host.wake_device(),
+        "system_wake" => {
+            anyhow::ensure!(
+                host.simulate && host.diagnostics,
+                "System-event injection is only available in simulated diagnostic mode"
+            );
+            host.system_wake()
+        }
         "session_state" => {
             if !host.simulate || !host.diagnostics {
                 bail!("Session injection is only available in simulated diagnostic mode");
@@ -2572,6 +2584,9 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
             Some(crate::session_activity::Worker::new())
         },
         session_state: None,
+        resume_monitor: (!simulate).then(crate::system_resume::Worker::new),
+        resume_available: false,
+        resume_error: None,
         brightness_repeats: HashMap::new(),
         device_controls: controls,
         controls_observed: device_session::Controls::default(),
@@ -2874,6 +2889,7 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
             host.monitor_children();
             host.poll_system_actions();
             host.poll_session();
+            host.poll_system_resume();
             host.poll_audio();
             host.poll_volume();
             host.poll_mixer();
@@ -3063,6 +3079,9 @@ mod tests {
             saver: screensaver::Runtime::default(),
             session_monitor: None,
             session_state: None,
+            resume_monitor: None,
+            resume_available: false,
+            resume_error: None,
             brightness_repeats: HashMap::new(),
             connected: true,
             connection_error: None,

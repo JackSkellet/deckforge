@@ -78,5 +78,5 @@ unknown-plugin errors. The instance tests cover ownership, malformed requests,
 size limits and timeout behavior; installer tests preserve other URI handlers.
 All fixtures use isolated state and avoid real authorization pages and USB.
 
-Application monitoring, computer-resume events and plugin localization remain
-separate compatibility work.
+Computer-resume notifications are documented in [Plugin system events](PLUGIN_SYSTEM_EVENTS.md).
+Application monitoring and plugin localization remain separate compatibility work.
