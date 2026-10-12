@@ -208,10 +208,11 @@ pub(super) fn build_profile_files(
                     &mut files,
                     plugin_roots,
                     &mut resource_ids,
+                    profile.model,
                 )?;
             } else {
                 // Retain the legacy page-level Actions shape when no encoder exists.
-                clear_managed_positions(&mut raw["Actions"], "Keypad");
+                clear_managed_positions(&mut raw["Actions"], "Keypad", profile.model);
                 let mut occupied = HashSet::new();
                 for slot in &page.slots {
                     ensure!(
@@ -240,6 +241,7 @@ pub(super) fn build_profile_files(
                 &mut files,
                 plugin_roots,
                 &mut resource_ids,
+                profile.model,
             )?;
         }
         files.insert(
@@ -275,7 +277,7 @@ pub(super) fn build_profile_files(
         raw["Version"] = json!("2.0");
     }
     if raw.get("Device").is_none() {
-        raw["Device"] = json!({"Model":"20GBD9901","UUID":profile.device});
+        raw["Device"] = json!({"Model":profile.model.profile_model(),"UUID":profile.device});
     }
     if wrapped {
         let mut dependencies = std::collections::BTreeSet::new();
@@ -347,6 +349,7 @@ fn insert_controller_slots(
     files: &mut BTreeMap<String, Vec<u8>>,
     roots: &HashMap<String, PathBuf>,
     resource_ids: &mut HashMap<String, String>,
+    model: Model,
 ) -> Result<()> {
     if raw.get("Controllers").is_none() {
         raw["Controllers"] = json!([]);
@@ -356,9 +359,9 @@ fn insert_controller_slots(
         .context("Page Controllers must be an array")?;
     for controller in controllers.iter_mut() {
         if let Some(kind) = controller["Type"].as_str().map(str::to_owned)
-            && matches!(kind.as_str(), "Keypad" | "Encoder")
+            && matches!(kind.as_str(), "Keypad" | "Encoder" | "Neo")
         {
-            clear_managed_positions(&mut controller["Actions"], &kind);
+            clear_managed_positions(&mut controller["Actions"], &kind, model);
         }
     }
     let mut occupied = HashSet::new();
@@ -393,7 +396,7 @@ fn insert_controller_slots(
     Ok(())
 }
 
-fn clear_managed_positions(actions: &mut Value, controller: &str) {
+fn clear_managed_positions(actions: &mut Value, controller: &str, model: Model) {
     if let Some(actions) = actions.as_object_mut() {
         actions.retain(|position, _| {
             let Some((column, row)) = position.split_once(',') else {
@@ -403,8 +406,9 @@ fn clear_managed_positions(actions: &mut Value, controller: &str) {
                 return true;
             };
             !match controller {
-                "Keypad" => column < 4 && row < 2,
-                "Encoder" => column < 4 && row == 0,
+                "Keypad" => column < u32::from(model.columns()) && row < u32::from(model.rows()),
+                "Encoder" => column < u32::from(model.dial_count()) && row == 0,
+                "Neo" => model == Model::Neo && column == 1 && row == 0,
                 _ => false,
             }
         });
@@ -413,8 +417,13 @@ fn clear_managed_positions(actions: &mut Value, controller: &str) {
 
 fn managed_position(slot: &Slot) -> Result<String> {
     match slot.controller.as_str() {
-        "Keypad" if slot.index < 8 => Ok(format!("{},{}", slot.index % 4, slot.index / 4)),
-        "Encoder" if slot.index < 4 => Ok(format!("{},0", slot.index)),
+        "Keypad" if slot.index < slot.model.key_count() => Ok(format!(
+            "{},{}",
+            slot.index % slot.model.columns(),
+            slot.index / slot.model.columns()
+        )),
+        "Encoder" if slot.index < slot.model.dial_count() => Ok(format!("{},0", slot.index)),
+        "Neo" if slot.model == Model::Neo && slot.index == 1 => Ok("1,0".into()),
         _ => bail!("Invalid managed slot {} {}", slot.controller, slot.index),
     }
 }
@@ -1084,11 +1093,16 @@ mod tests {
 
     fn imported(path: &Path) -> library::Profile {
         let bundle = profile::load_bundle(path).unwrap();
+        let model = bundle.raw["Device"]["Model"]
+            .as_str()
+            .and_then(Model::from_profile_model)
+            .unwrap_or_default();
         let source_root = bundle
             .manifest_path()
             .trim_end_matches("manifest.json")
             .to_owned();
         library::Profile {
+            model,
             id: bundle.uuid.clone(),
             name: bundle.name.clone(),
             device: "test-serial".into(),
@@ -1116,10 +1130,16 @@ mod tests {
                         .slots
                         .iter()
                         .filter(|s| {
-                            (s.controller == "Keypad" && s.column < 4 && s.row < 2)
-                                || (s.controller == "Encoder" && s.column < 4 && s.row == 0)
+                            library::position_index(model, &s.controller, s.column, s.row).is_some()
                         })
-                        .map(runtime_slot)
+                        .map(|s| {
+                            let mut slot = runtime_slot(s);
+                            slot.model = model;
+                            slot.index =
+                                library::position_index(model, &s.controller, s.column, s.row)
+                                    .unwrap();
+                            slot
+                        })
                         .collect(),
                 })
                 .collect(),

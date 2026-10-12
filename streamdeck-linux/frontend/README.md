@@ -138,3 +138,23 @@ save cannot overwrite a plugin's live settings. Style payloads contain only
 changed fields; the host merges them onto the selected state's resolved style.
 Explicit title/icon resets are distinct from choosing a replacement. Unknown
 settings and other state records remain untouched.
+
+## Device geometry
+
+The canvas consumes Rust's `device_model`, `device_name`, `device_geometry` and
+`device_capabilities` snapshot fields. Key/dial counts, grid columns, image
+capabilities and available action filters come from that descriptor. Restored
+selections cannot leave an empty out-of-range physical control selected.
+
+Neo's infobar is a configurable `Neo` control at index 1; it supports compatible
+actions, settings, appearance and copying, but has no input-test button. Its two
+sensor controls navigate pages. Pedal displays software assignment labels rather
+than pretending to have key LCDs. Foreign-model profiles stay listed with their
+required device name and cannot activate on incompatible hardware. Out-of-layout
+records remain explicitly visible for inspection/export; no projection silently
+replaces their saved positions.
+
+The isolated browser fixture accepts `&model=mini`, `classic`, `xl`, `plus`,
+`plus-xl`, `neo`, or `pedal`; `&overflow=1` retains its deliberately mismatched
+assignments for inspection. These fixtures and unit tests are software evidence,
+not a claim that every physical device has been tested.

@@ -7,6 +7,9 @@ use std::collections::HashSet;
 
 /// Built-in geometry specified by the official SDK's Dials & Touch Strip guide.
 pub fn builtin(name: &str) -> Result<Value> {
+    if name == "$Neo" {
+        return Ok(json!({"id":"$Neo","controller":"Neo","items":[]}));
+    }
     let title = json!({"key":"title","type":"text","rect":[16,10,136,24],
         "font":{"size":16,"weight":600},"alignment":"left"});
     let icon = json!({"key":"icon","type":"pixmap","rect":[16,40,48,48]});
@@ -62,8 +65,10 @@ pub fn validate(layout: &Value) -> Result<()> {
         "Layout needs a string id"
     );
     ensure!(
-        layout.get("controller").is_none_or(|v| v == "Encoder"),
-        "Only Encoder layouts are supported here"
+        layout
+            .get("controller")
+            .is_none_or(|v| v == "Encoder" || v == "Neo"),
+        "Unknown layout controller"
     );
     let items = layout
         .get("items")
@@ -88,7 +93,8 @@ pub fn validate(layout: &Value) -> Result<()> {
             ),
             "Unsupported layout item type for {key}"
         );
-        let rect = rect(item)?;
+        let (width, height) = canvas_size(layout);
+        let rect = rect_in(item, width, height)?;
         let z = item.get("zOrder").and_then(Value::as_u64).unwrap_or(0);
         ensure!(z <= 700, "Invalid zOrder for {key}");
         ensure!(
@@ -110,7 +116,17 @@ pub fn validate(layout: &Value) -> Result<()> {
     Ok(())
 }
 
+pub fn canvas_size(layout: &Value) -> (u32, u32) {
+    if layout["controller"] == "Neo" {
+        (232, 50)
+    } else {
+        (200, 100)
+    }
+}
 pub fn rect(item: &Value) -> Result<[u32; 4]> {
+    rect_in(item, 200, 100)
+}
+pub fn rect_in(item: &Value, width: u32, height: u32) -> Result<[u32; 4]> {
     let a = item
         .get("rect")
         .and_then(Value::as_array)
@@ -125,8 +141,8 @@ pub fn rect(item: &Value) -> Result<[u32; 4]> {
     }
     let [x, y, w, h] = result;
     ensure!(
-        w > 0 && h > 0 && x <= 200 && y <= 100 && w <= 200 - x && h <= 100 - y,
-        "Layout rect is outside the 200x100 dial canvas"
+        w > 0 && h > 0 && x <= width && y <= height && w <= width - x && h <= height - y,
+        "Layout rect is outside its controller canvas"
     );
     Ok(result)
 }

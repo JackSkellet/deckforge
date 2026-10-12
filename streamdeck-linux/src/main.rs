@@ -6,6 +6,7 @@ mod audio_output;
 mod brightness;
 mod desktop;
 mod desktop_web;
+mod device_model;
 mod device_session;
 mod dial_stack;
 mod feedback;
@@ -46,7 +47,7 @@ use std::{
 };
 
 #[derive(Parser)]
-#[command(version, about = "Independent Rust Linux host for Stream Deck+")]
+#[command(version, about = "Independent Rust Linux host for Stream Deck")]
 struct Args {
     #[command(subcommand)]
     command: Option<Command>,
@@ -90,7 +91,7 @@ enum Command {
         #[arg(long)]
         simulate: bool,
     },
-    /// Enumerate Stream Deck+ devices without changing them.
+    /// Enumerate supported Stream Deck devices without changing them.
     Devices,
     /// Read firmware and input events; never changes displays.
     Observe {
@@ -112,6 +113,9 @@ enum Command {
     },
     /// Run the hardware and plugin host with a local browser editor.
     Serve {
+        /// Restrict hardware selection, or choose an offline/simulated device layout.
+        #[arg(long, value_parser = parse_model)]
+        model: Option<device_model::Model>,
         #[arg(long)]
         serial: Option<String>,
         #[arg(long)]
@@ -133,6 +137,9 @@ enum Command {
 
 #[derive(clap::Args, Default)]
 struct DesktopArgs {
+    /// Restrict hardware selection, or choose an offline/simulated device layout.
+    #[arg(long, value_parser = parse_model)]
+    model: Option<device_model::Model>,
     /// Use the previous egui editor while the TypeScript migration is validated.
     #[arg(long)]
     legacy_editor: bool,
@@ -152,6 +159,23 @@ struct DesktopArgs {
     #[arg(long)]
     simulate: bool,
 }
+fn parse_model(value: &str) -> Result<device_model::Model, String> {
+    device_model::Model::all()
+        .iter()
+        .copied()
+        .find(|model| model.id() == value)
+        .ok_or_else(|| {
+            format!(
+                "unknown model {value}; choose {}",
+                device_model::Model::all()
+                    .iter()
+                    .map(|model| model.id())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        })
+}
+
 fn desktop_state() -> PathBuf {
     std::env::var_os("XDG_DATA_HOME")
         .map(PathBuf::from)
@@ -222,6 +246,7 @@ fn main() -> Result<()> {
             }
             let running = match host::start(host::HostOptions {
                 serial: options.serial,
+                model: options.model,
                 plugins: options.plugin,
                 profile: options.profile,
                 state_dir: state.clone(),
@@ -244,6 +269,10 @@ fn main() -> Result<()> {
                 }
             };
             if options.legacy_editor {
+                anyhow::ensure!(
+                    running.controller.snapshot()["device_model"] == "plus",
+                    "The legacy editor supports Plus only; launch without --legacy-editor for other models"
+                );
                 desktop::run(running.controller.clone(), &state, options.background)?;
             } else {
                 desktop_web::run(
@@ -258,9 +287,10 @@ fn main() -> Result<()> {
         Command::Devices => {
             for d in hardware::Deck::enumerate()? {
                 println!(
-                    "{} · {} · {}",
-                    d.product.as_deref().unwrap_or("Stream Deck +"),
+                    "{} · {} · 0fd9:{:04x} · {}",
+                    d.product.as_deref().unwrap_or(d.model.name()),
                     d.serial.as_deref().unwrap_or("unknown serial"),
+                    d.product_id,
                     d.path
                 );
             }
@@ -268,7 +298,8 @@ fn main() -> Result<()> {
         Command::Observe { serial, seconds } => {
             let mut deck = hardware::Deck::connect(serial.as_deref())?;
             println!(
-                "Stream Deck+ {} firmware {}",
+                "{} {} firmware {}",
+                deck.model().name(),
                 deck.serial(),
                 deck.firmware_version()?
             );
@@ -301,6 +332,7 @@ fn main() -> Result<()> {
             println!("Installed {}", installed.display());
         }
         Command::Serve {
+            model,
             serial,
             plugin,
             profile,
@@ -310,7 +342,7 @@ fn main() -> Result<()> {
             seconds,
         } => {
             tokio::runtime::Runtime::new()?.block_on(host::serve(
-                serial, plugin, profile, state, port, simulate, seconds,
+                serial, plugin, profile, state, port, simulate, seconds, model,
             ))?;
         }
     }

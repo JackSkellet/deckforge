@@ -21,6 +21,7 @@ export function ActionEdit({
   onRemove,
   onCancelCut,
   openRequest,
+  destinationAvailable = true,
 }: {
   slot: Slot | undefined;
   clipboard: Clipboard | null | undefined;
@@ -31,6 +32,7 @@ export function ActionEdit({
   onPaste: () => void;
   onRemove: () => void;
   onCancelCut: () => void;
+  destinationAvailable?: boolean;
   openRequest?: { id: number; anchor?: { x: number; y: number } };
 }) {
   const ref = useRef<HTMLDetailsElement>(null);
@@ -126,7 +128,7 @@ export function ActionEdit({
         </button>
         <button
           type="button"
-          disabled={!clipboard || readonly || busy}
+          disabled={!clipboard || readonly || busy || !destinationAvailable}
           onClick={() => choose(onPaste)}
         >
           Paste <kbd>Ctrl V</kbd>
@@ -150,7 +152,7 @@ export function ActionEdit({
         )}
         <p className="clipboard-caption">
           {clipboard
-            ? `${clipboard.mode === "cut" ? "Cut" : "Copied"}: ${clipboard.name} · ${clipboard.controller === "Keypad" ? "Key" : "Dial"}`
+            ? `${clipboard.mode === "cut" ? "Cut" : "Copied"}: ${clipboard.name} · ${clipboard.controller === "Keypad" ? "Key" : clipboard.controller === "Neo" ? "Infobar" : "Dial"}`
             : "Action clipboard is empty"}
         </p>
       </div>

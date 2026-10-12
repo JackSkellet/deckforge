@@ -24,6 +24,18 @@ import { Sequence } from "./Sequence";
 import { AudioMixer } from "./Mixer";
 import { ActionEdit, isEditingTarget } from "./ActionEdit";
 import { AppearanceEditor } from "./Appearance";
+import { DeviceCanvas, canvasStyle } from "./DeviceCanvas";
+import {
+  deviceName,
+  geometry,
+  hasKeyImages,
+  supportedControllers,
+  validControl,
+  isAssignableSlot,
+  outsideControls,
+  acceptsInput,
+  controlName,
+} from "./device";
 import { Modal, Plugins, Preferences } from "./Panels";
 import {
   exportTextDrafts,
@@ -128,7 +140,7 @@ export default function App() {
           if (state.drafts) setDrafts(state.drafts);
           if (state.selected) setSelected(state.selected);
           if (typeof state.search === "string") setSearch(state.search);
-          if (["All", "Keypad", "Encoder"].includes(state.filter))
+          if (["All", "Keypad", "Encoder", "Neo"].includes(state.filter))
             setFilter(state.filter);
           importTextDrafts(state.textDrafts);
           importFormDrafts(state.formDrafts);
@@ -200,8 +212,33 @@ export default function App() {
     [accept, onError],
   );
   const slot = snapshot?.slots.find(
-    (s) => s.controller === selected.controller && s.index === selected.index,
+    (s): s is Slot & { controller: Controller } =>
+      isAssignableSlot(s) &&
+      s.controller === selected.controller &&
+      s.index === selected.index,
   );
+  const selectedAvailable =
+    !!snapshot && validControl(snapshot, selected.controller, selected.index);
+  useEffect(() => {
+    if (!snapshot) return;
+    if (
+      !validControl(snapshot, selected.controller, selected.index) &&
+      !snapshot.slots.some(
+        (s) =>
+          s.controller === selected.controller && s.index === selected.index,
+      )
+    )
+      setSelected({ controller: "Keypad", index: 0 });
+    if (filter !== "All" && !supportedControllers(snapshot).includes(filter))
+      setFilter("All");
+  }, [
+    snapshot?.device_model,
+    snapshot?.device_geometry?.keys,
+    snapshot?.device_geometry?.dials,
+    selected.controller,
+    selected.index,
+    filter,
+  ]);
   const draft = slot
     ? (drafts[slot.context] ?? reconcileDraft(undefined, slot))
     : undefined;
@@ -383,6 +420,12 @@ export default function App() {
   async function pasteAction(target = selected) {
     const clipboard = snapshot?.clipboard;
     if (!clipboard || readonly || editBusy || saving) return;
+    if (!snapshot || !validControl(snapshot, target.controller, target.index)) {
+      onError(
+        new Error("Select a control within this device layout before pasting."),
+      );
+      return;
+    }
     const destination = snapshot?.slots.find(
       (s) => s.controller === target.controller && s.index === target.index,
     );
@@ -420,7 +463,10 @@ export default function App() {
     copy: boolean,
   ) {
     if (readonly || editBusy || saving) return;
-    const source = snapshot?.slots.find((s) => s.context === context);
+    const source = snapshot?.slots.find(
+      (s): s is Slot & { controller: Controller } =>
+        isAssignableSlot(s) && s.context === context,
+    );
     const destination = snapshot?.slots.find(
       (s) => s.controller === target.controller && s.index === target.index,
     );
@@ -490,6 +536,10 @@ export default function App() {
   }
   async function assign(uuid: string, target = selected) {
     if (readonly || editBusy || saving) return;
+    if (!snapshot || !validControl(snapshot, target.controller, target.index)) {
+      onError(new Error("Select a control within this device layout first."));
+      return;
+    }
     const destination = snapshot?.slots.find(
       (s) => s.controller === target.controller && s.index === target.index,
     );
@@ -513,7 +563,12 @@ export default function App() {
     }
   }
   async function testPress() {
-    if (!slot) return;
+    if (
+      !slot ||
+      !snapshot ||
+      !acceptsInput(snapshot, slot.controller, slot.index)
+    )
+      return;
     const prefix = slot.controller === "Encoder" ? "dial" : "key";
     if (
       await run({ command: "input", event: `${prefix}Down`, index: slot.index })
@@ -565,7 +620,15 @@ export default function App() {
         )}
       </main>
     );
-  const visible = filteredActions(snapshot.actions, search, filter);
+  const availableControllers = supportedControllers(snapshot);
+  const visible = filteredActions(
+    snapshot.actions,
+    search,
+    filter,
+    availableControllers,
+  );
+  const overflow = outsideControls(snapshot);
+  const archivedOverflow = snapshot.overflow_slots ?? [];
   const categories = [...new Set(visible.map((a) => a.category))];
   const slotButton = (controller: Controller, index: number) => {
     const target = { controller, index };
@@ -579,7 +642,11 @@ export default function App() {
         key={index}
         type="button"
         className={
-          (controller === "Keypad" ? "deck-key" : "deck-dial") +
+          (controller === "Neo"
+            ? "deck-infobar"
+            : controller === "Keypad"
+              ? "deck-key"
+              : "deck-dial") +
           (active ? " selected" : "") +
           (!item ? " unassigned" : "") +
           (item &&
@@ -588,7 +655,7 @@ export default function App() {
             ? " cut-control"
             : "")
         }
-        aria-label={`${controller === "Keypad" ? "Key" : "Dial"} ${index + 1}: ${item?.name ?? "Unassigned"}`}
+        aria-label={`${controlName(controller, snapshot)}${controller === "Neo" ? "" : ` ${index + 1}`}: ${item?.name ?? "Unassigned"}`}
         aria-pressed={active}
         onClick={() => setSelected(target)}
         onContextMenu={(event) => {
@@ -640,7 +707,12 @@ export default function App() {
         }}
         onDrop={(e) => drop(e, target)}
       >
-        {item?.preview ? (
+        {!hasKeyImages(snapshot) && controller === "Keypad" ? (
+          <span className="pedal-assignment">
+            <span>Pedal {index + 1}</span>
+            <strong>{item?.name ?? "Unassigned"}</strong>
+          </span>
+        ) : item?.preview ? (
           <img
             src={
               item.preview.startsWith("data:")
@@ -686,10 +758,10 @@ export default function App() {
           <span className={"dot " + (snapshot.connected ? "online" : "")} />
           <span>
             {snapshot.simulate
-              ? "Simulated Stream Deck +"
+              ? `Simulated ${deviceName(snapshot)}`
               : snapshot.connected
-                ? "Stream Deck + connected"
-                : "Waiting for Stream Deck +"}
+                ? `${deviceName(snapshot)} connected`
+                : `Waiting for ${deviceName(snapshot)}`}
           </span>
         </div>
         <div className="header-tools">
@@ -741,6 +813,12 @@ export default function App() {
                   "profile-item " + (p.id === profile?.id ? "active" : "")
                 }
                 aria-current={p.id === profile?.id ? "page" : undefined}
+                disabled={p.compatible === false}
+                title={
+                  p.compatible === false
+                    ? `This profile requires ${p.device_name ?? p.device_model ?? "another device model"}. Its controls are preserved.`
+                    : p.device_name
+                }
                 onClick={() => run({ command: "profile_select", id: p.id })}
               >
                 <span className="profile-symbol" aria-hidden="true">
@@ -748,6 +826,7 @@ export default function App() {
                 </span>
                 <span>
                   {p.name}
+                  {p.device_name && <small>{p.device_name}</small>}
                   {p.readonly && <small>Plugin managed</small>}
                 </span>
               </button>
@@ -805,7 +884,8 @@ export default function App() {
               <h1>{profile?.name ?? "No profile"}</h1>
             </div>
             <span className="muted">
-              {snapshot.slots.length} assigned controls
+              {snapshot.slots.filter(isAssignableSlot).length - overflow.length}{" "}
+              assigned controls
             </span>
           </div>
           <div className="page-toolbar">
@@ -891,7 +971,62 @@ export default function App() {
               </div>
             </details>
           </div>
-          <div className="device-stage">
+          {(overflow.length > 0 || archivedOverflow.length > 0) && (
+            <details className="layout-overflow">
+              <summary>
+                {overflow.length + archivedOverflow.length} saved controls
+                outside this device layout
+              </summary>
+              <p>
+                These assignments are preserved. They are not sent to this
+                device.
+              </p>
+              <ul>
+                {overflow.map((item) => (
+                  <li key={item.context}>
+                    <span>
+                      {item.name} · {item.controller} {item.index + 1}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setSelected({
+                          controller: item.controller,
+                          index: item.index,
+                        })
+                      }
+                    >
+                      Inspect / copy
+                    </button>
+                  </li>
+                ))}
+                {archivedOverflow.map((item, index) => (
+                  <li key={item.context ?? index}>
+                    <details>
+                      <summary>
+                        {item.name ?? item.uuid ?? "Saved action"} ·{" "}
+                        {item.controller ?? "Unknown control"}{" "}
+                        {item.position ?? item.index ?? ""}
+                      </summary>
+                      <p>
+                        {item.reason ??
+                          "Original profile data is preserved; export the profile to retain this assignment."}
+                      </p>
+                      <pre>{JSON.stringify(item.raw ?? item, null, 2)}</pre>
+                    </details>
+                  </li>
+                ))}
+              </ul>
+            </details>
+          )}
+          <div
+            className="device-stage model-stage"
+            style={canvasStyle(snapshot)}
+            data-dials={geometry(snapshot).dials > 0}
+            data-infobar={snapshot.device_model === "neo"}
+            data-key-images={hasKeyImages(snapshot)}
+            data-rows={geometry(snapshot).rows}
+          >
             {snapshot.library.folder_depth > 0 && (
               <button
                 className="folder-back"
@@ -905,17 +1040,17 @@ export default function App() {
                 Pinned actions · appear on every page
               </div>
             )}
-            <div className="deck">
-              <div className="key-grid">
-                {Array.from({ length: 8 }, (_, i) => slotButton("Keypad", i))}
-              </div>
-              <div className="dial-grid">
-                {Array.from({ length: 4 }, (_, i) => slotButton("Encoder", i))}
-              </div>
-              <span className="deck-wordmark">STREAM DECK +</span>
-            </div>
+            <DeviceCanvas
+              snapshot={snapshot}
+              renderSlot={slotButton}
+              onPage={(direction) =>
+                void run({ command: "page_step", direction })
+              }
+            />
             <p className="stage-hint">
-              Select a control to edit · Drag an action onto a key or dial
+              {hasKeyImages(snapshot)
+                ? `Select a control to edit · Drag an action onto a ${geometry(snapshot).dials > 0 ? "key or dial" : snapshot.device_model === "neo" ? "key or the infobar" : "key"}`
+                : "Software assignments · This device has no displays"}
             </p>
             {snapshot.screensaver?.active && (
               <div className="row">
@@ -930,14 +1065,17 @@ export default function App() {
             <header className="inspector-heading">
               <div>
                 <span className="eyebrow">
-                  {selected.controller === "Keypad" ? "KEY" : "DIAL"}{" "}
-                  {selected.index + 1}
+                  {controlName(selected.controller, snapshot).toUpperCase()}
+                  {selected.controller === "Neo"
+                    ? ""
+                    : ` ${selected.index + 1}`}
                 </span>
                 <h2>{slot?.name ?? "Choose an action"}</h2>
               </div>
               <div className="row">
                 <ActionEdit
                   openRequest={editMenuRequest}
+                  destinationAvailable={selectedAvailable}
                   slot={slot}
                   clipboard={snapshot.clipboard}
                   readonly={readonly}
@@ -950,9 +1088,12 @@ export default function App() {
                 />
                 {slot && (
                   <>
-                    <button onClick={testPress}>
-                      Test {selected.controller === "Keypad" ? "press" : "push"}
-                    </button>
+                    {slot.controller !== "Neo" && (
+                      <button onClick={testPress} disabled={!selectedAvailable}>
+                        Test{" "}
+                        {selected.controller === "Keypad" ? "press" : "push"}
+                      </button>
+                    )}
                     {slot.has_inspector && (
                       <button
                         className="primary"
@@ -970,6 +1111,13 @@ export default function App() {
                 )}
               </div>
             </header>
+            {!selectedAvailable && (
+              <p className="warning outside-selected">
+                This saved action lies outside the current device layout. You
+                can inspect or copy it; hardware tests and assignment are
+                unavailable here.
+              </p>
+            )}
             {!slot ? (
               <div className="empty-control-editor">
                 <p>
@@ -1005,7 +1153,7 @@ export default function App() {
                     className="inspector-fields"
                   >
                     <AppearanceEditor
-                      key={`appearance:${slot.context}`}
+                      key={`appearance:${snapshot.device}:${snapshot.device_model}:${slot.context}`}
                       slot={slot}
                       draft={draft}
                       userTitleEnabled={action?.user_title_enabled !== false}
@@ -1144,7 +1292,7 @@ export default function App() {
                 </form>
               )
             )}
-            {slot?.controller === "Encoder" && (
+            {slot?.controller === "Encoder" && selectedAvailable && (
               <div className="test-controls">
                 <span>Test dial</span>
                 {[-1, 1].map((ticks) => (
@@ -1221,7 +1369,7 @@ export default function App() {
             <kbd>Ctrl F</kbd>
           </label>
           <div className="segmented controller-filter">
-            {(["All", "Keypad", "Encoder"] as const).map((value) => (
+            {(["All", ...availableControllers] as const).map((value) => (
               <button
                 key={value}
                 aria-pressed={filter === value}
@@ -1231,7 +1379,9 @@ export default function App() {
                   ? "Keys"
                   : value === "Encoder"
                     ? "Dials"
-                    : value}
+                    : value === "Neo"
+                      ? "Infobar"
+                      : value}
               </button>
             ))}
           </div>
@@ -1264,14 +1414,19 @@ export default function App() {
                         <strong>{a.name}</strong>
                         <small>
                           {a.controllers
-                            .map((c) => (c === "Encoder" ? "Dial" : "Key"))
+                            .filter((c) => availableControllers.includes(c))
+                            .map((c) => controlName(c, snapshot))
                             .join(" · ")}
                         </small>
                       </div>
                       <button
                         title={`Assign ${a.name} to selected ${selected.controller === "Keypad" ? "key" : "dial"}`}
                         aria-label={`Assign ${a.name}`}
-                        disabled={readonly || !allowed(a, selected.controller)}
+                        disabled={
+                          readonly ||
+                          !selectedAvailable ||
+                          !allowed(a, selected.controller)
+                        }
                         onClick={() => assign(a.uuid)}
                       >
                         +
@@ -1340,7 +1495,12 @@ export default function App() {
           ) : panel === "plugins" ? (
             <Plugins snapshot={snapshot} run={run} onError={onError} />
           ) : panel === "preferences" ? (
-            <Preferences snapshot={snapshot} run={run} onError={onError} />
+            <Preferences
+              key={`${snapshot.device}:${snapshot.device_model}`}
+              snapshot={snapshot}
+              run={run}
+              onError={onError}
+            />
           ) : (
             <pre className="logs">
               {snapshot.logs.join("\n") || "No activity yet."}

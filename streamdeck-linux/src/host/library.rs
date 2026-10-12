@@ -45,6 +45,8 @@ pub(super) struct Page {
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub(super) struct Profile {
+    #[serde(default)]
+    pub model: Model,
     pub id: String,
     pub name: String,
     pub device: String,
@@ -94,10 +96,11 @@ fn page(name: &str) -> Page {
         manifest_path: page_path(&id),
     }
 }
-fn native_profile(name: &str, device: &str) -> Profile {
+fn native_profile(name: &str, device: &str, model: Model) -> Profile {
     let pins = page("Pinned actions");
     let first = page("Page 1");
     Profile {
+        model,
         id: new_id(),
         name: name.into(),
         device: device.into(),
@@ -217,9 +220,42 @@ fn restore_resource_bindings(original: &Slot, duplicate: &mut Slot) {
     duplicate.sync_children_raw();
 }
 
+pub(super) fn position_index(model: Model, controller: &str, column: u8, row: u8) -> Option<u8> {
+    match controller {
+        "Keypad" if column < model.columns() && row < model.rows() => {
+            Some(row * model.columns() + column)
+        }
+        "Encoder" if column < model.dial_count() && row == 0 => Some(column),
+        "Neo" if model == Model::Neo && column == 1 && row == 0 => Some(1),
+        _ => None,
+    }
+}
+pub(super) fn set_slot_model(slot: &mut Slot, model: Model) {
+    slot.model = model;
+    for child in slot.children.iter_mut().flatten() {
+        child.index = slot.index;
+        set_slot_model(child, model);
+    }
+}
+fn restored_slot(item: profile::Slot, model: Model, index: u8) -> Result<Slot> {
+    let state = item.raw["State"].as_u64().unwrap_or(0);
+    anyhow::ensure!(
+        state < 1024,
+        "Saved raw action state exceeds supported state bound"
+    );
+    serde_json::from_value(json!({"model":model,"context":new_id(),"controller":item.controller,"index":index,"uuid":item.uuid,"name":item.raw["Name"].as_str().unwrap_or(&item.uuid),"settings":item.settings,"title":item.states[state as usize]["Title"].as_str().unwrap_or(""),"state":state,"feedback":{},"layout":if item.controller=="Neo" {"$Neo"} else {"$B1"},"states":item.states,"raw":item.raw,"background":null})).context("Restore profile control")
+}
+
 impl Library {
+    #[cfg(test)]
     pub fn legacy(slots: Vec<Slot>, device: &str) -> Self {
-        let mut profile = native_profile("Default profile", device);
+        Self::for_model(slots, device, Model::Plus)
+    }
+    pub fn for_model(mut slots: Vec<Slot>, device: &str, model: Model) -> Self {
+        for slot in &mut slots {
+            set_slot_model(slot, model);
+        }
+        let mut profile = native_profile("Default profile", device, model);
         profile.pages[0].slots = slots;
         Self {
             active_profile: profile.id.clone(),
@@ -227,6 +263,70 @@ impl Library {
             profiles: vec![profile],
             ..Default::default()
         }
+    }
+    pub fn restore_models(&mut self) -> Result<()> {
+        for profile in &mut self.profiles {
+            let previous_model = profile.model;
+            if let Some(model) = profile.raw["Device"]["Model"]
+                .as_str()
+                .and_then(Model::from_profile_model)
+            {
+                profile.model = model;
+            }
+            let upgraded = previous_model != profile.model;
+            for page in &mut profile.pages {
+                for slot in &mut page.slots {
+                    if slot.model != profile.model && slot.controller == "Keypad" {
+                        let col = slot.index % slot.model.columns();
+                        let row = slot.index / slot.model.columns();
+                        slot.index = position_index(profile.model, "Keypad", col, row)
+                            .context("Saved action does not fit its profile device model")?;
+                    }
+                    set_slot_model(slot, profile.model);
+                }
+                for item in if upgraded {
+                    profile::page_slots(&page.raw)?
+                } else {
+                    vec![]
+                } {
+                    if let Some(index) =
+                        position_index(profile.model, &item.controller, item.column, item.row)
+                        && !page
+                            .slots
+                            .iter()
+                            .any(|s| s.controller == item.controller && s.index == index)
+                    {
+                        page.slots.push(restored_slot(item, profile.model, index)?);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+    pub fn activate_model(&mut self, model: Model, device: &str) -> Result<()> {
+        let id = if let Some(profile) = self
+            .profiles
+            .iter()
+            .find(|p| p.model == model && p.device == device)
+            .or_else(|| self.profiles.iter().find(|p| p.model == model))
+        {
+            profile.id.clone()
+        } else {
+            let profile = native_profile(&format!("{} profile", model.name()), device, model);
+            let id = profile.id.clone();
+            self.profiles.push(profile);
+            id
+        };
+        let profile = self.profiles.iter().find(|p| p.id == id).unwrap();
+        self.active_page = self
+            .cursors
+            .get(&id)
+            .filter(|page| profile.pages.iter().any(|p| &p.id == *page))
+            .cloned()
+            .unwrap_or_else(|| profile.page_order[0].clone());
+        self.active_profile = id;
+        self.folders.clear();
+        Ok(())
     }
     pub fn validate(&self) -> Result<()> {
         let mut profiles = HashSet::new();
@@ -339,13 +439,49 @@ impl Library {
         Ok(slots.into_values().collect())
     }
     pub fn snapshot(&self) -> Value {
+        let active_model = self.current().ok().map(|p| p.model);
         json!({"active_profile":self.active_profile,"active_page":self.active_page,"folder_depth":self.folders.len(),
-            "profiles":self.profiles.iter().map(|p|json!({"id":p.id,"name":p.name,"device":p.device,"readonly":p.readonly,"pin_page":p.pin_page,"page_order":p.page_order,
+            "profiles":self.profiles.iter().map(|p|json!({"id":p.id,"name":p.name,"device":p.device,"model":p.model,"device_name":p.model.name(),"compatible":Some(p.model)==active_model,"readonly":p.readonly,"pin_page":p.pin_page,"page_order":p.page_order,
                 "pages":p.page_order.iter().filter_map(|id|p.pages.iter().find(|page| &page.id==id)).chain(p.pages.iter().filter(|page|page.id!=p.pin_page&&!p.page_order.contains(&page.id))).map(|page|json!({"id":page.id,"name":page_label(p,page),"folder":!p.page_order.contains(&page.id)})).collect::<Vec<_>>()})).collect::<Vec<_>>()})
     }
 }
 
 impl Host {
+    pub(super) fn overflow_slots(&self) -> Vec<Value> {
+        let Ok(profile) = self.library.current() else {
+            return vec![];
+        };
+        let mut result = Vec::new();
+        for page in profile
+            .pages
+            .iter()
+            .filter(|p| p.id == self.library.active_page || p.id == profile.pin_page)
+        {
+            if let Ok(slots) = profile::page_slots(&page.raw) {
+                for item in slots {
+                    if position_index(profile.model, &item.controller, item.column, item.row)
+                        .is_none()
+                    {
+                        result.push(json!({"controller":item.controller,"position":format!("{},{}",item.column,item.row),"column":item.column,"row":item.row,"uuid":item.uuid,"name":item.raw["Name"].as_str().unwrap_or(&item.uuid),"raw":item.raw,"copyable":false,"reason":"Outside this profile's device geometry; retained for export"}));
+                    }
+                }
+            }
+            if let Some(controllers) = page.raw["Controllers"].as_array() {
+                for controller in controllers {
+                    if !matches!(
+                        controller["Type"].as_str(),
+                        Some("Keypad" | "Encoder" | "Neo")
+                    ) && controller["Actions"]
+                        .as_object()
+                        .is_some_and(|a| !a.is_empty())
+                    {
+                        result.push(json!({"controller":controller["Type"],"name":"Unsupported controller","raw":controller,"copyable":false,"reason":"Unsupported controller records retained for export"}));
+                    }
+                }
+            }
+        }
+        result
+    }
     pub(super) fn resolve_state_image(&mut self, slot: &Slot, state: u64) -> Option<DynamicImage> {
         if let Some(image) = appearance::pixels(slot, state) {
             return Some(image);
@@ -481,6 +617,12 @@ impl Host {
             .iter()
             .find(|p| p.id == id)
             .context("Profile not found")?;
+        anyhow::ensure!(
+            target.model == self.model,
+            "Profile is for {}; selected device is {}",
+            target.model.name(),
+            self.model.name()
+        );
         let selected = page
             .map(str::to_owned)
             .or_else(|| self.library.cursors.get(id).cloned())
@@ -586,6 +728,15 @@ impl Host {
         owner: Option<&str>,
         readonly: bool,
     ) -> Result<String> {
+        let model = match bundle.raw["Device"]["Model"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+        {
+            Some(id) => Model::from_profile_model(id).with_context(|| {
+                format!("Unsupported profile device model {id}; source remains unchanged")
+            })?,
+            None => self.model,
+        };
         let id = new_id();
         let directory = self
             .state_path
@@ -627,11 +778,11 @@ impl Host {
                         item.uuid
                     ));
                 }
-                if !((item.controller == "Keypad" && item.column < 4 && item.row < 2)
-                    || (item.controller == "Encoder" && item.column < 4 && item.row == 0))
-                {
+                let Some(index) = position_index(model, &item.controller, item.column, item.row)
+                else {
+                    self.log(format!("Out-of-range or unsupported profile control {} {},{} retained in raw page data",item.controller,item.column,item.row));
                     continue;
-                }
+                };
                 let state = item.raw["State"].as_u64().unwrap_or(0);
                 let name = item.raw["Name"].as_str().unwrap_or(&item.uuid).to_owned();
                 let background = item.states[state as usize]["Image"]
@@ -644,14 +795,18 @@ impl Host {
                         )
                         .ok()
                     });
-                let layout = self
-                    .actions
-                    .iter()
-                    .find(|a| a.uuid == item.uuid)
-                    .and_then(|a| a.raw["Encoder"]["layout"].as_str())
-                    .unwrap_or("$B1")
-                    .to_owned();
+                let layout = if item.controller == "Neo" {
+                    "$Neo".to_owned()
+                } else {
+                    self.actions
+                        .iter()
+                        .find(|a| a.uuid == item.uuid)
+                        .and_then(|a| a.raw["Encoder"]["layout"].as_str())
+                        .unwrap_or("$B1")
+                        .to_owned()
+                };
                 slots.push(Slot {
+                    model,
                     children: vec![],
                     child_id: String::new(),
                     resources: None,
@@ -660,11 +815,7 @@ impl Host {
                     in_multi_action: false,
                     context: new_id(),
                     controller: item.controller.clone(),
-                    index: if item.controller == "Encoder" {
-                        item.column
-                    } else {
-                        item.row * 4 + item.column
-                    },
+                    index,
                     uuid: item.uuid.clone(),
                     name: name.clone(),
                     settings: item.settings.clone(),
@@ -740,6 +891,7 @@ impl Host {
             order[0].clone()
         };
         self.library.profiles.push(Profile {
+            model,
             id: id.clone(),
             name: bundle.name.clone(),
             device: self.device.clone(),
@@ -764,7 +916,7 @@ impl Host {
         let id = r["id"].as_str().unwrap_or("");
         match command {
             "profile_create" => {
-                let p = native_profile(&valid_name(&r["name"])?, &self.device);
+                let p = native_profile(&valid_name(&r["name"])?, &self.device, self.model);
                 let id = p.id.clone();
                 self.library.profiles.push(p);
                 return self.select_profile(&id, None);
@@ -989,20 +1141,25 @@ impl Host {
             "folder_create" => {
                 self.editable()?;
                 let index = u8::try_from(r["index"].as_u64().context("Key index missing")?)?;
-                if index >= 8 {
+                if index >= self.model.key_count() {
                     bail!("Key index out of range");
                 }
                 let mut folder = page(&valid_name(&r["name"])?);
                 let id = folder.id.clone();
-                folder
-                    .slots
-                    .push(navigation_slot(BACK_FOLDER, "Back", 0, json!({})));
+                folder.slots.push(navigation_slot(
+                    BACK_FOLDER,
+                    "Back",
+                    0,
+                    json!({}),
+                    self.model,
+                ));
                 self.library.current_mut()?.pages.push(folder);
                 self.library.place(navigation_slot(
                     OPEN_FOLDER,
                     &valid_name(&r["name"])?,
                     index,
                     json!({"ProfileUUID":id}),
+                    self.model,
                 ))?;
                 return self.refresh_page();
             }
@@ -1018,7 +1175,7 @@ impl Host {
                 let Some(name) = entry["Name"].as_str() else {
                     continue;
                 };
-                if entry["DeviceType"] != 7 || entry["AutoInstall"] == false {
+                if entry["DeviceType"] != self.model.sdk_type() || entry["AutoInstall"] == false {
                     continue;
                 }
                 if self
@@ -1047,7 +1204,18 @@ impl Host {
                 .or_default()
                 .insert(name, Some(id.clone()));
             if activate && switch {
-                self.select_profile(&id, None)?;
+                if self
+                    .library
+                    .profiles
+                    .iter()
+                    .find(|p| p.id == id)
+                    .is_some_and(|p| p.model != self.model)
+                {
+                    self.log("Imported profile retained for its own device model; active profile unchanged");
+                    self.persist()
+                } else {
+                    self.select_profile(&id, None)
+                }?;
             }
         }
         self.persist()
@@ -1107,7 +1275,7 @@ impl Host {
             .as_array()
             .into_iter()
             .flatten()
-            .find(|entry| entry["Name"] == name && entry["DeviceType"] == 7)
+            .find(|entry| entry["Name"] == name && entry["DeviceType"] == self.model.sdk_type())
             .cloned()
             .context("Plugin may only switch to its declared profile for this device")?;
         let owner = plugin.id.clone();
@@ -1154,8 +1322,9 @@ impl Host {
         self.select_profile(&id, page.as_deref())
     }
 }
-fn navigation_slot(uuid: &str, name: &str, index: u8, settings: Value) -> Slot {
+fn navigation_slot(uuid: &str, name: &str, index: u8, settings: Value, model: Model) -> Slot {
     Slot {
+        model,
         children: vec![],
         child_id: String::new(),
         resources: None,
@@ -1288,5 +1457,49 @@ mod resource_duplication_tests {
     #[test]
     fn profile_duplicate_preserves_nested_replacements_and_explicit_clears() {
         check_duplicate("profile_duplicate");
+    }
+}
+
+#[cfg(test)]
+mod model_tests {
+    use super::*;
+    #[test]
+    fn legacy_xl_profile_recovers_full_raw_geometry_only_once() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut host = super::super::tests::fixture(temp.path());
+        let profile = host.library.current_mut().unwrap();
+        profile.raw["Device"] = json!({"Model":"20GAT9901"});
+        let page = &mut profile.pages[0];
+        let actions:serde_json::Map<String,Value>=(0..32).map(|index|(format!("{},{}",index%8,index/8),json!({"UUID":"unknown.action","ActionID":format!("a{index}"),"Settings":{"index":index},"States":[{}]}))).collect();
+        page.raw = json!({"Controllers":[{"Type":"Keypad","Actions":actions}]});
+        let original = page.slots[0].context.clone();
+        host.library.restore_models().unwrap();
+        let profile = host.library.current().unwrap();
+        assert_eq!(profile.model, Model::Xl);
+        assert_eq!(profile.pages[0].slots.len(), 32);
+        assert!(host.library.slot(&original).is_some());
+        let removed = profile.pages[0]
+            .slots
+            .iter()
+            .find(|s| s.index == 31)
+            .unwrap()
+            .context
+            .clone();
+        host.library.remove(&removed);
+        host.library.restore_models().unwrap();
+        assert!(host.library.slot(&removed).is_none());
+        assert_eq!(host.library.current().unwrap().pages[0].slots.len(), 31);
+    }
+    #[test]
+    fn device_coordinates_do_not_alias_outside_declared_columns() {
+        for model in Model::all() {
+            assert_eq!(
+                position_index(*model, "Keypad", model.columns() - 1, model.rows() - 1),
+                Some(model.key_count() - 1)
+            );
+            assert_eq!(position_index(*model, "Keypad", model.columns(), 0), None);
+        }
+        assert_eq!(position_index(Model::Neo, "Neo", 1, 0), Some(1));
+        assert_eq!(position_index(Model::Neo, "Encoder", 0, 0), None);
     }
 }

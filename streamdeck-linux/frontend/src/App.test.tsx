@@ -95,6 +95,7 @@ beforeEach(() => {
       ["slot_copy", "slot_cut"].includes(payload.command)
     ) {
       const source = snapshot.slots.find((s) => s.context === payload.context)!;
+      if (source.controller === "Neo") throw new Error("Not assignable");
       snapshot.clipboard = {
         context: source.context,
         name: source.name,

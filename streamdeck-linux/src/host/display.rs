@@ -25,6 +25,10 @@ pub(super) fn dial_image(
         slot.layout_cache = Some(load_layout(root, &slot.layout)?);
     }
     let layout = slot.layout_cache.as_ref().unwrap();
+    anyhow::ensure!(
+        (slot.controller == "Neo") == (layout["controller"] == "Neo"),
+        "Feedback layout controller does not match action controller"
+    );
     let mut images = HashMap::new();
     if let Some(background) = &slot.background {
         images.insert("icon".to_owned(), background.clone());

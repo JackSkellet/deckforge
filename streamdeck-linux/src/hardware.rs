@@ -1,14 +1,19 @@
-//! Stream Deck + HID transport, written against Elgato's protocol documentation.
+//! Model-aware HID transport written against Elgato's official protocol documentation.
 //! Sources: https://docs.elgato.com/streamdeck/hid/general/
-//! and https://docs.elgato.com/streamdeck/hid/stream-deck-plus/.
+//! Family pages under that HID reference: mini/, stream-deck-classic/,
+//! stream-deck-xl/, stream-deck-plus/, stream-deck-plus-xl/, stream-deck-neo/.
 //! This module never resets the device or writes firmware.
 
+use crate::device_model::Model;
 use anyhow::{Context, Result, bail, ensure};
 use hidapi::{HidApi, HidDevice};
-use image::{DynamicImage, codecs::jpeg::JpegEncoder, imageops::FilterType};
+use image::{
+    DynamicImage,
+    codecs::{bmp::BmpEncoder, jpeg::JpegEncoder},
+    imageops::FilterType,
+};
 
 const VENDOR: u16 = 0x0fd9;
-const PRODUCT: u16 = 0x0084;
 const REPORT_SIZE: usize = 1024;
 const IMAGE_CHUNK_SIZE: usize = REPORT_SIZE - 8;
 
@@ -17,26 +22,44 @@ pub struct DeviceInfo {
     pub path: String,
     pub serial: Option<String>,
     pub product: Option<String>,
+    pub model: Model,
+    pub product_id: u16,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InputEvent {
     Key { index: u8, pressed: bool },
+    Sensor { index: u8, pressed: bool },
     DialPress { index: u8, pressed: bool },
     DialRotate { index: u8, ticks: i8 },
     Touch { x: u16, y: u16, long: bool },
     Swipe { start: (u16, u16), end: (u16, u16) },
 }
 
-#[derive(Default)]
 struct InputState {
-    keys: [bool; 8],
-    dials: [bool; 4],
+    model: Model,
+    keys: Vec<bool>,
+    dials: Vec<bool>,
+}
+impl Default for InputState {
+    fn default() -> Self {
+        Self::new(Model::Plus)
+    }
+}
+impl InputState {
+    fn new(model: Model) -> Self {
+        Self {
+            model,
+            keys: vec![false; usize::from(model.key_count() + model.sensor_count())],
+            dials: vec![false; usize::from(model.dial_count())],
+        }
+    }
 }
 
 pub struct Deck {
     device: HidDevice,
     serial: String,
+    model: Model,
     input: InputState,
     trace: bool,
 }
@@ -66,7 +89,7 @@ fn select_candidate<T>(
 ) -> Result<T> {
     ensure!(
         !serials.is_empty(),
-        "no matching Stream Deck + found (USB 0fd9:0084)"
+        "no matching supported Stream Deck found"
     );
     let exact: Vec<_> = serials
         .iter()
@@ -76,7 +99,7 @@ fn select_candidate<T>(
         .collect();
     ensure!(
         exact.len() <= 1,
-        "multiple Stream Deck + devices found; select a unique serial number"
+        "multiple Stream Deck devices found; select a unique serial number"
     );
     if let Some(index) = exact.first() {
         let (serial, device) = open(*index)?;
@@ -98,7 +121,7 @@ fn select_candidate<T>(
             Ok((serial, device)) if serial == wanted => {
                 ensure!(
                     matched.is_none(),
-                    "multiple Stream Deck + devices have the selected serial"
+                    "multiple Stream Deck devices have the selected serial"
                 );
                 matched = Some(device);
             }
@@ -114,9 +137,9 @@ fn select_candidate<T>(
         return Ok(device);
     }
     if let Some(error) = first_error {
-        return Err(error.context("Could not identify a Stream Deck + with the selected serial"));
+        return Err(error.context("Could not identify a Stream Deck with the selected serial"));
     }
-    bail!("no matching Stream Deck + found (USB 0fd9:0084)")
+    bail!("no matching supported Stream Deck found")
 }
 
 impl Deck {
@@ -124,7 +147,7 @@ impl Deck {
         let api = HidApi::new().context("initialize HID enumeration")?;
         Ok(api
             .device_list()
-            .filter(|d| d.vendor_id() == VENDOR && d.product_id() == PRODUCT)
+            .filter(|d| d.vendor_id() == VENDOR && Model::from_product(d.product_id()).is_some())
             .map(|d| DeviceInfo {
                 path: d.path().to_string_lossy().into_owned(),
                 serial: d
@@ -132,16 +155,29 @@ impl Deck {
                     .filter(|serial| !serial.is_empty())
                     .map(str::to_owned),
                 product: d.product_string().map(str::to_owned),
+                model: Model::from_product(d.product_id()).unwrap(),
+                product_id: d.product_id(),
             })
             .collect())
     }
 
     /// Refuses ambiguous selection instead of choosing an arbitrary connected deck.
     pub fn connect(serial: Option<&str>) -> Result<Self> {
+        Self::connect_with_model(serial, None)
+    }
+    pub fn connect_with_model(serial: Option<&str>, model: Option<Model>) -> Result<Self> {
+        ensure!(
+            model.is_none_or(|m| m.capabilities().transport_supported),
+            "HID protocol for the requested model is not implemented"
+        );
         let api = HidApi::new().context("initialize HID")?;
         let devices: Vec<_> = api
             .device_list()
-            .filter(|d| d.vendor_id() == VENDOR && d.product_id() == PRODUCT)
+            .filter(|d| {
+                d.vendor_id() == VENDOR
+                    && Model::from_product(d.product_id())
+                        .is_some_and(|m| model.is_none_or(|wanted| wanted == m))
+            })
             .collect();
         let serials: Vec<_> = devices
             .iter()
@@ -149,21 +185,20 @@ impl Deck {
             .collect();
         select_candidate(serial, &serials, |index| {
             let info = devices[index];
+            let model = Model::from_product(info.product_id()).unwrap();
             let device = info
                 .open_device(&api)
-                .context("open Stream Deck +; check hidraw permissions")?;
+                .context("open Stream Deck; check hidraw permissions")?;
             let serial = match serials[index] {
                 Some(serial) => serial.to_owned(),
                 None => {
                     let mut report = [0u8; 32];
-                    report[0] = 0x06;
+                    report[0] = if model == Model::Mini { 0x03 } else { 0x06 };
                     let size = device
                         .get_feature_report(&mut report)
-                        .context("read Stream Deck + serial")?;
-                    ensure!(size >= 2 && report[0] == 0x06, "invalid serial response");
-                    let len = usize::from(report[1]);
-                    ensure!(len > 0 && len <= size - 2, "truncated serial response");
-                    ascii_string(&report[2..2 + len])?
+                        .context("read Stream Deck serial")?;
+                    ensure!(size <= report.len(), "oversized serial response");
+                    decode_serial(model, &report[..size])?
                 }
             };
             Ok((
@@ -171,11 +206,16 @@ impl Deck {
                 Self {
                     device,
                     serial,
-                    input: InputState::default(),
+                    model,
+                    input: InputState::new(model),
                     trace: std::env::var_os("DECKFORGE_TRACE_HID").is_some(),
                 },
             ))
         })
+    }
+
+    pub fn model(&self) -> Model {
+        self.model
     }
 
     pub fn serial(&self) -> &str {
@@ -185,42 +225,51 @@ impl Deck {
     /// Reads the primary AP2 firmware version, without changing device state.
     pub fn firmware_version(&self) -> Result<String> {
         let mut report = [0u8; 32];
-        report[0] = 0x05;
+        report[0] = if self.model == Model::Mini {
+            0xa1
+        } else {
+            0x05
+        };
         let size = self
             .device
             .get_feature_report(&mut report)
             .context("read AP2 firmware version")?;
-        ensure!(
-            size >= 14 && report[0] == 0x05 && report[1] == 0x0c,
-            "invalid firmware response"
-        );
-        ascii_string(&report[6..14])
+        ensure!(size <= report.len(), "oversized firmware response");
+        decode_firmware(self.model, &report[..size])
     }
 
     /// HID acceptance only: the protocol documents no brightness getter.
     pub fn set_brightness(&self, brightness: u8) -> Result<()> {
         self.device
-            .send_feature_report(&brightness_report(brightness)?)
-            .context("set Stream Deck + backlight brightness")
+            .send_feature_report(&model_brightness_report(self.model, brightness)?)
+            .context("set Stream Deck backlight brightness")
     }
 
     /// Read the documented idle sleep duration. Zero disables device sleep.
     pub fn sleep_seconds(&self) -> Result<u32> {
+        ensure!(
+            self.model.capabilities().sleep,
+            "model has no documented sleep timer"
+        );
         let mut report = [0u8; 32];
-        report[0] = 0x0a;
+        report[0] = if self.model == Model::Mini {
+            0xa3
+        } else {
+            0x0a
+        };
         let size = self
             .device
             .get_feature_report(&mut report)
-            .context("read Stream Deck + sleep duration")?;
+            .context("read Stream Deck sleep duration")?;
         ensure!(size <= report.len(), "oversized sleep duration response");
-        decode_sleep_duration(&report[..size])
+        decode_model_sleep(self.model, &report[..size])
     }
 
     /// Set and verify the documented sleep duration. Never changes firmware.
     pub fn set_sleep_seconds(&self, seconds: u32) -> Result<()> {
         self.device
-            .send_feature_report(&sleep_report(seconds)?)
-            .context("set Stream Deck + sleep duration")?;
+            .send_feature_report(&model_sleep_report(self.model, seconds)?)
+            .context("set Stream Deck sleep duration")?;
         verify_sleep_readback(seconds, || self.sleep_seconds())
     }
 
@@ -242,48 +291,232 @@ impl Deck {
         let size = self
             .device
             .read_timeout(&mut report, timeout_ms)
-            .context("read Stream Deck + input")?;
+            .context("read Stream Deck input")?;
         ensure!(size <= report.len(), "oversized input report");
         self.input.packet(&report[..size], decode)
     }
 
-    /// Resizes to 120x120 and encodes RGB JPEG. Stream Deck + needs no rotation.
+    /// Encode at the model's physical key dimensions and required orientation.
     pub fn set_key_image(&self, key: u8, image: &DynamicImage) -> Result<()> {
-        ensure!(key < 8, "key index must be between 0 and 7");
-        let jpeg = encode_jpeg(image, 120, 120)?;
-        self.write_image(0x07, key, &jpeg)
+        ensure!(
+            self.model.capabilities().key_images,
+            "This model has no key displays"
+        );
+        ensure!(
+            key < self.model.key_count(),
+            "key index outside device layout"
+        );
+        if self.model == Model::Mini {
+            let bmp = encode_mini_bmp(image)?;
+            self.write_reports(&mini_image_reports(key, &bmp)?)
+        } else {
+            let jpeg = encode_model_jpeg(
+                self.model,
+                image,
+                self.model.key_width(),
+                self.model.key_height(),
+            )?;
+            self.write_image(0x07, key, &jpeg)
+        }
     }
-
-    /// Resizes to the complete 800x100 touch strip, without rotating the image.
+    /// Complete display window: a touch strip on Plus, non-touch infobar on Neo.
     pub fn set_touchscreen_image(&self, image: &DynamicImage) -> Result<()> {
-        let jpeg = encode_jpeg(image, 800, 100)?;
+        ensure!(
+            self.model.capabilities().strip,
+            "This model has no display window"
+        );
+        let jpeg = encode_model_jpeg(
+            self.model,
+            image,
+            self.model.strip_width(),
+            self.model.strip_height(),
+        )?;
         self.write_image(0x0b, 0, &jpeg)
     }
-
-    /// Full 800x480 LCD, including the key area and strip. No rotation required.
+    /// SDK Neo layouts are 232x50; its HID window is 248x58. Center the logical
+    /// canvas with an 8x4 black gutter (Linux policy; native offset unverified).
+    pub fn set_infobar_image(&self, image: &DynamicImage) -> Result<()> {
+        ensure!(
+            self.model == Model::Neo,
+            "Infobar output requires Stream Deck Neo"
+        );
+        self.set_touchscreen_image(&neo_infobar_frame(image)?)
+    }
     pub fn set_lcd_image(&self, image: &DynamicImage) -> Result<()> {
-        let jpeg = encode_jpeg(image, 800, 480)?;
+        ensure!(
+            self.model.capabilities().full_lcd,
+            "Single-transfer full LCD images are unsupported for this model"
+        );
+        let jpeg = encode_model_jpeg(
+            self.model,
+            image,
+            self.model.lcd_width(),
+            self.model.lcd_height(),
+        )?;
         self.write_image(0x08, 0, &jpeg)
     }
-
     fn write_image(&self, command: u8, key: u8, jpeg: &[u8]) -> Result<()> {
-        // Build all packets before writing, so validation cannot fail mid-transfer.
-        for report in image_reports(command, key, jpeg)? {
-            let written = self.device.write(&report).context("write image chunk")?;
-            ensure!(
-                written == REPORT_SIZE,
-                "short HID image write: {written}/{REPORT_SIZE}"
-            );
-        }
+        let reports = model_image_reports(self.model, command, key, jpeg)?;
+        self.write_reports(&reports)?;
         if self.trace {
             eprintln!(
-                "HID image accepted: command=0x{command:02x} key={key} chunks={} jpeg_bytes={}",
-                jpeg.len().div_ceil(IMAGE_CHUNK_SIZE),
+                "HID image accepted: model={} command=0x{command:02x} key={key} chunks={} jpeg_bytes={}",
+                self.model.id(),
+                reports.len(),
                 jpeg.len()
             );
         }
         Ok(())
     }
+    fn write_reports(&self, reports: &[[u8; REPORT_SIZE]]) -> Result<()> {
+        for report in reports {
+            let written = self.device.write(report).context("write image chunk")?;
+            ensure!(
+                written == REPORT_SIZE,
+                "short HID image write: {written}/{REPORT_SIZE}"
+            );
+        }
+        Ok(())
+    }
+}
+
+fn decode_serial(model: Model, report: &[u8]) -> Result<String> {
+    if model == Model::Mini {
+        ensure!(
+            (6..=32).contains(&report.len()) && report[0] == 0x03,
+            "invalid Mini serial response"
+        );
+        ascii_string(&report[5..])
+    } else {
+        ensure!(
+            (2..=32).contains(&report.len()) && report[0] == 0x06,
+            "invalid serial response"
+        );
+        let len = usize::from(report[1]);
+        ensure!(
+            len > 0 && len <= report.len() - 2,
+            "truncated serial response"
+        );
+        ascii_string(&report[2..2 + len])
+    }
+}
+fn decode_firmware(model: Model, report: &[u8]) -> Result<String> {
+    if model == Model::Mini {
+        ensure!(
+            (17..=32).contains(&report.len()) && report[0] == 0xa1,
+            "invalid Mini firmware response"
+        );
+        ascii_string(&report[5..17])
+    } else {
+        ensure!(
+            (14..=32).contains(&report.len()) && report[0] == 0x05 && report[1] == 0x0c,
+            "invalid firmware response"
+        );
+        ascii_string(&report[6..14])
+    }
+}
+fn model_brightness_report(model: Model, brightness: u8) -> Result<[u8; 32]> {
+    ensure!(
+        model.capabilities().brightness,
+        "model has no brightness control"
+    );
+    if model == Model::Mini {
+        ensure!(brightness <= 100, "brightness must be between 0 and 100");
+        let mut report = [0; 32];
+        report[..6].copy_from_slice(&[0x05, 0x55, 0xaa, 0xd1, 0x01, brightness]);
+        Ok(report)
+    } else {
+        brightness_report(brightness)
+    }
+}
+fn model_sleep_report(model: Model, seconds: u32) -> Result<[u8; 32]> {
+    ensure!(
+        model.capabilities().sleep,
+        "model sleep control unavailable"
+    );
+    let mut report = sleep_report(seconds)?;
+    if model == Model::Mini {
+        report[..2].copy_from_slice(&[0x0b, 0xa2]);
+    }
+    Ok(report)
+}
+fn decode_model_sleep(model: Model, report: &[u8]) -> Result<u32> {
+    if model == Model::Mini {
+        ensure!(
+            (6..=32).contains(&report.len()) && report[0] == 0xa3,
+            "invalid Mini sleep response"
+        );
+        let mut normalized = report.to_vec();
+        normalized[0] = 0x0a;
+        decode_sleep_duration(&normalized)
+    } else {
+        decode_sleep_duration(report)
+    }
+}
+fn neo_infobar_frame(image: &DynamicImage) -> Result<DynamicImage> {
+    ensure!(image.width() > 0 && image.height() > 0, "image is empty");
+    let mut frame = image::RgbaImage::from_pixel(248, 58, image::Rgba([0, 0, 0, 255]));
+    let logical = image.resize_exact(232, 50, FilterType::Lanczos3).to_rgba8();
+    image::imageops::overlay(&mut frame, &logical, 8, 4);
+    Ok(DynamicImage::ImageRgba8(frame))
+}
+fn encode_model_jpeg(
+    model: Model,
+    image: &DynamicImage,
+    width: u32,
+    height: u32,
+) -> Result<Vec<u8>> {
+    ensure!(
+        image.width() > 0 && image.height() > 0 && width > 0 && height > 0,
+        "empty image dimensions"
+    );
+    let image = image.resize_exact(width, height, FilterType::Lanczos3);
+    let image = match model {
+        Model::Classic | Model::Xl | Model::Neo => image.rotate180(),
+        Model::PlusXl => image.rotate270(),
+        Model::Plus => image,
+        _ => bail!("model does not use JPEG images"),
+    };
+    encode_jpeg(&image, image.width(), image.height())
+}
+fn encode_mini_bmp(image: &DynamicImage) -> Result<Vec<u8>> {
+    ensure!(image.width() > 0 && image.height() > 0, "image is empty");
+    let image = image
+        .resize_exact(80, 80, FilterType::Lanczos3)
+        .rotate90()
+        .to_rgb8();
+    let mut bytes = Vec::new();
+    BmpEncoder::new(&mut bytes).encode(image.as_raw(), 80, 80, image::ExtendedColorType::Rgb8)?;
+    Ok(bytes)
+}
+fn mini_image_reports(key: u8, bmp: &[u8]) -> Result<Vec<[u8; REPORT_SIZE]>> {
+    ensure!(key < 6, "Mini key index must be between 0 and 5");
+    ensure!(!bmp.is_empty(), "empty image transfer");
+    const CHUNK: usize = REPORT_SIZE - 16;
+    ensure!(
+        bmp.len().div_ceil(CHUNK) <= 256,
+        "Mini image exceeds chunk index range"
+    );
+    let count = bmp.len().div_ceil(CHUNK);
+    Ok(bmp
+        .chunks(CHUNK)
+        .enumerate()
+        .map(|(index, chunk)| {
+            let mut report = [0; REPORT_SIZE];
+            // Windows7.6 ESDHW20GAI9901Imp direct-key writer0x14062e920:
+            // zero-based chunks; Show Image is enabled only on the final chunk.
+            report[..6].copy_from_slice(&[
+                0x02,
+                0x01,
+                index as u8,
+                0,
+                u8::from(index + 1 == count),
+                key,
+            ]);
+            report[16..16 + chunk.len()].copy_from_slice(chunk);
+            report
+        })
+        .collect())
 }
 
 fn ascii_string(bytes: &[u8]) -> Result<String> {
@@ -334,9 +567,24 @@ fn encode_jpeg(image: &DynamicImage, width: u32, height: u32) -> Result<Vec<u8>>
     Ok(bytes)
 }
 
+#[cfg(test)]
 fn image_reports(command: u8, key: u8, jpeg: &[u8]) -> Result<Vec<[u8; REPORT_SIZE]>> {
+    model_image_reports(Model::Plus, command, key, jpeg)
+}
+fn model_image_reports(
+    model: Model,
+    command: u8,
+    key: u8,
+    jpeg: &[u8],
+) -> Result<Vec<[u8; REPORT_SIZE]>> {
     ensure!(
-        (command == 0x07 && key < 8) || (matches!(command, 0x08 | 0x0b) && key == 0),
+        model != Model::Mini && model.capabilities().transport_supported,
+        "Model does not use the main image protocol"
+    );
+    ensure!(
+        (command == 0x07 && model.capabilities().key_images && key < model.key_count())
+            || (command == 0x08 && model.capabilities().full_lcd && key == 0)
+            || (command == 0x0b && model.capabilities().strip && key == 0),
         "invalid image command or key"
     );
     ensure!(!jpeg.is_empty(), "empty image transfer");
@@ -363,6 +611,30 @@ fn image_reports(command: u8, key: u8, jpeg: &[u8]) -> Result<Vec<[u8; REPORT_SI
 }
 
 impl InputState {
+    fn key_events(&mut self, data: &[u8]) -> Result<Vec<InputEvent>> {
+        ensure!(
+            data.len() == self.keys.len(),
+            "unexpected key/sensor payload length"
+        );
+        ensure!(data.iter().all(|&v| v <= 1), "invalid key or sensor state");
+        let mut events = Vec::new();
+        for (index, (&value, old)) in data.iter().zip(&mut self.keys).enumerate() {
+            let pressed = value == 1;
+            if pressed != *old {
+                let index = index as u8;
+                events.push(if index < self.model.key_count() {
+                    InputEvent::Key { index, pressed }
+                } else {
+                    InputEvent::Sensor {
+                        index: index - self.model.key_count(),
+                        pressed,
+                    }
+                });
+                *old = pressed;
+            }
+        }
+        Ok(events)
+    }
     fn packet(&mut self, report: &[u8], decode: bool) -> Result<Option<Vec<InputEvent>>> {
         if report.is_empty() {
             return Ok(None);
@@ -374,6 +646,13 @@ impl InputState {
         }))
     }
     fn decode(&mut self, report: &[u8]) -> Result<Vec<InputEvent>> {
+        if self.model == Model::Mini {
+            ensure!(
+                report.len() == 65 && report[0] == 1,
+                "invalid Mini input report"
+            );
+            return self.key_events(&report[1..7]);
+        }
         ensure!(
             report.len() >= 4 && report.len() <= 512,
             "invalid input report size"
@@ -385,21 +664,13 @@ impl InputState {
         let mut events = Vec::new();
         match report[1] {
             0x00 => {
-                ensure!(size == 8, "expected eight key states");
-                ensure!(data.iter().all(|&v| v <= 1), "invalid key state");
-                for (index, (&value, old)) in data.iter().zip(&mut self.keys).enumerate() {
-                    let pressed = value == 1;
-                    if pressed != *old {
-                        events.push(InputEvent::Key {
-                            index: index as u8,
-                            pressed,
-                        });
-                        *old = pressed;
-                    }
-                }
+                return self.key_events(data);
             }
             0x03 => {
-                ensure!(size == 5, "expected four dial states and subtype");
+                ensure!(
+                    !self.dials.is_empty() && size == self.dials.len() + 1,
+                    "unexpected encoder payload length"
+                );
                 match data[0] {
                     0x00 => {
                         ensure!(
@@ -433,11 +704,21 @@ impl InputState {
                 }
             }
             0x02 => {
+                ensure!(
+                    self.model.capabilities().touchscreen,
+                    "model has no touch screen"
+                );
                 ensure!(!data.is_empty(), "missing touch subtype");
                 match data[0] {
                     0x01 | 0x02 => {
-                        ensure!(size == 0x0a, "invalid tap payload length");
-                        let (x, y) = touch_position(data, 2)?;
+                        // Plus XL's published TAP length is 0x10; long PRESS 0x0a.
+                        let expected = if self.model == Model::PlusXl && data[0] == 1 {
+                            0x10
+                        } else {
+                            0x0a
+                        };
+                        ensure!(size == expected, "invalid tap payload length");
+                        let (x, y) = touch_position(self.model, data, 2)?;
                         events.push(InputEvent::Touch {
                             x,
                             y,
@@ -447,8 +728,8 @@ impl InputState {
                     0x03 => {
                         ensure!(size == 0x0e, "invalid swipe payload length");
                         events.push(InputEvent::Swipe {
-                            start: touch_position(data, 2)?,
-                            end: touch_position(data, 6)?,
+                            start: touch_position(self.model, data, 2)?,
+                            end: touch_position(self.model, data, 6)?,
                         });
                     }
                     other => bail!("unknown touch subtype: {other:#04x}"),
@@ -460,12 +741,12 @@ impl InputState {
     }
 }
 
-fn touch_position(data: &[u8], offset: usize) -> Result<(u16, u16)> {
+fn touch_position(model: Model, data: &[u8], offset: usize) -> Result<(u16, u16)> {
     let x = u16::from_le_bytes([data[offset], data[offset + 1]]);
     let y = u16::from_le_bytes([data[offset + 2], data[offset + 3]]);
     ensure!(
-        x < 800 && y < 100,
-        "touch coordinates outside 800x100 window"
+        u32::from(x) < model.strip_width() && u32::from(y) < model.strip_height(),
+        "touch coordinates outside display window"
     );
     Ok((x, y))
 }
@@ -473,6 +754,252 @@ fn touch_position(data: &[u8], offset: usize) -> Result<(u16, u16)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn pedal_shared_metadata_and_three_inputs_but_no_display_or_controls() {
+        // Native7.6 Pedal vtable uses the same serial/fw/input functions as2019.
+        let mut state = InputState::new(Model::Pedal);
+        assert_eq!(
+            state.decode(&input(0, &[1, 0, 1])).unwrap(),
+            vec![
+                InputEvent::Key {
+                    index: 0,
+                    pressed: true
+                },
+                InputEvent::Key {
+                    index: 2,
+                    pressed: true
+                }
+            ]
+        );
+        assert_eq!(
+            state.decode(&input(0, &[0, 1, 0])).unwrap(),
+            vec![
+                InputEvent::Key {
+                    index: 0,
+                    pressed: false
+                },
+                InputEvent::Key {
+                    index: 1,
+                    pressed: true
+                },
+                InputEvent::Key {
+                    index: 2,
+                    pressed: false
+                }
+            ]
+        );
+        assert!(state.decode(&input(0, &[0; 8])).is_err());
+        assert!(state.decode(&input(3, &[1, 0, 0, 0, 0])).is_err());
+        assert_eq!(
+            decode_serial(Model::Pedal, b"\x06\x0ePEDAL123456789\0").unwrap(),
+            "PEDAL123456789"
+        );
+        let mut fw = [0; 32];
+        fw[0] = 5;
+        fw[1] = 12;
+        fw[6..14].copy_from_slice(b"1.2.3.4\0");
+        assert_eq!(decode_firmware(Model::Pedal, &fw).unwrap(), "1.2.3.4");
+        assert!(model_brightness_report(Model::Pedal, 50).is_err());
+        assert!(model_sleep_report(Model::Pedal, 0).is_err());
+        for command in [7, 8, 0x0b] {
+            assert!(model_image_reports(Model::Pedal, command, 0, &[1]).is_err());
+        }
+    }
+    #[test]
+    fn neo_infobar_centers_logical_canvas_without_stretching_into_gutter() {
+        let image = DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            232,
+            50,
+            image::Rgb([255, 255, 255]),
+        ));
+        let frame = neo_infobar_frame(&image).unwrap();
+        let rgb = frame.to_rgb8();
+        assert_eq!(rgb.dimensions(), (248, 58));
+        for (x, y, p) in rgb.enumerate_pixels() {
+            assert_eq!(
+                p.0,
+                if (8..240).contains(&x) && (4..54).contains(&y) {
+                    [255; 3]
+                } else {
+                    [0; 3]
+                }
+            );
+        }
+        let jpeg = encode_model_jpeg(Model::Neo, &frame, 248, 58).unwrap();
+        let decoded = image::load_from_memory(&jpeg).unwrap();
+        assert_eq!((decoded.width(), decoded.height()), (248, 58));
+        let reports = model_image_reports(Model::Neo, 0x0b, 0, &jpeg).unwrap();
+        assert!(reports.iter().all(|r| r[0..3] == [2, 0x0b, 0]));
+        let mut rebuilt = Vec::new();
+        for report in reports {
+            let len = u16::from_le_bytes([report[4], report[5]]) as usize;
+            assert!(len <= 1016);
+            rebuilt.extend_from_slice(&report[8..8 + len]);
+        }
+        assert_eq!(rebuilt, jpeg);
+    }
+    #[test]
+    fn all_key_payloads_and_neo_sensors_are_separate_and_validated_atomically() {
+        for model in [
+            Model::Classic,
+            Model::Xl,
+            Model::Plus,
+            Model::PlusXl,
+            Model::Neo,
+        ] {
+            let mut state = InputState::new(model);
+            let count = usize::from(model.key_count() + model.sensor_count());
+            let mut data = vec![0; count];
+            data[usize::from(model.key_count() - 1)] = 1;
+            assert_eq!(
+                state.decode(&input(0, &data)).unwrap(),
+                vec![InputEvent::Key {
+                    index: model.key_count() - 1,
+                    pressed: true
+                }]
+            );
+            assert!(state.decode(&input(0, &data)).unwrap().is_empty());
+            let before = state.keys.clone();
+            data[0] = 2;
+            assert!(state.decode(&input(0, &data)).is_err());
+            assert_eq!(state.keys, before);
+            if model == Model::Neo {
+                data[0] = 0;
+                data[8] = 1;
+                data[9] = 1;
+                assert_eq!(
+                    state.decode(&input(0, &data)).unwrap(),
+                    vec![
+                        InputEvent::Sensor {
+                            index: 0,
+                            pressed: true
+                        },
+                        InputEvent::Sensor {
+                            index: 1,
+                            pressed: true
+                        }
+                    ]
+                );
+                assert!(state.decode(&input(3, &[1, 1, 0, 0, 0])).is_err());
+            }
+        }
+    }
+    #[test]
+    fn mini_input_is_fixed_65_bytes_with_six_states_at_offset_one() {
+        let mut state = InputState::new(Model::Mini);
+        let mut report = [0; 65];
+        report[0] = 1;
+        report[6] = 1;
+        report[64] = 99;
+        assert_eq!(
+            state.decode(&report).unwrap(),
+            vec![InputEvent::Key {
+                index: 5,
+                pressed: true
+            }]
+        );
+        assert!(state.decode(&report[..7]).is_err());
+        report[1] = 2;
+        assert!(state.decode(&report).is_err());
+    }
+    #[test]
+    fn plus_xl_six_encoders_and_documented_touch_lengths() {
+        let mut state = InputState::new(Model::PlusXl);
+        assert_eq!(
+            state.decode(&input(3, &[1, 0, 0, 0, 0, 0, 255])).unwrap(),
+            vec![InputEvent::DialRotate {
+                index: 5,
+                ticks: -1
+            }]
+        );
+        let mut tap = vec![0; 16];
+        tap[0] = 1;
+        tap[2..4].copy_from_slice(&1199u16.to_le_bytes());
+        tap[4] = 99;
+        assert_eq!(
+            state.decode(&input(2, &tap)).unwrap(),
+            vec![InputEvent::Touch {
+                x: 1199,
+                y: 99,
+                long: false
+            }]
+        );
+        assert!(state.decode(&input(2, &tap[..10])).is_err());
+        tap[2..4].copy_from_slice(&1200u16.to_le_bytes());
+        assert!(state.decode(&input(2, &tap)).is_err());
+    }
+    #[test]
+    fn mini_features_are_not_main_protocol_reports() {
+        let report = model_brightness_report(Model::Mini, 73).unwrap();
+        assert_eq!(&report[..6], &[5, 0x55, 0xaa, 0xd1, 1, 73]);
+        assert!(report[6..].iter().all(|&b| b == 0));
+        let report = model_sleep_report(Model::Mini, 600).unwrap();
+        assert_eq!(&report[..6], &[0x0b, 0xa2, 0x58, 2, 0, 0]);
+        assert_eq!(
+            decode_model_sleep(Model::Mini, &[0xa3, 4, 0x58, 2, 0, 0]).unwrap(),
+            600
+        );
+        assert!(decode_model_sleep(Model::Plus, &[0xa3, 4, 0, 0, 0, 0]).is_err());
+        assert_eq!(
+            decode_serial(Model::Mini, b"\x03\0\0\0\0SERIAL123\0").unwrap(),
+            "SERIAL123"
+        );
+        let mut fw = [0; 32];
+        fw[0] = 0xa1;
+        fw[5..10].copy_from_slice(b"1.2.3");
+        assert_eq!(decode_firmware(Model::Mini, &fw).unwrap(), "1.2.3");
+        assert!(decode_firmware(Model::Plus, &fw).is_err());
+    }
+    #[test]
+    fn model_images_have_correct_rotation_dimensions_and_chunk_geometry() {
+        let image = DynamicImage::ImageRgb8(image::RgbImage::from_fn(80, 80, |x, y| {
+            if x < 40 && y < 40 {
+                image::Rgb([255, 0, 0])
+            } else {
+                image::Rgb([0, 0, 0])
+            }
+        }));
+        let bmp = encode_mini_bmp(&image).unwrap();
+        assert_eq!(&bmp[..2], b"BM");
+        let decoded = image::load_from_memory(&bmp).unwrap().to_rgb8();
+        assert_eq!(decoded.dimensions(), (80, 80));
+        assert_eq!(decoded.get_pixel(70, 10).0, [255, 0, 0]);
+        assert_eq!(decoded.get_pixel(10, 10).0, [0, 0, 0]);
+        let reports = mini_image_reports(5, &bmp).unwrap();
+        for (index, report) in reports.iter().enumerate() {
+            assert_eq!(
+                &report[..6],
+                &[
+                    2,
+                    1,
+                    index as u8,
+                    0,
+                    u8::from(index + 1 == reports.len()),
+                    5
+                ]
+            );
+            assert!(report[6..16].iter().all(|&v| v == 0));
+        }
+        let rebuilt: Vec<u8> = reports
+            .iter()
+            .flat_map(|r| r[16..].iter().copied())
+            .take(bmp.len())
+            .collect();
+        assert_eq!(rebuilt, bmp);
+        assert!(mini_image_reports(6, &bmp).is_err());
+        let classic = encode_model_jpeg(Model::Classic, &image, 72, 72).unwrap();
+        let classic = image::load_from_memory(&classic).unwrap().to_rgb8();
+        assert!(classic.get_pixel(60, 60).0[0] > 240);
+        assert!(classic.get_pixel(10, 10).0[0] < 10);
+        let xl = encode_model_jpeg(Model::PlusXl, &image, 1200, 100).unwrap();
+        let xl = image::load_from_memory(&xl).unwrap().to_rgb8();
+        assert_eq!(xl.dimensions(), (100, 1200));
+        assert!(xl.get_pixel(10, 1100).0[0] > 240);
+        assert!(model_image_reports(Model::PlusXl, 7, 35, &[1]).is_ok());
+        assert!(model_image_reports(Model::PlusXl, 7, 36, &[1]).is_err());
+        assert!(model_image_reports(Model::Classic, 0x0b, 0, &[1]).is_err());
+        assert!(model_image_reports(Model::Neo, 0x0b, 0, &[1]).is_ok());
+    }
     #[test]
     fn sleeping_reports_are_activity_without_decoding_or_mutating_button_state() {
         let mut state = InputState::default();

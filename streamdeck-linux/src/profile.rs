@@ -453,6 +453,23 @@ fn parse_bundle(files: BTreeMap<String, Vec<u8>>) -> Result<ProfileBundle> {
     })
 }
 
+/// Geometry is interpreted by the owning device descriptor, never by a fixed
+/// four-column projection. Unknown controller records remain available in raw.
+pub(crate) fn page_slots(page: &Value) -> Result<Vec<Slot>> {
+    let mut slots = Vec::new();
+    if let Some(controllers) = page["Controllers"].as_array() {
+        for controller in controllers {
+            let kind = controller["Type"].as_str().unwrap_or("{Unknown}");
+            if matches!(kind, "Keypad" | "Encoder" | "Neo") {
+                parse_slots(kind, &controller["Actions"], &mut slots)?;
+            }
+        }
+    } else if page["Actions"].is_object() {
+        parse_slots("Keypad", &page["Actions"], &mut slots)?;
+    }
+    Ok(slots)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn make_page(
     name: &str,
@@ -473,7 +490,7 @@ fn make_page(
                 .get("Type")
                 .and_then(Value::as_str)
                 .unwrap_or("{Unknown}");
-            if !["Keypad", "Encoder"].contains(&kind) {
+            if !["Keypad", "Encoder", "Neo"].contains(&kind) {
                 warnings.push(format!("Unsupported controller {kind} is preserved"));
                 let mut unknown_slots = Vec::new();
                 // Unknown controller schemas must survive even when their action

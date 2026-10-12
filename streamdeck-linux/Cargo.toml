@@ -16,7 +16,7 @@ eframe = { version = "0.36.2", default-features = false, features = ["default_fo
 fontdue = "0.9"
 futures-util = "0.3"
 hidapi = "2.6"
-image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "bmp"] }
 libc = "0.2"
 percent-encoding = "2"
 serde = { version = "1", features = ["derive"] }

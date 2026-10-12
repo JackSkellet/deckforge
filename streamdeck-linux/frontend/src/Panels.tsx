@@ -3,6 +3,7 @@ import { request, pick } from "./bridge";
 import { Field, Check, SelectField } from "./Fields";
 import type { Snapshot, RecordValue } from "./model";
 import { getFormDraft, setFormDraft } from "./transient";
+import { deviceName } from "./device";
 export type Run = (payload: RecordValue) => Promise<boolean>;
 export function Modal({
   title,
@@ -238,7 +239,14 @@ export function Preferences({
   return (
     <>
       <div className="segmented">
-        {["Device", "Startup & about", "Screensaver"].map((name) => (
+        {[
+          "Device",
+          "Startup & about",
+          ...(snapshot.device_capabilities?.sleep === false ||
+          snapshot.screensaver?.supported === false
+            ? []
+            : ["Screensaver"]),
+        ].map((name) => (
           <button
             key={name}
             aria-pressed={tab === name}
@@ -250,30 +258,47 @@ export function Preferences({
       </div>
       {tab === "Device" && (
         <section className="preference-section">
-          <h3>Stream Deck +</h3>
+          <h3>{deviceName(snapshot)}</h3>
           <p className="hint">
             {snapshot.device} · Firmware {snapshot.firmware || "unavailable"}
           </p>
-          <Field label={`Brightness · ${brightness}%`}>
-            <input
-              type="range"
-              min="0"
-              max="100"
-              value={brightness}
-              onChange={(e) => setBrightness(Number(e.target.value))}
-            />
-          </Field>
-          <button
-            className="primary"
-            onClick={() =>
-              run({
-                command: "device_controls",
-                settings: { ...snapshot.device_settings?.desired, brightness },
-              })
-            }
-          >
-            Apply brightness
-          </button>
+          {snapshot.device_capabilities?.brightness !== false ? (
+            <>
+              <Field label={`Brightness · ${brightness}%`}>
+                <input
+                  type="range"
+                  min="0"
+                  max="100"
+                  value={brightness}
+                  onChange={(e) => setBrightness(Number(e.target.value))}
+                />
+              </Field>
+              <button
+                className="primary"
+                onClick={() =>
+                  run({
+                    command: "device_controls",
+                    settings: {
+                      ...snapshot.device_settings?.desired,
+                      brightness,
+                    },
+                  })
+                }
+              >
+                Apply brightness
+              </button>
+            </>
+          ) : (
+            <p className="hint">
+              This device has no display brightness control.
+            </p>
+          )}
+          {snapshot.device_capabilities?.transport_supported === false && (
+            <p className="warning">
+              Physical transport for this model is not supported yet. The
+              current layout is available for profile editing and simulation.
+            </p>
+          )}
           {!snapshot.connected && (
             <p className="hint">
               Saved settings apply when your device reconnects.
@@ -312,73 +337,76 @@ export function Preferences({
           </p>
         </section>
       )}
-      {tab === "Screensaver" && (
-        <section className="preference-section">
-          <p className="hint">
-            Existing screensaver controls. Further screensaver work is deferred.
-          </p>
-          <SelectField
-            label="Sleep after"
-            value={minutes}
-            options={[
-              [0, "Never"],
-              [5, "5 minutes"],
-              [15, "15 minutes"],
-              [30, "30 minutes"],
-              [60, "1 hour"],
-              [120, "2 hours"],
-            ]}
-            onChange={(value) => setMinutes(Number(value))}
-          />
-          <Check
-            label="Disable controls while the computer is locked"
-            checked={lock}
-            onChange={setLock}
-          />
-          <Field label="Image">
-            <input readOnly value={image ?? "Deckforge logo"} />
-          </Field>
-          <div className="row">
-            <button
-              onClick={() =>
-                pick("image")
-                  .then((value) => {
-                    if (value) setImage(value);
+      {tab === "Screensaver" &&
+        snapshot.device_capabilities?.sleep !== false &&
+        snapshot.screensaver?.supported !== false && (
+          <section className="preference-section">
+            <p className="hint">
+              Existing screensaver controls. Further screensaver work is
+              deferred.
+            </p>
+            <SelectField
+              label="Sleep after"
+              value={minutes}
+              options={[
+                [0, "Never"],
+                [5, "5 minutes"],
+                [15, "15 minutes"],
+                [30, "30 minutes"],
+                [60, "1 hour"],
+                [120, "2 hours"],
+              ]}
+              onChange={(value) => setMinutes(Number(value))}
+            />
+            <Check
+              label="Disable controls while the computer is locked"
+              checked={lock}
+              onChange={setLock}
+            />
+            <Field label="Image">
+              <input readOnly value={image ?? "Deckforge logo"} />
+            </Field>
+            <div className="row">
+              <button
+                onClick={() =>
+                  pick("image")
+                    .then((value) => {
+                      if (value) setImage(value);
+                    })
+                    .catch(onError)
+                }
+              >
+                Choose image…
+              </button>
+              <button onClick={() => setImage(null)}>Use logo</button>
+            </div>
+            <div className="row">
+              <button
+                className="primary"
+                onClick={() =>
+                  run({
+                    command: "screensaver",
+                    device: snapshot.device,
+                    after_minutes: minutes,
+                    disable_on_lock: lock,
+                    image,
                   })
-                  .catch(onError)
-              }
-            >
-              Choose image…
-            </button>
-            <button onClick={() => setImage(null)}>Use logo</button>
-          </div>
-          <div className="row">
-            <button
-              className="primary"
-              onClick={() =>
-                run({
-                  command: "screensaver",
-                  device: snapshot.device,
-                  after_minutes: minutes,
-                  disable_on_lock: lock,
-                  image,
-                })
-              }
-            >
-              Apply
-            </button>
-            <button onClick={() => run({ command: "sleep_device" })}>
-              Preview on device
-            </button>
-            <button onClick={() => run({ command: "wake_device" })}>
-              Wake
-            </button>
-          </div>
-          {snapshot.screensaver?.error && (
-            <p className="error">{snapshot.screensaver.error}</p>
-          )}
-        </section>
-      )}
+                }
+              >
+                Apply
+              </button>
+              <button onClick={() => run({ command: "sleep_device" })}>
+                Preview on device
+              </button>
+              <button onClick={() => run({ command: "wake_device" })}>
+                Wake
+              </button>
+            </div>
+            {snapshot.screensaver?.error && (
+              <p className="error">{snapshot.screensaver.error}</p>
+            )}
+          </section>
+        )}
     </>
   );
 }

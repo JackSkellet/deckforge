@@ -1,0 +1,242 @@
+// @vitest-environment jsdom
+import { afterEach, beforeEach, it, expect, vi } from "vitest";
+import {
+  cleanup,
+  render,
+  screen,
+  fireEvent,
+  waitFor,
+} from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import App from "./App";
+import { installFixture } from "./fixture";
+import { fixtureDevice } from "./fixtureDevices";
+import {
+  supportedControllers,
+  validControl,
+  acceptsInput,
+  outsideControls,
+} from "./device";
+import { importFormDrafts, importTextDrafts } from "./transient";
+import type { Snapshot } from "./model";
+beforeEach(() => {
+  importFormDrafts({});
+  importTextDrafts({});
+  HTMLDialogElement.prototype.showModal = function () {
+    this.setAttribute("open", "");
+  };
+  HTMLDialogElement.prototype.close = function () {
+    this.removeAttribute("open");
+  };
+});
+afterEach(() => {
+  cleanup();
+  delete window.deckforge;
+});
+function setup(id: string) {
+  installFixture(id);
+  const original = window.deckforge!.request;
+  const request = vi.fn(original);
+  window.deckforge!.request = request;
+  return request;
+}
+it("uses exact supported geometry for every descriptor, including display-only Neo input semantics", () => {
+  for (const [id, keys, dials] of [
+    ["mini", 6, 0],
+    ["classic", 15, 0],
+    ["xl", 32, 0],
+    ["plus", 8, 4],
+    ["plus-xl", 36, 6],
+    ["neo", 8, 0],
+    ["pedal", 3, 0],
+  ] as const) {
+    const model = fixtureDevice(id);
+    const snapshot = {
+      device_model: id,
+      device_geometry: model.geometry,
+    } as Snapshot;
+    expect(model.geometry.keys).toBe(keys);
+    expect(model.geometry.dials).toBe(dials);
+    expect(validControl(snapshot, "Keypad", keys - 1)).toBe(true);
+    expect(validControl(snapshot, "Keypad", keys)).toBe(false);
+    expect(validControl(snapshot, "Encoder", dials)).toBe(false);
+    expect(supportedControllers(snapshot).includes("Encoder")).toBe(dials > 0);
+    expect(validControl(snapshot, "Neo", 1)).toBe(id === "neo");
+    expect(acceptsInput(snapshot, "Neo", 1)).toBe(false);
+  }
+});
+it("assigns and copies key31 on XL without a fixed eight-key limit", async () => {
+  const request = setup("xl");
+  const user = userEvent.setup();
+  render(<App />);
+  const key = await screen.findByRole("button", { name: "Key 32: Counter" });
+  expect(screen.getAllByRole("button", { name: /^Key \d+:/ })).toHaveLength(32);
+  await user.click(key);
+  await user.click(screen.getByRole("button", { name: "Assign Website" }));
+  await waitFor(() =>
+    expect(request).toHaveBeenCalledWith("command", {
+      command: "assign",
+      controller: "Keypad",
+      index: 31,
+      uuid: "com.elgato.streamdeck.system.website",
+    }),
+  );
+  fireEvent.keyDown(screen.getByRole("button", { name: "Key 32: Website" }), {
+    key: "c",
+    ctrlKey: true,
+  });
+  await waitFor(() =>
+    expect(request).toHaveBeenCalledWith("command", {
+      command: "slot_copy",
+      context: "fixture-31-Keypad",
+    }),
+  );
+});
+it("renders key35 and assigns/copies dial5 on Plus XL", async () => {
+  const request = setup("plus-xl");
+  const user = userEvent.setup();
+  render(<App />);
+  await screen.findByRole("button", { name: "Key 36: Counter" });
+  expect(screen.getAllByRole("button", { name: /^Key \d+:/ })).toHaveLength(36);
+  expect(screen.getAllByRole("button", { name: /^Dial \d+:/ })).toHaveLength(6);
+  const dial = screen.getByRole("button", { name: "Dial 6: System volume" });
+  await user.click(dial);
+  await user.click(
+    screen.getByRole("button", { name: "Assign System volume" }),
+  );
+  await waitFor(() =>
+    expect(request).toHaveBeenCalledWith("command", {
+      command: "assign",
+      controller: "Encoder",
+      index: 5,
+      uuid: "com.elgato.streamdeck.system.multimedia",
+    }),
+  );
+  fireEvent.keyDown(dial, { key: "c", ctrlKey: true });
+  await waitFor(() =>
+    expect(request).toHaveBeenCalledWith("command", {
+      command: "slot_copy",
+      context: "fixture-5-Encoder",
+    }),
+  );
+  await user.click(screen.getByRole("button", { name: "Dial 5: Unassigned" }));
+  fireEvent.keyDown(
+    screen.getByRole("button", { name: "Dial 5: Unassigned" }),
+    { key: "v", ctrlKey: true },
+  );
+  await waitFor(() =>
+    expect(request).toHaveBeenCalledWith("command", {
+      command: "slot_paste",
+      controller: "Encoder",
+      index: 4,
+      expected_target: null,
+    }),
+  );
+});
+it("does not offer dials or encoder-only actions on Mini", async () => {
+  setup("mini");
+  render(<App />);
+  await screen.findByRole("button", { name: "Key 6: Open application" });
+  expect(screen.getAllByRole("button", { name: /^Key \d+:/ })).toHaveLength(6);
+  expect(screen.queryByRole("button", { name: /^Dial \d+:/ })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Dials" })).toBeNull();
+  expect(
+    screen.queryByRole("button", { name: "Assign System volume" }),
+  ).toBeNull();
+  expect(screen.getByText("Simulated Stream Deck Mini")).toBeTruthy();
+});
+it("makes the Neo infobar configurable without a Test input and exposes page sensors", async () => {
+  const request = setup("neo");
+  const user = userEvent.setup();
+  render(<App />);
+  const infobar = await screen.findByRole("button", {
+    name: "Infobar: Profile infobar",
+  });
+  await user.click(infobar);
+  expect(
+    screen.queryByRole("button", { name: /^Test (press|push)$/ }),
+  ).toBeNull();
+  await user.click(
+    screen.getByRole("button", { name: "Assign Profile infobar" }),
+  );
+  await waitFor(() =>
+    expect(request).toHaveBeenCalledWith("command", {
+      command: "assign",
+      controller: "Neo",
+      index: 1,
+      uuid: "fixture.neo.infobar",
+    }),
+  );
+  await user.click(screen.getByRole("button", { name: "Next page" }));
+  expect(request).toHaveBeenCalledWith("command", {
+    command: "page_step",
+    direction: 1,
+  });
+});
+it("shows Pedal software assignments without fake key LCDs or brightness", async () => {
+  setup("pedal");
+  const user = userEvent.setup();
+  render(<App />);
+  const pedals = await screen.findAllByRole("button", { name: /^Pedal \d+:/ });
+  expect(pedals).toHaveLength(3);
+  expect(pedals.every((button) => !button.querySelector("img"))).toBe(true);
+  expect(
+    screen.getByText("Software assignments · This device has no displays"),
+  ).toBeTruthy();
+  await user.click(screen.getByRole("button", { name: "Preferences" }));
+  expect(screen.queryByRole("slider", { name: /Brightness/ })).toBeNull();
+  expect(
+    screen.getByText("This device has no display brightness control."),
+  ).toBeTruthy();
+});
+it("reports retained out-of-layout records and disables foreign profile activation", async () => {
+  setup("mini");
+  const snapshot = await window.deckforge!.request<Snapshot>("snapshot");
+  snapshot.slots.push({
+    ...structuredClone(snapshot.slots[0]),
+    context: "outside",
+    index: 31,
+  });
+  snapshot.overflow_slots = [
+    {
+      controller: "Encoder",
+      position: "5,0",
+      name: "Retained dial",
+      reason: "Outside source layout",
+      raw: { Future: { keep: true } },
+    },
+  ];
+  snapshot.library.profiles.push({
+    id: "foreign",
+    name: "Large profile",
+    device_name: "Stream Deck XL",
+    device_model: "xl",
+    compatible: false,
+    readonly: false,
+    pin_page: "foreign-pins",
+    page_order: [],
+    pages: [],
+  });
+  const original = window.deckforge!.request;
+  window.deckforge!.request = vi.fn(async (method, payload) =>
+    method === "snapshot"
+      ? structuredClone(snapshot)
+      : original(method, payload),
+  );
+  render(<App />);
+  expect(outsideControls(snapshot)).toHaveLength(1);
+  const summary = await screen.findByText(
+    "2 saved controls outside this device layout",
+  );
+  fireEvent.click(summary);
+  fireEvent.click(screen.getByRole("button", { name: "Inspect / copy" }));
+  expect(
+    (screen.getByRole("button", { name: "Test press" }) as HTMLButtonElement)
+      .disabled,
+  ).toBe(true);
+  expect(
+    (screen.getByRole("button", { name: /Large profile/ }) as HTMLButtonElement)
+      .disabled,
+  ).toBe(true);
+  expect(screen.getByText(/These assignments are preserved/)).toBeTruthy();
+});

@@ -1,6 +1,7 @@
+import type { DeviceGeometry, DeviceCapabilities } from "./device";
 // Vendor action records deliberately remain open: unfamiliar fields must survive editing.
 export type RecordValue = Record<string, any>;
-export type Controller = "Keypad" | "Encoder";
+export type Controller = "Keypad" | "Encoder" | "Neo";
 export interface Action {
   user_title_enabled?: boolean;
   uuid: string;
@@ -63,6 +64,9 @@ export interface Slot {
   trigger_description?: RecordValue;
 }
 export interface Profile {
+  compatible?: boolean;
+  device_name?: string;
+  device_model?: string;
   id: string;
   name: string;
   readonly: boolean;
@@ -78,6 +82,11 @@ export interface Clipboard {
   context: string;
 }
 export interface Snapshot {
+  device_model?: string;
+  device_name?: string;
+  device_geometry?: DeviceGeometry;
+  device_capabilities?: DeviceCapabilities;
+  overflow_slots?: RecordValue[];
   clipboard?: Clipboard | null;
   running: boolean;
   device: string;
@@ -389,12 +398,14 @@ export function filteredActions(
   actions: Action[],
   query: string,
   controller: Controller | "All",
+  availableControllers: Controller[] = ["Keypad", "Encoder"],
 ) {
   const words = query.toLocaleLowerCase().trim().split(/\s+/).filter(Boolean);
   return actions.filter(
     (a) =>
       a.visible !== false &&
       !a.multi_only &&
+      a.controllers.some((value) => availableControllers.includes(value)) &&
       (controller === "All" || a.controllers.includes(controller)) &&
       words.every((word) =>
         `${a.name} ${a.category} ${a.plugin_name} ${a.uuid}`

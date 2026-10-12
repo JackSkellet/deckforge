@@ -52,6 +52,7 @@ mod stack;
 mod transfer;
 mod trigger;
 mod volume;
+use crate::device_model::Model;
 use inspectors::Inspector;
 use library::Library;
 
@@ -142,6 +143,7 @@ impl Controller {
 }
 #[derive(Clone)]
 pub struct HostOptions {
+    pub model: Option<Model>,
     pub serial: Option<String>,
     pub plugins: Vec<PathBuf>,
     pub profile: Option<PathBuf>,
@@ -202,6 +204,8 @@ pub fn start(options: HostOptions) -> Result<EmbeddedHost> {
 }
 #[derive(Clone, Serialize, Deserialize)]
 struct Slot {
+    #[serde(default)]
+    model: Model,
     #[serde(default, alias = "multi_children")]
     children: Vec<Vec<Slot>>,
     #[serde(default, alias = "multi_id")]
@@ -324,6 +328,8 @@ mod image_serde {
 #[derive(Serialize, Deserialize, Default)]
 struct Saved {
     #[serde(default)]
+    model: Model,
+    #[serde(default)]
     mixer: crate::mixer::Config,
     #[serde(default)]
     screensavers: HashMap<String, screensaver::Preferences>,
@@ -347,6 +353,7 @@ enum HeldControl {
     Dial(u8),
 }
 struct Host {
+    model: Model,
     mixer_config: crate::mixer::Config,
     mixer: Option<crate::mixer::Worker>,
     mixer_state: crate::mixer::Snapshot,
@@ -403,7 +410,8 @@ struct Host {
     state_path: PathBuf,
     logs: Vec<String>,
     simulate: bool,
-    dial_pressed: [bool; 4],
+    dial_pressed: Vec<bool>,
+    sensor_pressed: Vec<bool>,
     held: HashMap<HeldControl, String>,
     released: HashSet<HeldControl>,
     retired: VecDeque<(String, String)>,
@@ -412,8 +420,7 @@ struct Host {
 fn action_payload(slot: &Slot) -> Value {
     let mut payload = json!({"controller":slot.controller,"settings":slot.settings,"state":slot.state,"isInMultiAction":slot.in_multi_action,"resources":slot.resources.clone().unwrap_or_default()});
     if !slot.in_multi_action {
-        payload["coordinates"] =
-            json!({"column":slot.index%4,"row":if slot.controller=="Encoder"{0}else{slot.index/4}});
+        payload["coordinates"] = json!({"column":if slot.controller=="Keypad" {slot.index%slot.model.columns()}else{slot.index},"row":if slot.controller=="Keypad" {slot.index/slot.model.columns()}else{0}});
     }
     payload
 }
@@ -421,7 +428,20 @@ impl Host {
     fn import_profile(&mut self, path: &Path) -> Result<()> {
         self.sync_visible();
         let id = self.import_library(path, None, false)?;
-        self.select_profile(&id, None)
+        if self
+            .library
+            .profiles
+            .iter()
+            .find(|p| p.id == id)
+            .is_some_and(|p| p.model != self.model)
+        {
+            self.log(
+                "Imported profile retained for its own device model; active profile unchanged",
+            );
+            self.persist()
+        } else {
+            self.select_profile(&id, None)
+        }
     }
     fn log(&mut self, message: impl Into<String>) {
         let message = message.into();
@@ -436,6 +456,7 @@ impl Host {
         let pending = self.state_path.with_extension("tmp");
         #[derive(Serialize)]
         struct View<'a> {
+            model: Model,
             mixer: &'a crate::mixer::Config,
             reference_app: &'a Option<PathBuf>,
             screensavers: &'a HashMap<String, screensaver::Preferences>,
@@ -447,6 +468,7 @@ impl Host {
             globals: &'a HashMap<String, Value>,
         }
         let data = serde_json::to_vec_pretty(&View {
+            model: self.model,
             mixer: &self.mixer_config,
             reference_app: &self.reference_app,
             screensavers: &self.screensavers,
@@ -550,11 +572,23 @@ impl Host {
                 visible.background = Some(image);
             }
         }
-        let mut strip = DynamicImage::ImageRgb8(RgbImage::from_pixel(800, 100, Rgb([14, 21, 29])));
+        let mut strip = DynamicImage::ImageRgb8(RgbImage::from_pixel(
+            self.model.strip_width().max(1),
+            self.model.strip_height().max(1),
+            Rgb([14, 21, 29]),
+        ));
         let mut warnings = Vec::new();
         for slot in &mut self.slots {
             appearance::apply_user_titles(slot, &self.actions);
-            let mut picture = if slot.controller == "Encoder" {
+            let mut picture = if slot.controller == "Neo" {
+                let root = self
+                    .actions
+                    .iter()
+                    .find(|a| a.uuid == slot.uuid)
+                    .and_then(|a| self.plugins.iter().find(|p| p.id == a.plugin))
+                    .map(|p| p.root.as_path());
+                display::dial_image(&self.renderer, slot, root, &self.actions)?
+            } else if slot.controller == "Encoder" {
                 let stacked = slot.uuid == crate::dial_stack::UUID;
                 let index = slot.active_stack_index();
                 let has_child = stacked
@@ -618,30 +652,59 @@ impl Host {
             if slot.controller == "Encoder" {
                 feedback::paint_dial(&self.badges, &mut picture, slot, self.multi_clock.elapsed());
             }
+            if slot.controller == "Keypad" && self.model.capabilities().key_images {
+                picture = picture.resize_exact(
+                    self.model.key_width(),
+                    self.model.key_height(),
+                    image::imageops::FilterType::Lanczos3,
+                );
+            }
             let mut png = Cursor::new(Vec::new());
             picture.write_to(&mut png, image::ImageFormat::Png)?;
             slot.preview = STANDARD.encode(png.into_inner());
             warnings.append(&mut slot.display_warnings);
             if slot.controller == "Encoder" {
-                strip.copy_from(&picture, slot.index as u32 * 200, 0)?;
+                strip.copy_from(
+                    &picture,
+                    slot.index as u32
+                        * (self.model.strip_width() / u32::from(self.model.dial_count()).max(1)),
+                    0,
+                )?;
             } else if let Some(hardware) = &self.hardware {
-                let _ = hardware.send(Draw::Key(slot.index, picture));
+                if slot.controller == "Neo" {
+                    let _ = hardware.send(Draw::Infobar(picture));
+                } else if self.model.capabilities().key_images {
+                    let _ = hardware.send(Draw::Key(slot.index, picture));
+                }
             }
         }
         for warning in warnings {
             self.log(warning);
         }
         if let Some(hardware) = &self.hardware {
-            for index in 0..8 {
+            for index in 0..self.model.key_count() {
                 if !self
                     .slots
                     .iter()
                     .any(|s| s.controller == "Keypad" && s.index == index)
+                    && self.model.capabilities().key_images
                 {
-                    let _ = hardware.send(Draw::Key(index, self.renderer.key("", None)));
+                    let image = self.renderer.key("", None).resize_exact(
+                        self.model.key_width(),
+                        self.model.key_height(),
+                        image::imageops::FilterType::Lanczos3,
+                    );
+                    let _ = hardware.send(Draw::Key(index, image));
                 }
             }
-            let _ = hardware.send(Draw::Strip(strip));
+            if self.model.dial_count() > 0 {
+                let _ = hardware.send(Draw::Strip(strip));
+            }
+            if self.model == Model::Neo && !self.slots.iter().any(|s| s.controller == "Neo") {
+                let _ = hardware.send(Draw::Infobar(DynamicImage::ImageRgb8(
+                    RgbImage::from_pixel(232, 50, Rgb([0, 0, 0])),
+                )));
+            }
         }
         if self.simulate {
             use std::hash::{Hash, Hasher};
@@ -666,8 +729,8 @@ impl Host {
         if uuid == multiaction::DELAY {
             bail!("Add Delay inside a Multi Action");
         }
-        if !((controller == "Keypad" && index < 8) || (controller == "Encoder" && index < 4)) {
-            bail!("Invalid Stream Deck+ slot");
+        if !device::valid_slot(self.model, controller, index) {
+            bail!("Invalid control for {}", self.model.name());
         }
         let action = self
             .actions
@@ -675,7 +738,7 @@ impl Host {
             .find(|a| a.uuid == uuid && a.controllers.iter().any(|c| c == controller))
             .cloned()
             .context("Action is not installed or does not support this controller")?;
-        if controller == "Encoder" {
+        if controller == "Encoder" || controller == "Neo" {
             let root = self
                 .plugins
                 .iter()
@@ -683,7 +746,11 @@ impl Host {
                 .map(|p| p.root.as_path());
             display::load_layout(
                 root,
-                action.raw["Encoder"]["layout"].as_str().unwrap_or("$B1"),
+                if controller == "Neo" {
+                    "$Neo"
+                } else {
+                    action.raw["Encoder"]["layout"].as_str().unwrap_or("$B1")
+                },
             )?;
         }
         self.editable()?;
@@ -693,6 +760,7 @@ impl Host {
             .unwrap_or("")
             .to_owned();
         let mut slot = Slot {
+            model: self.model,
             children: vec![],
             child_id: String::new(),
             resources: None,
@@ -720,10 +788,14 @@ impl Host {
             title,
             state: 0,
             feedback: json!({}),
-            layout: action.raw["Encoder"]["layout"]
-                .as_str()
-                .unwrap_or("$B1")
-                .into(),
+            layout: if controller == "Neo" {
+                "$Neo".into()
+            } else {
+                action.raw["Encoder"]["layout"]
+                    .as_str()
+                    .unwrap_or("$B1")
+                    .into()
+            },
             raw: json!({}),
             image_changed: false,
             title_changed: false,
@@ -801,8 +873,10 @@ impl Host {
     }
     fn button_input(&mut self, control: HeldControl, pressed: bool) -> Result<()> {
         let (controller, index, down, up) = match control {
-            HeldControl::Key(index) if index < 8 => ("Keypad", index, "keyDown", "keyUp"),
-            HeldControl::Dial(index) if index < 4 => {
+            HeldControl::Key(index) if index < self.model.key_count() => {
+                ("Keypad", index, "keyDown", "keyUp")
+            }
+            HeldControl::Dial(index) if index < self.model.dial_count() => {
                 self.dial_pressed[index as usize] = pressed;
                 ("Encoder", index, "dialDown", "dialUp")
             }
@@ -1007,6 +1081,18 @@ impl Host {
         }
         self.log(format!("{event:?}"));
         let (index, name, extra) = match event {
+            InputEvent::Sensor { index, pressed } => {
+                anyhow::ensure!(
+                    self.model == Model::Neo && index < 2,
+                    "Invalid sensor input"
+                );
+                let previous = self.sensor_pressed[index as usize];
+                self.sensor_pressed[index as usize] = pressed;
+                if pressed && !previous {
+                    self.step_page(if index == 0 { -1 } else { 1 })?;
+                }
+                return Ok(());
+            }
             InputEvent::Key { index, pressed } => {
                 return self.button_input(HeldControl::Key(index), pressed);
             }
@@ -1024,12 +1110,29 @@ impl Host {
                     json!({"ticks":ticks,"pressed":pressed}),
                 )
             }
-            InputEvent::Touch { x, y, long } => (
-                u8::try_from(x / 200)?,
-                "touchTap",
-                json!({"hold":long,"tapPos":[x%200,y]}),
-            ),
+            InputEvent::Touch { x, y, long } => {
+                anyhow::ensure!(
+                    self.model.dial_count() > 0
+                        && u32::from(x) < self.model.strip_width()
+                        && u32::from(y) < self.model.strip_height(),
+                    "Touch outside this device's strip"
+                );
+                let width = (self.model.strip_width() / u32::from(self.model.dial_count())) as u16;
+                (
+                    u8::try_from(x / width)?,
+                    "touchTap",
+                    json!({"hold":long,"tapPos":[x%width,y]}),
+                )
+            }
             InputEvent::Swipe { start, end } => {
+                anyhow::ensure!(
+                    self.model.capabilities().touchscreen
+                        && [start, end]
+                            .iter()
+                            .all(|(x, y)| u32::from(*x) < self.model.strip_width()
+                                && u32::from(*y) < self.model.strip_height()),
+                    "Swipe outside this device's touchscreen"
+                );
                 if start.0.abs_diff(end.0) > start.1.abs_diff(end.1) {
                     self.step_page(if end.0 < start.0 { 1 } else { -1 })?;
                 }
@@ -1272,7 +1375,7 @@ impl Host {
                 bail!("Unsupported plugin command: {event}");
             }
         }
-        if replacement.controller == "Encoder" {
+        if matches!(replacement.controller.as_str(), "Encoder" | "Neo") {
             display::dial_image(&self.renderer, &mut replacement, Some(&root), &self.actions)?;
         }
         self.store_slot(replacement);
@@ -1390,7 +1493,7 @@ fn action_snapshot(host: &Host, action: &Action) -> Value {
     })
 }
 fn snapshot(host: &Host) -> Value {
-    json!({"clipboard":host.clipboard_snapshot(),"mixer":host.mixer_snapshot(),"screensaver":{"active":host.saver.active,"reason":host.saver.reason,"generation":host.saver.generation,"preferences":host.saver_preferences(),"preview":host.saver.preview,"error":host.saver.error,"frames":host.saver.animation.as_ref().map(|animation|animation.len())},"session":host.session_state,"device_settings":{"desired":host.configured_controls(),"applied":host.controls_observed,"error":host.controls_error},"library":host.library.snapshot(),"running":host.running,"device":host.device,"firmware":host.firmware,"simulate":host.simulate,"connected":host.connected && !host.simulate,"device_online":host.connected,"connection_error":host.connection_error,
+    json!({"device_model":host.model,"device_name":host.model.name(),"overflow_slots":host.overflow_slots(),"device_capabilities":host.model.capabilities(),"device_geometry":{"columns":host.model.columns(),"rows":host.model.rows(),"keys":host.model.key_count(),"dials":host.model.dial_count(),"key_width":host.model.key_width(),"key_height":host.model.key_height(),"strip_width":host.model.strip_width(),"strip_height":host.model.strip_height()},"clipboard":host.clipboard_snapshot(),"mixer":host.mixer_snapshot(),"screensaver":{"supported":host.model==Model::Plus,"active":host.saver.active,"reason":host.saver.reason,"generation":host.saver.generation,"preferences":host.saver_preferences(),"preview":host.saver.preview,"error":host.saver.error,"frames":host.saver.animation.as_ref().map(|animation|animation.len())},"session":host.session_state,"device_settings":{"desired":host.configured_controls(),"applied":host.controls_observed,"error":host.controls_error},"library":host.library.snapshot(),"running":host.running,"device":host.device,"firmware":host.firmware,"simulate":host.simulate,"connected":host.connected && !host.simulate,"device_online":host.connected,"connection_error":host.connection_error,
         "volume":host.volume_state,"volume_error":host.volume_error,"multi_runs":host.multi.snapshot(),"multi_pending":host.multi_pending.len(),"audio_outputs":host.audio_outputs,"audio_active":host.audio_active,"system_status":host.system_status,"slots":host.slots.iter().map(|s|slot_snapshot(host,s)).collect::<Vec<_>>(),
         "reference_app":host.reference_app,"inspectors":host.inspectors.values().map(|i|json!({"context":i.context,"plugin":host.plugins[i.plugin].id,"connected":i.sender.is_some()})).collect::<Vec<_>>(),
         "actions":host.actions.iter().map(|action|action_snapshot(host,action)).collect::<Vec<_>>(),
@@ -1579,8 +1682,13 @@ fn apply_control(host: &mut Host, r: Value) -> Result<()> {
                 bail!("Plugin declares an action UUID already owned by another installed plugin");
             }
             if !plugins[0].runtime.load_failed
-                && let Err(error) =
-                    launch_plugin(&mut plugins[0], &host.device, host.port, &state_dir)
+                && let Err(error) = launch_plugin(
+                    &mut plugins[0],
+                    &host.device,
+                    host.model,
+                    host.port,
+                    &state_dir,
+                )
             {
                 host.log(format!(
                     "Installed {}, but could not launch it: {error:#}",
@@ -1598,6 +1706,11 @@ fn apply_control(host: &mut Host, r: Value) -> Result<()> {
             }
             let event = match r["event"].as_str() {
                 Some("connected") => DeviceEvent::Connected {
+                    model: r
+                        .get("model")
+                        .map(|v| serde_json::from_value(v.clone()))
+                        .transpose()?
+                        .unwrap_or(host.model),
                     serial: r["serial"].as_str().context("Missing serial")?.into(),
                     firmware: r["firmware"].as_str().unwrap_or("test").into(),
                 },
@@ -1614,28 +1727,62 @@ fn apply_control(host: &mut Host, r: Value) -> Result<()> {
         "input" => {
             let index = u8::try_from(r["index"].as_u64().context("Missing index")?)?;
             let event = match r["event"].as_str().unwrap_or("") {
-                "keyDown" | "keyUp" if index < 8 => InputEvent::Key {
+                "sensorDown" | "sensorUp" if host.model == Model::Neo && index < 2 => {
+                    InputEvent::Sensor {
+                        index,
+                        pressed: r["event"] == "sensorDown",
+                    }
+                }
+                "keyDown" | "keyUp" if index < host.model.key_count() => InputEvent::Key {
                     index,
                     pressed: r["event"] == "keyDown",
                 },
-                "dialDown" | "dialUp" if index < 4 => InputEvent::DialPress {
+                "dialDown" | "dialUp" if index < host.model.dial_count() => InputEvent::DialPress {
                     index,
                     pressed: r["event"] == "dialDown",
                 },
-                "dialRotate" if index < 4 => InputEvent::DialRotate {
+                "dialRotate" if index < host.model.dial_count() => InputEvent::DialRotate {
                     index,
                     ticks: i8::try_from(r["ticks"].as_i64().context("Missing ticks")?)?,
                 },
-                "touchTap" if index < 4 => InputEvent::Touch {
-                    x: u16::try_from(r["x"].as_u64().unwrap_or(u64::from(index) * 200 + 100))?,
-                    y: u16::try_from(r["y"].as_u64().unwrap_or(50))?,
-                    long: r["hold"].as_bool().unwrap_or(false),
-                },
+                "touchTap"
+                    if host.model.capabilities().touchscreen && index < host.model.dial_count() =>
+                {
+                    let width = host.model.strip_width() / u32::from(host.model.dial_count());
+                    let x =
+                        u16::try_from(r["x"].as_u64().unwrap_or(
+                            u64::from(index) * u64::from(width) + u64::from(width / 2),
+                        ))?;
+                    let y = u16::try_from(
+                        r["y"]
+                            .as_u64()
+                            .unwrap_or(u64::from(host.model.strip_height() / 2)),
+                    )?;
+                    anyhow::ensure!(
+                        u32::from(x) < host.model.strip_width()
+                            && u32::from(y) < host.model.strip_height()
+                            && u32::from(x) / width == u32::from(index),
+                        "Touch coordinates do not match the selected dial"
+                    );
+                    InputEvent::Touch {
+                        x,
+                        y,
+                        long: r["hold"].as_bool().unwrap_or(false),
+                    }
+                }
                 "swipe" => {
+                    anyhow::ensure!(
+                        host.model.capabilities().touchscreen,
+                        "This device has no touchscreen"
+                    );
                     let point = |key: &str| -> Result<(u16, u16)> {
                         let x = u16::try_from(r[key][0].as_u64().context("Swipe x missing")?)?;
                         let y = u16::try_from(r[key][1].as_u64().context("Swipe y missing")?)?;
-                        anyhow::ensure!(x < 800 && y < 100, "Swipe outside touch strip");
+                        anyhow::ensure!(
+                            u32::from(x) < host.model.strip_width()
+                                && u32::from(y) < host.model.strip_height(),
+                            "Swipe outside touch strip"
+                        );
                         Ok((x, y))
                     };
                     InputEvent::Swipe {
@@ -1732,7 +1879,7 @@ async fn socket_session(socket: WebSocket, state: Shared) {
                 return;
             };
             if host.connected {
-                let _=sender.send(json!({"event":"deviceDidConnect","device":host.device,"deviceInfo":device::info()}));
+                let _=sender.send(json!({"event":"deviceDidConnect","device":host.device,"deviceInfo":device::info(host.model)}));
             }
             let launch = host.plugins[index].registration.clone();
             let session = uuid::Uuid::new_v4().to_string();
@@ -1829,7 +1976,7 @@ fn launch_plugins(host: &mut Host, port: u16, state_dir: &Path) {
         if plugin.runtime.load_failed {
             continue;
         }
-        if let Err(error) = launch_plugin(plugin, &host.device, port, state_dir) {
+        if let Err(error) = launch_plugin(plugin, &host.device, host.model, port, state_dir) {
             failures.push(format!("Plugin {} could not start: {error:#}", plugin.id));
         }
     }
@@ -1837,7 +1984,13 @@ fn launch_plugins(host: &mut Host, port: u16, state_dir: &Path) {
         host.log(error);
     }
 }
-fn launch_plugin(plugin: &mut Plugin, device: &str, port: u16, state_dir: &Path) -> Result<()> {
+fn launch_plugin(
+    plugin: &mut Plugin,
+    device: &str,
+    model: Model,
+    port: u16,
+    state_dir: &Path,
+) -> Result<()> {
     plugin.registration = uuid::Uuid::new_v4().to_string();
     plugin.sender = None;
     plugin.runtime = plugins::Runtime::starting();
@@ -1854,7 +2007,7 @@ fn launch_plugin(plugin: &mut Plugin, device: &str, port: u16, state_dir: &Path)
             },
             plugin.registration
         )));
-        launch_plugin_process(plugin, device, port, state_dir, entry)
+        launch_plugin_process(plugin, device, model, port, state_dir, entry)
     })();
     if let Err(error) = &result {
         plugin.runtime.fail(format!("{error:#}"));
@@ -1862,8 +2015,8 @@ fn launch_plugin(plugin: &mut Plugin, device: &str, port: u16, state_dir: &Path)
     result
 }
 
-fn registration_info(plugin: &Plugin, device: &str) -> Value {
-    json!({"application":{"font":"DejaVu Sans","language":"en","platform":"linux","platformVersion":std::env::consts::OS,"version":"7.6.0"},"plugin":{"uuid":plugin.id,"version":plugin.manifest["Version"]},"devicePixelRatio":1,"colors":{"buttonMouseOverBackgroundColor":"#303030","buttonPressedBackgroundColor":"#303030","buttonPressedBorderColor":"#505050","buttonPressedTextColor":"#ffffff","highlightColor":"#4bd3b0"},"devices":[{"id":device,"type":7,"name":"Stream Deck +","size":{"columns":4,"rows":2}}]})
+fn registration_info(plugin: &Plugin, device: &str, model: Model) -> Value {
+    json!({"application":{"font":"DejaVu Sans","language":"en","platform":"linux","platformVersion":std::env::consts::OS,"version":"7.6.0"},"plugin":{"uuid":plugin.id,"version":plugin.manifest["Version"]},"devicePixelRatio":1,"colors":{"buttonMouseOverBackgroundColor":"#303030","buttonPressedBackgroundColor":"#303030","buttonPressedBorderColor":"#505050","buttonPressedTextColor":"#ffffff","highlightColor":"#4bd3b0"},"devices":[{"id":device,"type":model.sdk_type(),"name":model.name(),"size":{"columns":model.columns(),"rows":model.rows()}}]})
 }
 #[allow(clippy::too_many_arguments)]
 fn spawn_webview(
@@ -1908,11 +2061,12 @@ fn spawn_webview(
 fn launch_plugin_process(
     plugin: &mut Plugin,
     device: &str,
+    model: Model,
     port: u16,
     state_dir: &Path,
     entry: crate::plugin_entry::Entry,
 ) -> Result<()> {
-    let info = registration_info(plugin, device);
+    let info = registration_info(plugin, device, model);
     match entry.kind {
         crate::plugin_entry::Kind::Html => {
             plugin.runtime.runtime_path = Some(std::env::current_exe()?);
@@ -1990,9 +2144,11 @@ pub async fn serve(
     port: u16,
     simulate: bool,
     seconds: Option<u64>,
+    model: Option<Model>,
 ) -> Result<()> {
     run(
         HostOptions {
+            model,
             serial,
             plugins,
             profile: profile_path,
@@ -2008,6 +2164,7 @@ pub async fn serve(
 async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result<()> {
     let diagnostics = embedded.is_none();
     let HostOptions {
+        model: requested_model,
         serial,
         plugins,
         profile: profile_path,
@@ -2033,6 +2190,16 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
     } else {
         Saved::default()
     };
+    if state_path.exists()
+        && serde_json::from_slice::<Value>(&fs::read(&state_path)?)?
+            .get("model")
+            .is_none()
+    {
+        let backup = state_path.with_extension("before-device-model.json");
+        if !backup.exists() {
+            fs::copy(&state_path, backup)?;
+        }
+    }
     for preferences in saved.screensavers.values() {
         preferences.validate()?;
     }
@@ -2074,27 +2241,47 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
         });
     }
     let remembered = device::Config::remembered(&saved);
+    let selected_model =
+        device::selected_model(remembered.as_ref(), serial.as_deref(), requested_model);
+    let mut model = selected_model.unwrap_or(saved.model);
     let previous_device = remembered.as_ref().map(|config| config.id.clone());
     let mut device_config = device::Config::select(remembered, serial);
     device_config.validate()?;
     let (events_tx, mut events_rx) = mpsc::unbounded_channel::<DeviceEvent>();
     let (draw_tx, draw_rx) = std::sync::mpsc::channel();
-    let (initial, connection_error) = if simulate {
+    let (initial, mut connection_error) = if simulate {
         (None, None)
     } else {
-        match device_session::connect(device_config.serial.as_deref()) {
+        match device_session::connect_model(device_config.serial.as_deref(), selected_model) {
             Ok(connection) => (Some(connection), None),
             Err(error) => (None, Some(format!("{error:#}"))),
         }
     };
+    if !simulate && initial.is_none() && selected_model.is_none() {
+        let note = format!(
+            "Offline editor uses {}. Use --model <family> when selecting a different device family offline; reconnect or relaunch with that explicit model.",
+            model.name()
+        );
+        connection_error =
+            Some(connection_error.map_or(note.clone(), |reason| format!("{reason}. {note}")));
+    }
     if let Some(connection) = &initial {
         device_config.id = connection.deck.serial().to_owned();
         device_config.serial = Some(device_config.id.clone());
         device_config.firmware = connection.firmware.clone();
+        model = connection.deck.model();
     }
+    device_config.model = model;
     let connected = simulate || initial.is_some();
     let device = if simulate {
-        "simulated-streamdeck-plus".into()
+        if model == Model::Plus {
+            "simulated-streamdeck-plus".into()
+        } else {
+            format!(
+                "simulated-streamdeck-{}",
+                serde_json::to_value(model)?.as_str().unwrap()
+            )
+        }
     } else {
         device_config.id.clone()
     };
@@ -2112,7 +2299,12 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
                 fs::copy(&state_path, &backup)?;
             }
         }
-        Library::legacy(saved.slots, &device)
+        let legacy_model = if saved.slots.is_empty() {
+            model
+        } else {
+            saved.model
+        };
+        Library::for_model(saved.slots, &device, legacy_model)
     };
     if !simulate {
         for profile in &mut library.profiles {
@@ -2123,6 +2315,10 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
                 profile.device = device.clone();
             }
         }
+    }
+    library.restore_models()?;
+    if library.current()?.model != model {
+        library.activate_model(model, &device)?;
     }
     library.validate()?;
     let slots = library.visible()?;
@@ -2141,6 +2337,7 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
         controls.insert(device.clone(), previous_controls);
     }
     let mut host = Host {
+        model,
         mixer_config: saved.mixer,
         mixer: None,
         mixer_state: crate::mixer::Snapshot::default(),
@@ -2209,7 +2406,8 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
         state_path,
         logs: Vec::new(),
         simulate,
-        dial_pressed: [false; 4],
+        dial_pressed: vec![false; model.dial_count() as usize],
+        sensor_pressed: vec![false; model.sensor_count() as usize],
         held: HashMap::new(),
         released: HashSet::new(),
         retired: VecDeque::new(),
@@ -2245,15 +2443,13 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
         if let Some(uuid) = key {
             host.assign("Keypad", 0, &uuid)?;
         }
-        if let Some(uuid) = dial {
+        if let Some(uuid) = dial.filter(|_| model.dial_count() > 0) {
             host.assign("Encoder", 0, &uuid)?;
         }
     }
     let mut occupied = std::collections::HashSet::new();
     for slot in &mut host.slots {
-        if !((slot.controller == "Keypad" && slot.index < 8)
-            || (slot.controller == "Encoder" && slot.index < 4))
-        {
+        if !device::valid_slot(model, &slot.controller, slot.index) {
             bail!("Saved session contains invalid slot coordinates");
         }
         if !occupied.insert((slot.controller.clone(), slot.index)) {
@@ -2274,9 +2470,10 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
     let worker = if simulate {
         None
     } else {
-        Some(device_session::spawn(
+        Some(device_session::spawn_model(
             initial,
             device_config.serial.clone(),
+            Some(model),
             draw_rx,
             events_tx,
         ))
@@ -2505,6 +2702,7 @@ mod tests {
     fn embedded_host_has_direct_controller_and_releases_its_session_on_close() {
         let temp = tempfile::tempdir().unwrap();
         let options = HostOptions {
+            model: None,
             serial: None,
             plugins: vec![],
             profile: None,
@@ -2559,6 +2757,7 @@ mod tests {
     }
     pub(super) fn fixture(root: &Path) -> Host {
         let mut host = Host {
+            model: Model::Plus,
             mixer_config: crate::mixer::Config::default(),
             mixer: None,
             mixer_state: crate::mixer::Snapshot::default(),
@@ -2621,6 +2820,7 @@ mod tests {
                 raw: json!({"States":[{}]}),
             }],
             slots: vec![Slot {
+                model: Model::Plus,
                 children: vec![],
                 child_id: String::new(),
                 resources: None,
@@ -2657,7 +2857,8 @@ mod tests {
             state_path: root.join("state.json"),
             logs: Vec::new(),
             simulate: true,
-            dial_pressed: [false; 4],
+            dial_pressed: vec![false; Model::Plus.dial_count() as usize],
+            sensor_pressed: vec![],
             held: HashMap::new(),
             released: HashSet::new(),
             retired: VecDeque::new(),

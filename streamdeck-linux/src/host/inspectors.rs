@@ -69,7 +69,7 @@ impl Host {
             .or_else(|| plugin.manifest["PropertyInspectorPath"].as_str())
             .context("This plugin has no property inspector")?;
         let html = safe_file(&plugin.root, path)?;
-        let info = registration_info(plugin, &self.device);
+        let info = registration_info(plugin, &self.device, self.model);
         let action_info = json!({"action":slot.uuid,"context":slot.context,"device":self.device,"payload":action_payload(slot)});
         let registration = uuid::Uuid::new_v4().to_string();
         let directory = self

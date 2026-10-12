@@ -177,6 +177,7 @@ impl Slot {
                         .or_else(|| action.map(|a| a.raw["States"].clone()))
                         .unwrap_or(json!([]));
                     Slot {
+                        model: self.model,
                         context: previous
                             .map(|s| s.context.clone())
                             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),

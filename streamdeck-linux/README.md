@@ -2,7 +2,7 @@
 
 **Made with AI.** Elgato wasn't making a Linux port, and I didn't want an expensive paperweight on my table.
 
-An independent Linux Stream Deck+ desktop application written from scratch in
+An independent Linux Stream Deck desktop application written from scratch in
 Rust, with a React/TypeScript editor embedded in a native Wry/WebKit window. A
 small in-process bridge calls the same Rust host. Plugin HTML runs in separate
 native WebKit windows. A separate headless diagnostic mode retains
@@ -16,6 +16,14 @@ application**. Its first targets are the unchanged official Counter and Layouts
 feedback sample plugins. Elgato's Windows executable is never run. The supported
 protected Marketplace format can optionally use a local executable as a static
 key reference during package verification and plugin loading.
+
+## Device models
+
+Model-specific transports and layouts cover Mini, the 2019/MK.2/Scissor 15-key
+family, XL, Plus, Plus XL and Neo. Only Plus has physical validation so far;
+the additional transports have protocol and software tests. Pedal has an
+input-only transport recovered from the original executable. See [Device models](docs/DEVICES.md) for supported USB
+identities, selection commands and remaining limits.
 
 ## Native Discord plugin
 
@@ -424,7 +432,7 @@ system suspend/resume remain separate acceptance checks.
 ./target/debug/deckforge serve --simulate --plugin path/to/example.sdPlugin --state state/simulation --port 0
 ```
 
-`--serial` selects a specific Stream Deck+. `--simulate` never opens USB.
+`--serial` selects a specific supported Stream Deck. `--model` selects its family or an offline layout. `--simulate` never opens USB.
 `--seconds N` bounds a host session. `--port 0` chooses an available local port.
 The CLI plugin installer only extracts a validated package; `serve --plugin` launches
 its code under the current user. Node versions must match the plugin manifest;

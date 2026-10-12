@@ -444,11 +444,18 @@ impl Controller {
         let mut slot = prepared.slot;
         let renderer = Renderer::new()?;
         let style = style(&slot, &actions);
-        let picture = if slot.controller == "Encoder" {
+        let mut picture = if matches!(slot.controller.as_str(), "Encoder" | "Neo") {
             display::dial_image(&renderer, &mut slot, root.as_deref(), &actions)?
         } else {
             renderer.key_styled(&slot.title, slot.background.as_ref(), &style)
         };
+        if slot.controller == "Keypad" && slot.model.capabilities().key_images {
+            picture = picture.resize_exact(
+                slot.model.key_width(),
+                slot.model.key_height(),
+                image::imageops::FilterType::Lanczos3,
+            );
+        }
         let mut png = Cursor::new(Vec::new());
         picture.write_to(&mut png, image::ImageFormat::Png)?;
         let flags = snapshot(&slot, &actions);

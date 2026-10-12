@@ -275,7 +275,13 @@ impl Host {
             }
             self.render()?;
             self.persist()?;
-            launch_plugin(&mut self.plugins[index], &self.device, self.port, &state)
+            launch_plugin(
+                &mut self.plugins[index],
+                &self.device,
+                self.model,
+                self.port,
+                &state,
+            )
         })();
         if let Err(error) = &result {
             self.plugins[index].runtime.fail(format!("{error:#}"));

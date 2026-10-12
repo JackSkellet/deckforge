@@ -1,5 +1,8 @@
 //! Reconnecting device ownership and latest-frame delivery. No reset or firmware writes.
-use crate::hardware::{Deck, InputEvent};
+use crate::{
+    device_model::Model,
+    hardware::{Deck, InputEvent},
+};
 use anyhow::{Result, ensure};
 use image::DynamicImage;
 use serde::{Deserialize, Serialize};
@@ -16,6 +19,7 @@ use tokio::sync::mpsc::UnboundedSender;
 pub enum Draw {
     Key(u8, DynamicImage),
     Strip(DynamicImage),
+    Infobar(DynamicImage),
     Controls(Controls),
     /// Keep the firmware idle timer suspended while software sleep is configured.
     SleepPolicy(bool),
@@ -40,6 +44,7 @@ pub enum Event {
     Connected {
         serial: String,
         firmware: String,
+        model: Model,
     },
     Disconnected {
         reason: String,
@@ -67,30 +72,40 @@ pub struct Connection {
     pub firmware: String,
 }
 
+#[cfg(test)]
 pub fn connect(serial: Option<&str>) -> Result<Connection> {
-    let deck = Deck::connect(serial)?;
+    connect_model(serial, None)
+}
+
+pub fn connect_model(serial: Option<&str>, model: Option<Model>) -> Result<Connection> {
+    let deck = Deck::connect_with_model(serial, model)?;
     let firmware = deck.firmware_version()?;
     Ok(Connection { deck, firmware })
 }
 
-pub fn spawn(
+pub fn spawn_model(
     initial: Option<Connection>,
     serial: Option<String>,
+    expected_model: Option<Model>,
     draw_rx: Receiver<Draw>,
     events: UnboundedSender<Event>,
 ) -> JoinHandle<()> {
     thread::spawn(move || {
-        worker(
+        worker_model(
             initial.map(|c| (c.deck, c.firmware)),
             serial,
+            expected_model,
             draw_rx,
             events,
-            |serial| connect(serial).map(|c| (c.deck, c.firmware)),
+            |serial| connect_model(serial, expected_model).map(|c| (c.deck, c.firmware)),
         );
     })
 }
 
 trait Transport {
+    fn model(&self) -> Model {
+        Model::Plus
+    }
     fn serial(&self) -> &str;
     fn read_packet(&mut self, timeout_ms: i32, decode: bool) -> Result<Option<Vec<InputEvent>>>;
     fn write(&mut self, index: usize, image: &DynamicImage) -> Result<()>;
@@ -100,11 +115,19 @@ trait Transport {
     fn set_sleep_seconds(&mut self, seconds: u32) -> Result<()>;
 }
 impl Transport for Deck {
+    fn model(&self) -> Model {
+        Deck::model(self)
+    }
     fn sleep_seconds(&mut self) -> Result<u32> {
         Deck::sleep_seconds(self)
     }
     fn set_brightness(&mut self, brightness: u8) -> Result<()> {
-        Deck::set_brightness(self, crate::brightness::hid_value(brightness)?)
+        let value = if self.model() == Model::Plus {
+            crate::brightness::hid_value(brightness)?
+        } else {
+            brightness
+        };
+        Deck::set_brightness(self, value)
     }
     fn set_sleep_seconds(&mut self, seconds: u32) -> Result<()> {
         Deck::set_sleep_seconds(self, seconds)
@@ -116,11 +139,36 @@ impl Transport for Deck {
         Deck::read_packet(self, timeout_ms, decode)
     }
     fn write_lcd(&mut self, image: &DynamicImage) -> Result<()> {
-        self.set_lcd_image(image)
+        if self.model().capabilities().full_lcd {
+            self.set_lcd_image(image)
+        } else {
+            // Mini has no full-panel command. Fill each key from a software grid.
+            let model = self.model();
+            ensure!(model.capabilities().key_images, "device has no display");
+            let frame = image.resize_exact(
+                u32::from(model.columns()) * model.key_width(),
+                u32::from(model.rows()) * model.key_height(),
+                image::imageops::FilterType::Triangle,
+            );
+            for index in 0..model.key_count() {
+                let tile = frame.crop_imm(
+                    u32::from(index % model.columns()) * model.key_width(),
+                    u32::from(index / model.columns()) * model.key_height(),
+                    model.key_width(),
+                    model.key_height(),
+                );
+                self.set_key_image(index, &tile)?;
+            }
+            Ok(())
+        }
     }
     fn write(&mut self, index: usize, image: &DynamicImage) -> Result<()> {
-        if index == 8 {
-            self.set_touchscreen_image(image)
+        if index == usize::from(self.model().key_count()) {
+            if self.model() == Model::Neo {
+                self.set_infobar_image(image)
+            } else {
+                self.set_touchscreen_image(image)
+            }
         } else {
             self.set_key_image(index as u8, image)
         }
@@ -152,8 +200,9 @@ struct Session<T> {
     device: Option<(T, String)>,
     serial: Option<String>,
     announce: bool,
-    desired: [Option<Arc<DynamicImage>>; 9],
-    sent: [Option<Arc<DynamicImage>>; 9],
+    model: Model,
+    desired: Vec<Option<Arc<DynamicImage>>>,
+    sent: Vec<Option<Arc<DynamicImage>>>,
     cursor: usize,
     next_retry: Duration,
     retry_reason: Option<String>,
@@ -170,13 +219,28 @@ struct Session<T> {
     timer: Timer,
 }
 impl<T: Transport> Session<T> {
+    #[cfg(test)]
     fn new(initial: Option<(T, String)>, serial: Option<String>) -> Self {
+        Self::new_model(initial, serial, None)
+    }
+    fn new_model(
+        initial: Option<(T, String)>,
+        serial: Option<String>,
+        expected: Option<Model>,
+    ) -> Self {
+        let model = initial
+            .as_ref()
+            .map(|(deck, _)| deck.model())
+            .or(expected)
+            .unwrap_or_default();
+        let frames = usize::from(model.key_count()) + usize::from(model.capabilities().strip);
         Self {
+            model,
             device: initial,
             serial,
             announce: true,
-            desired: std::array::from_fn(|_| None),
-            sent: std::array::from_fn(|_| None),
+            desired: vec![None; frames],
+            sent: vec![None; frames],
             cursor: 0,
             next_retry: Duration::ZERO,
             retry_reason: None,
@@ -194,7 +258,7 @@ impl<T: Transport> Session<T> {
         }
     }
 
-    // Invalid key indices cannot enter the nine-frame cache.
+    // Reject controls that the selected model cannot display.
     fn cache(&mut self, draw: Draw) -> bool {
         let (index, image) = match draw {
             Draw::SleepPolicy(enabled) => {
@@ -207,6 +271,9 @@ impl<T: Transport> Session<T> {
                 image,
                 wake_on_input,
             } => {
+                if !self.model.has_lcd() {
+                    return false;
+                }
                 if let Some(image) = image {
                     if self
                         .closed_generation
@@ -247,9 +314,18 @@ impl<T: Transport> Session<T> {
                 return false;
             }
             Draw::Stop => return true,
-            Draw::Key(index, image) if index < 8 => (usize::from(index), image),
-            Draw::Strip(image) => (8, image),
-            Draw::Key(_, _) => return false,
+            Draw::Key(index, image)
+                if index < self.model.key_count() && self.model.capabilities().key_images =>
+            {
+                (usize::from(index), image)
+            }
+            Draw::Strip(image) if self.model.dial_count() > 0 => {
+                (usize::from(self.model.key_count()), image)
+            }
+            Draw::Infobar(image) if self.model == Model::Neo => {
+                (usize::from(self.model.key_count()), image)
+            }
+            Draw::Key(_, _) | Draw::Strip(_) | Draw::Infobar(_) => return false,
         };
         if !self.desired[index]
             .as_ref()
@@ -286,6 +362,10 @@ impl<T: Transport> Session<T> {
             let serial = device.serial().to_owned();
             let valid = (|| {
                 ensure!(
+                    device.model() == self.model,
+                    "connected device model does not match selected layout"
+                );
+                ensure!(
                     !serial.is_empty(),
                     "connected device has no serial; cannot safely reconnect"
                 );
@@ -306,6 +386,7 @@ impl<T: Transport> Session<T> {
             events.push(Event::Connected {
                 serial,
                 firmware: firmware.clone(),
+                model: self.model,
             });
             self.announce = false;
             self.retry_reason = None;
@@ -313,18 +394,20 @@ impl<T: Transport> Session<T> {
             self.attempted_brightness = None;
             self.timer.attempted = None;
             self.control_errors = [None, None];
-            match self.device.as_mut().unwrap().0.sleep_seconds() {
-                Ok(seconds) if seconds <= i32::MAX as u32 => {
-                    self.observed_controls.sleep_seconds = Some(seconds);
-                    if !self.timer.owned {
-                        self.timer.baseline = Some(seconds);
+            if self.model.capabilities().sleep {
+                match self.device.as_mut().unwrap().0.sleep_seconds() {
+                    Ok(seconds) if seconds <= i32::MAX as u32 => {
+                        self.observed_controls.sleep_seconds = Some(seconds);
+                        if !self.timer.owned {
+                            self.timer.baseline = Some(seconds);
+                        }
                     }
+                    Ok(_) => {
+                        self.control_errors[1] =
+                            Some("device sleep duration exceeds signed 32-bit seconds".into())
+                    }
+                    Err(error) => self.control_errors[1] = Some(format!("{error:#}")),
                 }
-                Ok(_) => {
-                    self.control_errors[1] =
-                        Some("device sleep duration exceeds signed 32-bit seconds".into())
-                }
-                Err(error) => self.control_errors[1] = Some(format!("{error:#}")),
             }
             events.push(self.controls_event());
         }
@@ -428,6 +511,10 @@ impl<T: Transport> Session<T> {
                 }
                 self.attempted_brightness = Some(brightness);
                 let result = (|| {
+                    ensure!(
+                        self.model.capabilities().brightness,
+                        "device has no brightness control"
+                    );
                     ensure!(brightness <= 100, "brightness must be between 0 and 100");
                     device.set_brightness(brightness)
                 })();
@@ -473,6 +560,10 @@ impl<T: Transport> Session<T> {
                         seconds <= i32::MAX as u32,
                         "sleep duration exceeds signed 32-bit seconds"
                     );
+                    ensure!(
+                        self.model.capabilities().sleep,
+                        "device has no sleep control"
+                    );
                     device.set_sleep_seconds(seconds)
                 })();
                 match result {
@@ -496,8 +587,8 @@ impl<T: Transport> Session<T> {
         None
     }
     fn dirty(&self) -> Option<usize> {
-        (0..9)
-            .map(|offset| (self.cursor + offset) % 9)
+        (0..self.desired.len())
+            .map(|offset| (self.cursor + offset) % self.desired.len())
             .find(|&index| {
                 self.desired[index].as_ref().is_some_and(|wanted| {
                     self.sent[index]
@@ -610,7 +701,7 @@ impl<T: Transport> Session<T> {
         let image = self.desired[index].as_ref().unwrap();
         device.write(index, image)?;
         self.sent[index] = Some(image.clone());
-        self.cursor = (index + 1) % 9;
+        self.cursor = (index + 1) % self.desired.len();
         Ok(Written::Normal)
     }
     fn stop(&mut self, now: Duration) -> Vec<Event> {
@@ -647,15 +738,27 @@ fn same(a: &DynamicImage, b: &DynamicImage) -> bool {
         && a.as_bytes() == b.as_bytes()
 }
 
+#[cfg(test)]
 fn worker<T: Transport>(
     initial: Option<(T, String)>,
     serial: Option<String>,
     draw_rx: Receiver<Draw>,
     events: UnboundedSender<Event>,
+    open: impl FnMut(Option<&str>) -> Result<(T, String)>,
+) {
+    worker_model(initial, serial, None, draw_rx, events, open)
+}
+
+fn worker_model<T: Transport>(
+    initial: Option<(T, String)>,
+    serial: Option<String>,
+    expected_model: Option<Model>,
+    draw_rx: Receiver<Draw>,
+    events: UnboundedSender<Event>,
     mut open: impl FnMut(Option<&str>) -> Result<(T, String)>,
 ) {
     let start = Instant::now();
-    let mut session = Session::new(initial, serial);
+    let mut session = Session::new_model(initial, serial, expected_model);
     loop {
         if events.is_closed() {
             return;
@@ -718,6 +821,7 @@ mod tests {
         decoding: Vec<bool>,
     }
     struct Fake {
+        model: Model,
         serial: String,
         calls: Arc<Mutex<Calls>>,
         read_error: bool,
@@ -731,6 +835,9 @@ mod tests {
         on_sleep_set: Option<Box<dyn FnMut(u32) + Send>>,
     }
     impl Transport for Fake {
+        fn model(&self) -> Model {
+            self.model
+        }
         fn sleep_seconds(&mut self) -> Result<u32> {
             self.calls.lock().unwrap().sleep_queries += 1;
             ensure!(!self.sleep_read_error, "sleep getter failed");
@@ -789,6 +896,7 @@ mod tests {
         let calls = Arc::new(Mutex::new(Calls::default()));
         (
             Fake {
+                model: Model::Plus,
                 serial: serial.into(),
                 calls: calls.clone(),
                 read_error: false,
@@ -809,6 +917,87 @@ mod tests {
     }
     fn never(_: Option<&str>) -> Result<(Fake, String)> {
         panic!("unexpected reconnect")
+    }
+
+    #[test]
+    fn model_caches_cover_all_keys_and_only_supported_extra_displays() {
+        for &model in Model::all() {
+            let (mut deck, calls) = fake("A");
+            deck.model = model;
+            let mut session = Session::new_model(Some((deck, "1".into())), None, Some(model));
+            for index in 0..=model.key_count() {
+                session.cache(Draw::Key(index, frame(index)));
+            }
+            session.cache(Draw::Strip(frame(100)));
+            session.cache(Draw::Infobar(frame(101)));
+            for _ in 0..40 {
+                session.tick(Duration::ZERO, &mut never);
+            }
+            let writes = &calls.lock().unwrap().writes;
+            let expected = if model.capabilities().key_images {
+                usize::from(model.key_count())
+            } else {
+                0
+            } + usize::from(model.capabilities().strip);
+            assert_eq!(writes.len(), expected, "{model:?}");
+            for index in 0..if model.capabilities().key_images {
+                model.key_count()
+            } else {
+                0
+            } {
+                assert!(
+                    writes.contains(&(usize::from(index), index)),
+                    "{model:?} missing key {index}"
+                );
+            }
+            if model.capabilities().strip {
+                assert_eq!(
+                    writes.last(),
+                    Some(&(
+                        usize::from(model.key_count()),
+                        if model == Model::Neo { 101 } else { 100 }
+                    ))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn pedal_never_reads_or_writes_display_features() {
+        let (mut deck, calls) = fake("A");
+        deck.model = Model::Pedal;
+        let mut session = Session::new(Some((deck, "1".into())), None);
+        session.cache(Draw::Screensaver {
+            generation: 1,
+            image: Some(frame(1)),
+            wake_on_input: true,
+        });
+        session.cache(Draw::Controls(Controls {
+            brightness: Some(20),
+            sleep_seconds: Some(60),
+        }));
+        for _ in 0..3 {
+            session.tick(Duration::ZERO, &mut never);
+        }
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.sleep_queries, 0);
+        assert!(calls.features.is_empty());
+        assert!(calls.writes.is_empty());
+        assert!(calls.reads > 0);
+    }
+
+    #[test]
+    fn wrong_model_reconnection_cannot_replay_cached_frames() {
+        let mut session = Session::<Fake>::new_model(None, Some("A".into()), Some(Model::Xl));
+        session.cache(Draw::Key(31, frame(1)));
+        let (deck, calls) = fake("A");
+        let mut device = Some(deck);
+        let events = session.tick(Duration::ZERO, &mut |_| {
+            Ok((device.take().unwrap(), "1".into()))
+        });
+        assert!(matches!(&events[..], [Event::Retry { reason }] if reason.contains("model")));
+        assert!(calls.lock().unwrap().writes.is_empty());
+        assert_eq!(session.desired[31].as_ref().unwrap().as_bytes()[0], 1);
     }
 
     #[test]
@@ -1737,9 +1926,9 @@ mod tests {
         assert!(joined.is_ok(), "probe worker panicked");
         assert!(
             matches!(&transitions[..], [
-            Event::Connected { serial: first_serial, firmware: first_firmware },
+            Event::Connected { serial: first_serial, firmware: first_firmware, .. },
             Event::Disconnected { reason },
-            Event::Connected { serial: second_serial, firmware: second_firmware },
+            Event::Connected { serial: second_serial, firmware: second_firmware, .. },
         ] if first_serial == &serial && second_serial == &serial
             && first_firmware == &firmware && second_firmware == &firmware
             && reason == CONTROLLED_ERROR),

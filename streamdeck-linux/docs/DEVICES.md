@@ -1,0 +1,121 @@
+# Device models
+
+Deckforge has model-specific HID transports for the documented Mini, 15-key,
+XL, Plus, Plus XL and Neo families, plus an input-only Pedal transport. The
+implementations use Elgato's published protocols and static evidence from the
+original application. Only the attached Stream Deck+ has physical
+acceptance evidence. Packet tests, simulated input and native editor tests do
+not establish that another model works on hardware.
+
+| Layout | Keys | Dials | USB product IDs (vendor `0fd9`) | Evidence boundary |
+| --- | --- | --- | --- | --- |
+| Mini | 3 × 2 | — | `0063`, `0090`, `00b3`, `00b8` | Protocol and packet tests; physical validation pending |
+| Stream Deck 2019 / MK.2 / Scissor | 5 × 3 | — | `006d`, `0080`, `00a5`, `00b9` | Protocol and packet tests; physical validation pending |
+| XL / XL 2022 | 8 × 4 | — | `006c`, `008f`, `00ba` | Protocol and packet tests; physical validation pending |
+| Plus | 4 × 2 | 4 | `0084` | Existing physical display/control confirmation; new model generalization has software regression coverage |
+| Plus XL | 9 × 4 | 6 | `00c6` | Protocol and packet tests; physical validation pending |
+| Neo | 4 × 2 | — | `009a` | Protocol and packet tests; physical validation pending |
+| Pedal | 3 × 1 | — | `0086` | Input/metadata protocol recovered from the original executable; physical validation pending |
+
+The module products in the table use the matching documented family. The
+original 2017 Stream Deck (`0060`) has a different, unresolved transport and is
+not opened using a later model's protocol. Studio, Mobile, virtual decks and
+Network Dock remain separate work. One host currently owns one selected device;
+concurrent device management is unfinished.
+
+## Selection
+
+`deckforge devices` enumerates supported USB devices without changing them.
+Hardware discovery chooses the actual model. `--serial` selects one physical
+device; `--model` can additionally restrict the family. An ambiguous selection
+is rejected rather than choosing the first device.
+
+```sh
+deckforge desktop --model xl --serial DEVICE_SERIAL
+# Isolated editor/profile development; never opens USB:
+deckforge desktop --simulate --model plus-xl --state /tmp/deckforge-plus-xl
+```
+
+Model names are `mini`, `classic`, `xl`, `plus`, `plus-xl`, `neo` and `pedal`.
+The temporary `--legacy-editor` fallback supports Plus only; use the default
+TypeScript editor for other models. Saved sessions retain their model across
+restarts without repeating the flag.
+Legacy sessions default to Plus. If the device is absent and its family has never
+been discovered, specify `--model` for the intended layout. Reconnect stays bound
+to that family so queued frames cannot reach a different model; relaunch with the
+device present to discover its model automatically. Profiles retain their own
+model and coordinates;
+a profile for another model must not silently truncate to the active device.
+
+## Display and input policies
+
+- Mini uses its documented 80 × 80 BMP transport and separate feature/input
+  report formats. The original Windows 7.6 Mini key writer at `0x14062e920`
+  proves zero-based chunks and sets ShowImage to `01` only on the final chunk
+  (`0x14062e9b0`–`0x14062e9c3`). Local static evidence is retained in
+  `evidence/device-protocols/mini-direct-key.asm`; physical Mini validation is
+  still pending.
+- JPEG key sizes and orientation come from each model's HID page. Per-key
+  rendering is resized for the target display at the transport boundary.
+- Plus XL uses a 1200 × 100 strip, six 200 × 100 action areas and 36 keys.
+  Its profile model `20GBX9901` comes from the shipped 7.6 profile artifact;
+  the HID page currently repeats the Plus identifier. The two are not conflated.
+- Neo has a separate, display-only SDK `Neo` controller. Its custom layout is
+  232 × 50. Deckforge centers that logical area in the physical 248 × 58 infobar
+  with an 8-pixel horizontal and 4-pixel vertical gutter. This placement is a
+  Linux rendering policy inferred from the documented dimensions, not recovered
+  vendor pixel placement. The two touch points navigate pages; they are not
+  assignable plugin keys. Their small indicator displays are not implemented.
+- Pedal uses the recovered `20GBF9901` identity and shared input/serial/firmware
+  methods from the original executable. Its editor shows software action labels.
+  Image, brightness and sleep operations are disabled before USB I/O. The current
+  3-column, 1-row SDK layout is a Linux policy: native construction stores a 1 × 3
+  size, but an unresolved orientation transform sits before SDK serialization.
+  Native profile-coordinate equivalence therefore remains unverified.
+- The recovered Plus brightness curve stays Plus-only. Other documented
+  transports receive the requested percentage directly; physical luminance
+  equivalence has not been measured.
+
+No reset, bootloader command or firmware write is part of these tests.
+Screensaver completion and prolonged hardware reliability testing remain deferred.
+
+## Sources and checks
+
+The transport sources are Elgato's [general HID reference](https://docs.elgato.com/streamdeck/hid/general/),
+[Mini](https://docs.elgato.com/streamdeck/hid/mini/),
+[15-key](https://docs.elgato.com/streamdeck/hid/stream-deck-classic/),
+[XL](https://docs.elgato.com/streamdeck/hid/stream-deck-xl/),
+[Plus](https://docs.elgato.com/streamdeck/hid/stream-deck-plus/),
+[Plus XL](https://docs.elgato.com/streamdeck/hid/stream-deck-plus-xl/) and
+[Neo](https://docs.elgato.com/streamdeck/hid/stream-deck-neo/) pages.
+The [SDK device guide](https://docs.elgato.com/streamdeck/sdk/guides/devices/),
+[Neo infobar guide](https://docs.elgato.com/streamdeck/sdk/guides/neo-infobar/) and
+[Neo quick start](https://www.elgato.com/us/en/explorer/products/neo/elgato-stream-deck-neo-quick-start-guide/)
+provide SDK geometry and navigation semantics.
+
+`cargo test` includes packet reconstruction, input bounds, model-specific
+features and session-frame/reconnect tests. `tests/models_interop.py` exercises
+the real host and plugin WebSocket protocol with simulated devices, checking the
+last key/dial, SDK geometry, profile export/import and persisted-model restart.
+`tests/native_models_interop.py` captures all seven layouts in the actual native
+WebKit window and checks visible controls and final-key selection. The unchanged
+Counter, Layouts and Lights Out samples, whole Plus profiles, clipboard transfers
+and SDK device-lifecycle regressions also pass.
+
+Static Pedal and Mini findings are pinned to original Stream Deck 7.6.0.23012
+`AppExecutable`, SHA-256
+`2963df27b13f97e5736e3f931348d89d2f693109f3cb9dc3c9899300e35ea9e3`.
+Pedal registry `0x140135a22`/`0x140135a65` binds model and USB identity; its
+vtable shares serial `0x14061aa40`, firmware `0x14061ab50` and input
+`0x14061abe0` with the documented 2019 family. Mini image loop
+`0x14062e920` establishes zero-based chunks and last-chunk display flag. Local
+research captures live under `evidence/device-protocols`; proprietary binaries
+and raw disassembly are not required or distributed with Deckforge.
+
+Checkpoint validation on 12 October 2026: 391 Rust tests passed (11 explicit
+hardware/runtime probes ignored), 56 frontend tests passed, and strict Clippy
+passed. Native captures cover all seven layouts. The installed application
+reconnected the user's Plus and all four saved plugins, with four assignments
+retained; saved state changed only by adding model metadata. No physical input
+was injected into the user's configuration. The additional models still need
+physical acceptance.

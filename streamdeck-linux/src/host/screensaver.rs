@@ -145,6 +145,10 @@ impl Host {
     }
     pub(super) fn apply_saver(&mut self, prepared: Prepared) -> Result<()> {
         anyhow::ensure!(
+            self.model == Model::Plus,
+            "Software screensaver layout is currently supported on Stream Deck + only"
+        );
+        anyhow::ensure!(
             self.saver_preferences() == prepared.previous,
             "Screensaver settings changed while the image was loading; try again"
         );
@@ -190,6 +194,10 @@ impl Host {
         Ok(())
     }
     pub(super) fn sleep_device(&mut self, reason: &str) -> Result<()> {
+        anyhow::ensure!(
+            self.model == Model::Plus,
+            "Software screensaver layout is currently supported on Stream Deck + only"
+        );
         if self.saver.active {
             return Ok(());
         }

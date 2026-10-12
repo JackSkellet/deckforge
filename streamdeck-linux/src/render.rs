@@ -287,12 +287,17 @@ impl Renderer {
             style.validate()?;
         }
         let items = crate::layout::resolved_items(layout, feedback)?;
-        let mut canvas = RgbaImage::from_pixel(200, 100, Rgba([0, 0, 0, 255]));
+        let (width, height) = crate::layout::canvas_size(layout);
+        let mut canvas = RgbaImage::from_pixel(width, height, Rgba([0, 0, 0, 255]));
         for item in items {
             if item["enabled"].as_bool() == Some(false) {
                 continue;
             }
-            let [x, y, w, h] = crate::layout::rect(&item)?;
+            let [x, y, w, h] = if width == 200 {
+                crate::layout::rect(&item)?
+            } else {
+                crate::layout::rect_in(&item, width, height)?
+            };
             let opacity = number(&item["opacity"]).unwrap_or(1.).clamp(0., 1.) as f32;
             let mut layer = RgbaImage::new(w, h);
             if let Some(background) = item["background"].as_str() {

@@ -3,7 +3,7 @@ import { afterEach, beforeEach, it, expect, vi } from "vitest";
 import { installFixture } from "./fixture";
 import type { Snapshot } from "./model";
 import { editRoute } from "./Mixer";
-beforeEach(installFixture);
+beforeEach(() => installFixture());
 afterEach(() => {
   delete window.deckforge;
 });

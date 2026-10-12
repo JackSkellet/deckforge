@@ -5,6 +5,8 @@ use anyhow::ensure;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub(super) struct Config {
+    #[serde(default)]
+    pub model: Model,
     pub id: String,
     pub serial: Option<String>,
     pub firmware: String,
@@ -19,6 +21,7 @@ impl Config {
                 .find(|p| p.id == library.active_profile)?;
             let id = &profile.device;
             (!id.is_empty() && id != "simulated-streamdeck-plus").then(|| Self {
+                model: profile.model,
                 id: id.clone(),
                 serial: (!id.starts_with("offline-streamdeck-plus-")).then(|| id.clone()),
                 firmware: "unknown".into(),
@@ -33,12 +36,14 @@ impl Config {
                 .map(|c| c.firmware.clone())
                 .unwrap_or_else(|| "unknown".into());
             Self {
+                model: remembered.as_ref().map(|c| c.model).unwrap_or_default(),
                 id: serial.clone(),
                 serial: Some(serial),
                 firmware,
             }
         } else {
             remembered.unwrap_or_else(|| Self {
+                model: Model::Plus,
                 id: format!("offline-streamdeck-plus-{}", uuid::Uuid::new_v4()),
                 serial: None,
                 firmware: "unknown".into(),
@@ -57,8 +62,29 @@ impl Config {
         Ok(())
     }
 }
-pub(super) fn info() -> Value {
-    json!({"name":"Stream Deck +","type":7,"size":{"columns":4,"rows":2}})
+pub(super) fn selected_model(
+    remembered: Option<&Config>,
+    serial: Option<&str>,
+    requested: Option<Model>,
+) -> Option<Model> {
+    requested.or_else(|| {
+        remembered
+            .filter(|saved| {
+                serial.is_none_or(|serial| saved.serial.as_deref().unwrap_or(&saved.id) == serial)
+            })
+            .map(|saved| saved.model)
+    })
+}
+pub(super) fn info(model: Model) -> Value {
+    json!({"name":model.name(),"type":model.sdk_type(),"size":{"columns":model.columns(),"rows":model.rows()}})
+}
+pub(super) fn valid_slot(model: Model, controller: &str, index: u8) -> bool {
+    match controller {
+        "Keypad" => index < model.key_count(),
+        "Encoder" => index < model.dial_count(),
+        "Neo" => model == Model::Neo && index == 1,
+        _ => false,
+    }
 }
 pub(super) fn validate_controls(controls: device_session::Controls) -> Result<()> {
     ensure!(
@@ -103,6 +129,14 @@ impl Host {
     }
     pub(super) fn set_device_controls(&mut self, controls: device_session::Controls) -> Result<()> {
         validate_controls(controls)?;
+        ensure!(
+            controls.brightness.is_none() || self.model.capabilities().brightness,
+            "This device has no brightness control"
+        );
+        ensure!(
+            controls.sleep_seconds.is_none() || self.model.capabilities().sleep,
+            "This device has no sleep timer"
+        );
         let previous = self.device_controls.insert(self.device.clone(), controls);
         if let Err(error) = self.persist() {
             match previous {
@@ -136,7 +170,8 @@ impl Host {
         self.disconnect_trigger_buttons();
         self.cancel_departing_inputs(&HashSet::new());
         self.cancel_departing_stacks(&HashSet::new());
-        self.dial_pressed = [false; 4];
+        self.dial_pressed.fill(false);
+        self.sensor_pressed.fill(false);
     }
     pub(super) fn device_event(&mut self, event: Event) -> Result<()> {
         if !self.running {
@@ -190,14 +225,19 @@ impl Host {
                 }
                 self.connection_error = Some(reason);
             }
-            Event::Connected { serial, firmware } => {
+            Event::Connected {
+                serial,
+                firmware,
+                model,
+            } => {
                 let config = Config {
+                    model,
                     id: serial.clone(),
                     serial: Some(serial.clone()),
                     firmware: firmware.clone(),
                 };
                 config.validate()?;
-                let changed = self.device != serial;
+                let changed = self.device != serial || self.model != model;
                 let announce = changed || !self.connected;
                 if changed {
                     super::screensaver::adopt_preferences(
@@ -245,7 +285,15 @@ impl Host {
                             profile.device = serial.clone();
                         }
                     }
+                    self.sync_visible();
                     self.device = serial;
+                    self.model = model;
+                    self.dial_pressed = vec![false; model.dial_count() as usize];
+                    self.sensor_pressed = vec![false; model.sensor_count() as usize];
+                    if self.library.current()?.model != model {
+                        self.library.activate_model(model, &self.device)?;
+                    }
+                    self.slots = self.library.visible()?;
                     self.badges.clear();
                 }
                 self.connected = true;
@@ -258,7 +306,7 @@ impl Host {
                     self.device_config = Some(config);
                 }
                 if announce {
-                    self.device_broadcast(json!({"event":"deviceDidConnect","device":self.device,"deviceInfo":info()}));
+                    self.device_broadcast(json!({"event":"deviceDidConnect","device":self.device,"deviceInfo":info(self.model)}));
                 }
                 if changed {
                     for slot in self.slots.iter().flat_map(Slot::visible_flatten) {
@@ -314,6 +362,7 @@ mod tests {
         host.device_controls
             .insert("real-a".into(), device_session::Controls::default());
         host.device_event(Event::Connected {
+            model: Model::Plus,
             serial: "real-a".into(),
             firmware: "test".into(),
         })
@@ -328,6 +377,7 @@ mod tests {
         assert_eq!(commands, vec![device_session::Controls::default()]);
         assert_eq!(host.configured_controls().brightness, None);
         host.device_event(Event::Connected {
+            model: Model::Plus,
             serial: "real-a".into(),
             firmware: "test".into(),
         })
@@ -348,6 +398,7 @@ mod tests {
             serde_json::from_value(serde_json::to_value(&first).unwrap()).unwrap();
         assert_eq!(Config::select(Some(restored), None).id, first.id);
         let original = Config {
+            model: Model::Plus,
             id: "device-a".into(),
             serial: Some("device-a".into()),
             firmware: "2.0.3.4".into(),
@@ -387,6 +438,7 @@ mod tests {
         .unwrap();
         assert!(rx.try_recv().is_err());
         host.device_event(Event::Connected {
+            model: Model::Plus,
             serial: host.device.clone(),
             firmware: "test".into(),
         })
@@ -418,6 +470,7 @@ mod tests {
             },
         );
         host.device_event(Event::Connected {
+            model: Model::Plus,
             serial: "new-device".into(),
             firmware: "test".into(),
         })
@@ -444,6 +497,7 @@ mod tests {
         let (tx, mut rx) = mpsc::unbounded_channel();
         host.plugins[0].sender = Some(tx);
         host.device_event(Event::Connected {
+            model: Model::Plus,
             serial: "new-device".into(),
             firmware: "2.0.3.4".into(),
         })
@@ -462,5 +516,74 @@ mod tests {
         let config = Config::remembered(&saved).unwrap();
         assert_eq!(config.serial.as_deref(), Some("new-device"));
         assert_eq!(config.firmware, "2.0.3.4");
+    }
+    #[test]
+    fn explicit_new_serial_does_not_inherit_other_devices_model_filter() {
+        let saved = Config {
+            model: Model::Plus,
+            id: "plus-a".into(),
+            serial: Some("plus-a".into()),
+            firmware: "test".into(),
+        };
+        assert_eq!(selected_model(Some(&saved), None, None), Some(Model::Plus));
+        assert_eq!(
+            selected_model(Some(&saved), Some("plus-a"), None),
+            Some(Model::Plus)
+        );
+        assert_eq!(selected_model(Some(&saved), Some("mini-b"), None), None);
+        assert_eq!(
+            selected_model(Some(&saved), Some("mini-b"), Some(Model::Mini)),
+            Some(Model::Mini)
+        );
+    }
+    #[test]
+    fn empty_neo_page_clears_infobar_without_fake_inputs() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut host = super::super::tests::fixture(temp.path());
+        host.model = Model::Neo;
+        host.slots.clear();
+        host.library = Library::for_model(vec![], "neo", Model::Neo);
+        host.sensor_pressed = vec![false; 2];
+        let (tx, rx) = std::sync::mpsc::channel();
+        host.hardware = Some(tx);
+        host.render().unwrap();
+        let frames: Vec<_> = rx.try_iter().collect();
+        let frame = frames
+            .into_iter()
+            .find_map(|draw| match draw {
+                Draw::Infobar(image) => Some(image),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!((frame.width(), frame.height()), (232, 50));
+        assert!(frame.to_rgb8().pixels().all(|pixel| pixel.0 == [0, 0, 0]));
+        assert!(
+            super::super::apply_control(
+                &mut host,
+                json!({"command":"input","event":"touchTap","index":0})
+            )
+            .is_err()
+        );
+        assert!(
+            super::super::apply_control(
+                &mut host,
+                json!({"command":"input","event":"swipe","index":0,"start":[1,1],"end":[20,1]})
+            )
+            .is_err()
+        );
+    }
+    #[test]
+    fn touch_input_requires_matching_dial_segment_and_bounds() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut host = super::super::tests::fixture(temp.path());
+        for (x, y) in [(800, 20), (2, 100), (220, 30)] {
+            assert!(
+                super::super::apply_control(
+                    &mut host,
+                    json!({"command":"input","event":"touchTap","index":0,"x":x,"y":y})
+                )
+                .is_err()
+            );
+        }
     }
 }

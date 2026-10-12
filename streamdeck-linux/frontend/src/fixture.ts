@@ -1,6 +1,8 @@
 // Explicit development-only bridge. Never imported in a production bundle.
 import type { Snapshot, Action, Slot, RecordValue } from "./model";
 import { sameMixerValue } from "./Mixer";
+import { fixtureDevice } from "./fixtureDevices";
+import { validControl } from "./device";
 const icon = (label: string, mark: string, color = "#96dfc4") =>
   "data:image/svg+xml;base64," +
   btoa(
@@ -149,13 +151,20 @@ function assigned(
     multi_children: [],
   };
 }
-export function installFixture() {
+export function installFixture(modelId?: string) {
+  const model = fixtureDevice(
+    modelId ?? new URLSearchParams(location.search).get("model") ?? "plus",
+  );
   let listener: ((s: Snapshot) => void) | undefined;
   let actionClipboard: { slot: Slot; mode: "copy" | "cut" } | null = null;
   let uiState: unknown = null;
   const snapshot: Snapshot = {
     running: true,
-    device: "simulated-streamdeck-plus",
+    device_model: model.id,
+    device_name: model.name,
+    device_geometry: model.geometry,
+    device_capabilities: model.capabilities,
+    device: `simulated-streamdeck-${model.id}`,
     firmware: "Simulation",
     simulate: true,
     device_online: true,
@@ -223,6 +232,7 @@ export function installFixture() {
     },
     device_settings: { desired: { brightness: 80 } },
     screensaver: {
+      supported: model.id === "plus",
       active: false,
       preferences: { after_minutes: 0, disable_on_lock: true, image: null },
     },
@@ -298,12 +308,73 @@ export function installFixture() {
       "Development fixture. No real hardware, files or plugins are accessed.",
     ],
   };
+  if (new URLSearchParams(location.search).get("overflow") !== "1")
+    snapshot.slots = snapshot.slots.filter((slot) =>
+      validControl(snapshot, slot.controller, slot.index),
+    );
+  if (model.geometry.keys > 8)
+    snapshot.slots.push(
+      assigned(
+        "com.elgato.counter.action",
+        model.geometry.keys - 1,
+        `Key ${model.geometry.keys}`,
+        String(model.geometry.keys),
+      ),
+    );
+  if (model.geometry.dials > 4)
+    snapshot.slots.push(
+      assigned(
+        "com.elgato.streamdeck.system.multimedia",
+        model.geometry.dials - 1,
+        `Dial ${model.geometry.dials}`,
+        "65%",
+      ),
+    );
+  if (model.id === "neo") {
+    snapshot.actions = [
+      ...snapshot.actions,
+      {
+        uuid: "fixture.neo.infobar",
+        name: "Profile infobar",
+        plugin: "sample",
+        plugin_name: "Fixture",
+        category: "Infobar",
+        controllers: ["Neo"],
+        visible: true,
+        multi_only: false,
+        supported_in_multi: false,
+        defaults: {},
+        states: [],
+      },
+    ];
+    snapshot.slots.push({
+      ...assigned("com.elgato.counter.action", 1, "Infobar", "MAIN"),
+      controller: "Neo",
+      context: "fixture-infobar",
+      uuid: "fixture.neo.infobar",
+      name: "Profile infobar",
+      has_inspector: true,
+    });
+  }
+  for (const profile of snapshot.library.profiles) {
+    profile.device_model = model.id;
+    profile.device_name = model.name;
+    profile.compatible = true;
+  }
   function transfer(
     source: Slot,
     target: { controller: string; index: number },
     copy: boolean,
     expected: string | null,
   ) {
+    if (
+      !validControl(
+        snapshot,
+        target.controller as Slot["controller"],
+        target.index,
+      )
+    )
+      throw new Error("Control outside device geometry");
     const destination = snapshot.slots.find(
       (s) => s.controller === target.controller && s.index === target.index,
     );
@@ -370,7 +441,7 @@ export function installFixture() {
           const source = snapshot.slots.find(
             (s) => s.context === payload.context,
           );
-          if (!source) throw new Error("Unknown action");
+          if (!source) throw new Error("Unknown assignable action");
           const mode = payload.command === "slot_copy" ? "copy" : "cut";
           actionClipboard = { slot: structuredClone(source), mode };
           snapshot.clipboard = {
@@ -457,22 +528,48 @@ export function installFixture() {
           if (payload.reset_image) slot.appearance!.image_custom = false;
         }
         if (payload.command === "assign") {
+          if (!validControl(snapshot, payload.controller, payload.index))
+            throw new Error("Control outside device geometry");
           snapshot.slots = snapshot.slots.filter(
             (s) =>
               !(
                 s.controller === payload.controller && s.index === payload.index
               ),
           );
-          const a = actions.find((a) => a.uuid === payload.uuid)!;
-          snapshot.slots.push(
-            assigned(a.uuid, payload.index, a.name, a.name.slice(0, 1)),
-          );
+          const a = snapshot.actions.find((a) => a.uuid === payload.uuid)!;
+          if (a.controllers.includes("Neo")) {
+            snapshot.slots.push({
+              ...assigned(
+                "com.elgato.counter.action",
+                payload.index,
+                a.name,
+                a.name.slice(0, 1),
+              ),
+              context: crypto.randomUUID(),
+              uuid: a.uuid,
+              name: a.name,
+              controller: payload.controller,
+            });
+          } else
+            snapshot.slots.push(
+              assigned(a.uuid, payload.index, a.name, a.name.slice(0, 1)),
+            );
         }
         if (payload.command === "profile_select") {
           snapshot.library.active_profile = payload.id;
           snapshot.library.active_page = snapshot.library.profiles.find(
             (p) => p.id === payload.id,
           )!.page_order[0];
+        }
+        if (payload.command === "page_step") {
+          const profile = snapshot.library.profiles.find(
+            (p) => p.id === snapshot.library.active_profile,
+          )!;
+          const old = profile.page_order.indexOf(snapshot.library.active_page);
+          const next =
+            (old + Math.sign(payload.direction) + profile.page_order.length) %
+            profile.page_order.length;
+          snapshot.library.active_page = profile.page_order[next];
         }
         if (payload.command === "page_select")
           snapshot.library.active_page = payload.id;

@@ -1758,6 +1758,7 @@ mod tests {
     fn editor_window_recreation_preserves_unsaved_drafts_and_selection() {
         let state = tempfile::tempdir().unwrap();
         let running = crate::host::start(crate::host::HostOptions {
+            model: None,
             serial: None,
             plugins: vec![],
             profile: None,
