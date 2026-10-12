@@ -29,7 +29,7 @@ Desktop interaction requirements come from the official [plugin setup guide][plu
 | UI-01 | Standalone native desktop application; launch without a browser | **Verified subset, C/T/H/U.** Default launch opens an installed native egui window with an in-process Rust controller. Native capture, owned-child shutdown, and real-device settings edits are verified. Desktop menu entry validates; separate menu-click acceptance remains unverified. | Launch installed application from Linux desktop menu. Configure and operate the device entirely within its own window. Capture window/process evidence and user acceptance. |
 | UI-02 | Device canvas, key/dial selection, live previews and action assignment | **Verified subset, C/T/H/U.** Native canvas displays eight keys/four dials and real previews. User confirmed native settings/save affects physical input. Replacement, deletion, all-slot geometry and broader keyboard workflows still need end-to-end acceptance. | Native canvas maps every Plus slot accurately; assignment, replacement, deletion, keyboard navigation and persisted state all work on hardware. |
 | UI-03 | Action library with categories, search, controller filtering and useful plugin metadata | **Partial, C.** Native action selector filters by controller and exposes installed actions; categories/search/icons remain incomplete. | Search/filter official manifests; key actions cannot be accidentally placed on dial-only slots; categories, icons and disabled/incompatible states are clear. |
-| UI-04 | Drag/drop, move/copy/paste, reorder, remove, context menus and reusable action editing | **Missing, C.** No native editing workflow. [Action sharing][sharing] confirms import/export workflows. | Exercise internal and file-manager drag/drop; copy across pages/profiles; verify nested data and settings survive. Test undo/recovery as a Linux usability requirement. |
+| UI-04 | Drag/drop, move/copy/paste, reorder, remove, context menus and reusable action editing | **Partial, C/T.** Multi Action steps support native add/remove/reorder and draft editing. General canvas drag/drop, copy/paste and action-sharing files remain missing. | Exercise internal and file-manager drag/drop; copy across pages/profiles; verify nested data and settings survive. Test undo/recovery as a Linux usability requirement. |
 | UI-05 | Action-specific configuration with plugin property inspectors | **Verified subset, C/T.** Native Plugin settings opens a WebKit inspector. Unchanged Counter PI registers; instrumented original control saves into the real plugin. Broader forms/file controls remain unverified. | Open unchanged official property inspector; edit controls, file selectors and dynamic lists; verify visible plugin/hardware response and restart persistence. [PI guide][pi] |
 | UI-06 | Titles, typography, image selection, icon/background libraries, preview fidelity | **Partial, C.** Fontdue title rendering and raster backgrounds exist; full style controls and asset libraries do not. | Compare imported title size/style/alignment/color, custom icons and state changes with reference screenshots; verify scaled native UI and hardware rendering. [Key guide][keys], [layouts][layouts] |
 | UI-07 | Window/tray lifecycle, startup preference, diagnostics and update/about UI | **Partial, C/T.** Native window close, SIGINT/SIGTERM, owned-child cleanup and failure logging work. Tray, login startup, update UI and instance activation remain missing. | Close/reopen window without interrupting configured background actions; explicitly quit stops only this app's children; test login startup, version display and bounded logs. [Preferences][preferences], [7.6 fixes][release76] |
@@ -59,7 +59,7 @@ The shipped profiles contain real action identifiers and settings; their presenc
 | AC-02 | Hotkey, hotkey switch, modifiers, text entry and optional Enter | **Partial, A/C/T.** Native shortcut editor, Qt-to-evdev translation, held ownership and exact Plus trigger indices implemented. uinput device creation/removal verified, but event readback skipped for missing event-node read access. Compositor shortcuts, arbitrary layouts, Coalesce, hotkey switch and text remain open. | Exercise a named Linux application under supported X11/Wayland sessions; verify Unicode, modifier release, repeated presses, focus and held keys without stuck input. [System actions][system] |
 | AC-03 | Multimedia transport, mute and volume | **Partial, A/C/T.** Original transport enum and composite volume-dial mapping recovered and implemented through Linux media key events. Real audio/player acceptance and external state feedback remain open. | Play/pause/seek where supported, mute and change volume against real media players; verify externally changed state feeds back. [System actions][system] |
 | AC-04 | Soundboard playback, looping, overlap/restart, fades, volume and output device | **Verified subset, A/C/T.** Native controls, independent streaming mixer and Pulse/PipeWire transport implement four playback modes, volume, fades, routing and soundboard-wide stop. Captured virtual-sink PCM verifies WAV/embedded MP3, volume and fade envelopes. Audible/physical acceptance, Windows timing/visual equivalence and multichannel downmix remain open. | Play supported audio fixtures in each documented mode, route to selected output, stop/retrigger and restart host safely. Verify captured audio and audible output. [Soundboard][soundboard] |
-| AC-05 | Multi Actions, delays, switch/random variants and plugin multi-action context | **Missing, A/C.** Shipped fixtures include routine/delay UUIDs; outgoing events always say `isInMultiAction:false`. | Import/reorder sequences, check measured timing and stateful branches, then verify plugin events with a fixture that consumes multi-action state. Inventory switch/random behavior before marking those variants passed. [Multi Actions][multi], [delay controls][delays] |
+| AC-05 | Multi Actions, delays, switch/random variants and plugin multi-action context | **Verified subset, A/C/T.** Native ordered-step editor, delays, Switch and Random run through an incremental scheduler. Child SDK payloads, desired states, settings/PI ownership, cancellation and restart identities pass real-process tests; unchanged Hello World runs nested. Physical shortcuts and full Windows workflow equivalence remain open. | Import/reorder sequences, check measured timing and stateful branches, then verify plugin events with a fixture that consumes multi-action state. Inventory switch/random behavior before marking those variants passed. [Multi Actions][multi], [delay controls][delays] |
 | AC-06 | Dial Stacks | **Missing, A/C.** `com.elgato.streamdeck.dial.stack` appears in shipped profiles. | Load multiple real dial actions; dial push cycles active action and corresponding touch display; settings persist independently. [Dial Stacks][stacks] |
 | AC-07 | Action Trigger adapts key actions to dial directions/press | **Missing, A/C.** Shipped key-adaptor actions are preserved without execution. | Configure three different actions, exercise both rotation directions and press, and verify corresponding plugin key-event semantics. [Action Trigger][trigger] |
 | AC-08 | Action Wheel and Key Logic/Key Stack behaviors | **Missing/Unresolved, A/C.** Shipped `keys.logic`/`keys.stack` descriptors exist; semantics are not fully investigated. | Implement documented wheel selection/activation and record actual 7.6 Key Logic/Stack reference behavior before creating differential tests. [Action Wheel][wheel], [7.4 fixes][release74] |
@@ -317,3 +317,30 @@ Captured amplitude halves at 50% volume; both fade envelopes are measured.
 Native capture, source/binary hashes and output-routing evidence are retained
 in `../../evidence/soundboard/`. The installed build reconnects the real Plus
 and original Counter/Layouts plugins; soundboard hardware acceptance is pending.
+
+
+### Multi Action evidence update, 2026-10-12
+
+`../../evidence/multi-action-contracts.json` records the shipped routine fixture,
+its hashes and bounded native dispatch/serializer evidence. Children use
+`Actions[group].Actions`; `OverrideState` is distinct from current `State`.
+The two timing components are `MultiActionDelays.Delay1` and `Delay2`, each
+1–100 ms. Native branches establish repeated-press cancellation, success-only
+switch advancement and random selection with possible repeats. Exact page-hide
+callers and cancellation-time child cleanup remain partly unresolved.
+
+`tests/multi_interop.py` measures generated real-plugin events and runs the
+unchanged official Hello World sample. It checks child PI registration, settings,
+configured/manifest timing, desired-state envelopes without canvas coordinates,
+cancellation, switch/random behavior, native loopback requests, export and restart.
+The original Windows macro imports/exports without executing its system shortcuts.
+Pure host tests cover cancellation of already-dequeued events and nested audio
+embedding. Native editor drafts retain unknown fields and survive failed saves.
+Keyboard initialization is awaited before starting timed sequences; no physical
+shortcut timing is claimed by the non-injection test suite.
+
+This Multi Action checkpoint passes 129 non-injection tests plus the gated
+keyboard no-op path, strict Clippy and nine optimized-process suites. The native
+editor capture, timing/protocol tests, hashes and unchanged Hello World build
+evidence are retained in `../../evidence/multi-actions/`. The installed app
+connects the attached Plus and all three sample plugins.

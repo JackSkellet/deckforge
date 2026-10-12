@@ -71,13 +71,18 @@ pub(super) fn build_profile_files(
         .pages
         .iter()
         .flat_map(|page| &page.slots)
+        .flat_map(Slot::flatten)
         .any(|slot| {
             slot.uuid == "com.elgato.streamdeck.soundboard.playaudio"
                 && slot.settings["path"]
                     .as_str()
                     .is_some_and(|path| !path.is_empty())
                 && (slot.raw.as_object().is_none_or(|raw| raw.is_empty())
-                    || slot.settings["path"] != slot.raw["Settings"]["path"])
+                    || slot.settings["path"] != slot.raw["Settings"]["path"]
+                    || (slot.raw.pointer("/Resources/file").is_none()
+                        && slot.settings["path"]
+                            .as_str()
+                            .is_some_and(|p| Path::new(p).is_file())))
         });
     let wrapped = added_audio
         || source
@@ -418,6 +423,15 @@ fn export_action(
     if native || raw.get("States").is_some() || !states.is_empty() {
         raw["States"] = json!(states);
     }
+    if !slot.multi_children.is_empty() {
+        for (branch, children) in slot.multi_children.iter().enumerate() {
+            let exported = children
+                .iter()
+                .map(|child| export_action(child, page_root, files, roots))
+                .collect::<Result<Vec<_>>>()?;
+            raw["Actions"][branch]["Actions"] = json!(exported);
+        }
+    }
     Ok(raw)
 }
 
@@ -433,7 +447,11 @@ fn embed_audio_resource(
     let path = slot.settings["path"].as_str();
     // An imported resource is authoritative even if its source machine's path
     // no longer exists. Keep its registry and compressed payload bytes intact.
-    if !native && path == slot.raw["Settings"]["path"].as_str() {
+    if !native
+        && path == slot.raw["Settings"]["path"].as_str()
+        && (raw.pointer("/Resources/file").is_some()
+            || !path.is_some_and(|p| Path::new(p).is_file()))
+    {
         return Ok(());
     }
     if let Some(resources) = raw.get_mut("Resources").and_then(Value::as_object_mut) {

@@ -116,6 +116,37 @@ Linux output path; audible speaker/headphone and physical key acceptance remain
 separate. Exact Windows fade curves/timing, multichannel downmix and hardware
 playback/progress graphics remain open. Export acceptance in Windows is unverified.
 
+## Multi Actions
+
+Assign **Multi Action**, **Multi Action Switch**, or **Random Action** to a key.
+The native editor adds, removes and reorders steps, edits each step's settings,
+and opens compatible plugin inspectors. **Save sequence** applies the draft.
+A switch has two sequences and advances after successful completion. Random
+runs one selected step and permits repeated choices. Pressing a running sequence
+again cancels it.
+
+A step's virtual key hold and following gap each support 1–100 ms; explicit
+Delay steps use milliseconds. Instance timing overrides plugin-manifest timing,
+then the 100 ms defaults. Long waits do not block the editor. Leaving a page or
+quitting cancels its running sequences and releases dispatched controls. Page-hide
+cancellation is a Linux behavior pending an exact Windows page-transition trace.
+Keyboard preparation finishes before timed steps begin.
+
+Each child has a stable context, isolated settings and real `isInMultiAction`
+plugin events. Desired state uses the original `OverrideState` field. Plugins
+that declare `SupportedInMultiActions: false`, including the official Counter,
+are excluded. The unchanged Hello World sample is tested inside sequences and is installed
+alongside Counter and Layouts in the native action library.
+Nested Multi Actions are rejected, as specified by Elgato; unknown imported steps
+stay preserved and block execution with a useful error.
+
+Profiles retain nested settings and assets, including newly embedded audio.
+Measured plugin events verify ordering, hold/gap timing, cancellation, switch and
+random behavior. Physical shortcut timing, Windows export acceptance, and full
+native workflow/hardware acceptance remain separate checks. A sequence dispatches
+asynchronous actions in order; it cannot infer when an external application or
+network operation has finished.
+
 ## Commands
 
 ```sh
@@ -176,7 +207,7 @@ completion criterion replaces the desktop parity goal.
    controls and real-world plugin compatibility beyond the tested samples.
 2. Separate hardware/editor targets, inactive-state image/title updates, alerts,
    animation, and native-reference visual validation of layout font/bar details.
-3. Windows acceptance of exported profiles, folder auto-exit, multi-actions,
+3. Windows acceptance of exported profiles, folder auto-exit, dial stacks,
    text/hotkey-switch/audio actions, application activation, and automatic profile selection.
 4. Native Windows/macOS plugin binaries and platform-specific dependencies.
    These do not become Linux programs simply by reproducing the WebSocket API.
@@ -204,6 +235,7 @@ python tests/profile_interop.py
 python tests/bundled_profiles_interop.py
 python tests/system_interop.py
 python tests/soundboard_interop.py --binary target/release/deckforge
+python tests/multi_interop.py --binary target/release/deckforge
 ```
 
 The optional installer test needs the local Windows artifacts. The sample

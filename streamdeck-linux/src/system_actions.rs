@@ -49,12 +49,22 @@ pub fn defaults(uuid: &str) -> Value {
 }
 #[derive(Debug, PartialEq)]
 pub enum Plan {
-    Launch { program: PathBuf, args: Vec<String> },
+    /// Initialize the virtual keyboard without pressing or releasing any key.
+    PrepareKeyboard,
+    Launch {
+        program: PathBuf,
+        args: Vec<String>,
+    },
     Get(String),
     Chord(Vec<u16>),
     Press(Vec<u16>),
     Release,
     Repeat(Vec<u16>, u8),
+}
+impl Plan {
+    fn prepares_keyboard(&self) -> bool {
+        matches!(self, Self::PrepareKeyboard)
+    }
 }
 
 fn text<'a>(settings: &'a Value, key: &str) -> Result<&'a str> {
@@ -274,11 +284,14 @@ struct Job {
 pub struct Report {
     pub context: String,
     pub result: Result<String>,
+    /// Identifies the preparation request on both success and failure.
+    pub prepared_keyboard: bool,
 }
 pub struct Worker {
     sender: mpsc::SyncSender<Job>,
     reports: mpsc::Receiver<Report>,
     stop: Arc<AtomicBool>,
+    keyboard_ready: Arc<AtomicBool>,
     thread: Option<thread::JoinHandle<()>>,
 }
 impl Worker {
@@ -287,6 +300,8 @@ impl Worker {
         let (report_tx, reports) = mpsc::channel();
         let stop = Arc::new(AtomicBool::new(false));
         let stopped = stop.clone();
+        let keyboard_ready = Arc::new(AtomicBool::new(false));
+        let ready = keyboard_ready.clone();
         let thread = thread::spawn(move || {
             let mut keyboard: Option<crate::system_keyboard::Keyboard> = None;
             let mut holds = HashMap::new();
@@ -300,6 +315,7 @@ impl Worker {
                             let _ = report_tx.send(Report {
                                 context: context.clone(),
                                 result: Err(anyhow::anyhow!("Application exited with {status}")),
+                                prepared_keyboard: false,
                             });
                         }
                         false
@@ -308,6 +324,7 @@ impl Worker {
                         let _ = report_tx.send(Report {
                             context: context.clone(),
                             result: Err(e.into()),
+                            prepared_keyboard: false,
                         });
                         false
                     }
@@ -326,6 +343,7 @@ impl Worker {
                         let _ = report_tx.send(Report {
                             context: job.context,
                             result: Err(anyhow::anyhow!("Too many background requests")),
+                            prepared_keyboard: false,
                         });
                         continue;
                     }
@@ -348,16 +366,26 @@ impl Worker {
                         let _ = reports.send(Report {
                             context: job.context,
                             result,
+                            prepared_keyboard: false,
                         });
                     }));
                     continue;
                 }
                 let keyboard_action = matches!(
                     job.plan,
-                    Plan::Chord(_) | Plan::Press(_) | Plan::Release | Plan::Repeat(_, _)
+                    Plan::PrepareKeyboard
+                        | Plan::Chord(_)
+                        | Plan::Press(_)
+                        | Plan::Release
+                        | Plan::Repeat(_, _)
                 );
+                let prepared_keyboard = job.plan.prepares_keyboard();
                 let result = (|| -> Result<String> {
                     match job.plan {
+                        Plan::PrepareKeyboard => {
+                            prepare_keyboard(&mut keyboard, &ready, &stopped)?;
+                            Ok("Keyboard ready".into())
+                        }
                         Plan::Launch { program, args } => {
                             ensure!(
                                 children.len() < 32,
@@ -383,10 +411,11 @@ impl Worker {
                             Ok("Keyboard shortcut released".into())
                         }
                         Plan::Press(keys) => {
-                            if !keys.is_empty() && !holds.contains_key(&job.context) {
-                                if keyboard.is_none() {
-                                    keyboard = Some(crate::system_keyboard::Keyboard::new()?);
-                                }
+                            if keys.is_empty() {
+                                return Ok("No keyboard shortcut configured".into());
+                            }
+                            if !holds.contains_key(&job.context) {
+                                prepare_keyboard(&mut keyboard, &ready, &stopped)?;
                                 if stopped.load(Ordering::Acquire) {
                                     bail!("Action cancelled during shutdown");
                                 }
@@ -396,9 +425,10 @@ impl Worker {
                             Ok("Keyboard shortcut pressed".into())
                         }
                         Plan::Repeat(keys, count) => {
-                            if keyboard.is_none() {
-                                keyboard = Some(crate::system_keyboard::Keyboard::new()?);
+                            if keys.is_empty() || count == 0 {
+                                return Ok("No keyboard shortcuts to send".into());
                             }
+                            prepare_keyboard(&mut keyboard, &ready, &stopped)?;
                             for _ in 0..count {
                                 if stopped.load(Ordering::Acquire) {
                                     bail!("Action cancelled during shutdown");
@@ -408,9 +438,10 @@ impl Worker {
                             Ok("Dial shortcuts sent".into())
                         }
                         Plan::Chord(keys) => {
-                            if keyboard.is_none() {
-                                keyboard = Some(crate::system_keyboard::Keyboard::new()?);
+                            if keys.is_empty() {
+                                return Ok("No keyboard shortcut configured".into());
                             }
+                            prepare_keyboard(&mut keyboard, &ready, &stopped)?;
                             if stopped.load(Ordering::Acquire) {
                                 bail!("Action cancelled during shutdown");
                             }
@@ -420,6 +451,7 @@ impl Worker {
                     }
                 })();
                 if keyboard_action && result.is_err() {
+                    ready.store(false, Ordering::Release);
                     holds.clear();
                     if let Some(mut failed) = keyboard.take() {
                         let _ = failed.release_all();
@@ -428,8 +460,10 @@ impl Worker {
                 let _ = report_tx.send(Report {
                     context: job.context,
                     result,
+                    prepared_keyboard,
                 });
             }
+            ready.store(false, Ordering::Release);
             if let Some(keyboard) = &mut keyboard {
                 let _ = keyboard.release_all();
             }
@@ -448,6 +482,7 @@ impl Worker {
             sender,
             reports,
             stop,
+            keyboard_ready,
             thread: Some(thread),
         }
     }
@@ -466,9 +501,36 @@ impl Worker {
     pub fn drain(&self) -> Vec<Report> {
         self.reports.try_iter().collect()
     }
+    pub fn keyboard_ready(&self) -> bool {
+        !self.stop.load(Ordering::Acquire)
+            && self.keyboard_ready.load(Ordering::Acquire)
+            && self
+                .thread
+                .as_ref()
+                .is_some_and(|thread| !thread.is_finished())
+    }
     pub fn cancel(&self) {
         self.stop.store(true, Ordering::Release);
+        self.keyboard_ready.store(false, Ordering::Release);
     }
+}
+fn prepare_keyboard(
+    keyboard: &mut Option<crate::system_keyboard::Keyboard>,
+    ready: &AtomicBool,
+    stopped: &AtomicBool,
+) -> Result<()> {
+    if keyboard.is_none() {
+        ready.store(false, Ordering::Release);
+        *keyboard = Some(crate::system_keyboard::Keyboard::new()?);
+    }
+    ensure!(
+        !stopped.load(Ordering::Acquire),
+        "Keyboard preparation cancelled during shutdown"
+    );
+    // Keyboard::new includes its registration grace period. Only announce ready
+    // afterwards, before the FIFO worker publishes its preparation report.
+    ready.store(true, Ordering::Release);
+    Ok(())
 }
 impl Drop for Worker {
     fn drop(&mut self) {
@@ -482,6 +544,53 @@ impl Drop for Worker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn preparation_is_the_only_plan_classified_as_a_readiness_report() {
+        assert!(Plan::PrepareKeyboard.prepares_keyboard());
+        for plan in [
+            Plan::Release,
+            Plan::Chord(vec![]),
+            Plan::Press(vec![]),
+            Plan::Repeat(vec![], 0),
+            Plan::Get("https://example.invalid".into()),
+            Plan::Launch {
+                program: PathBuf::from("unused"),
+                args: vec![],
+            },
+        ] {
+            assert!(!plan.prepares_keyboard());
+        }
+    }
+    #[test]
+    fn lazy_worker_and_empty_keyboard_jobs_never_become_ready() {
+        let worker = Worker::new();
+        assert!(!worker.keyboard_ready());
+        for plan in [
+            Plan::Chord(vec![]),
+            Plan::Press(vec![]),
+            Plan::Repeat(vec![], 3),
+            Plan::Repeat(vec![194], 0),
+            Plan::Release,
+        ] {
+            worker.submit("empty", plan).unwrap();
+            let report = worker.reports.recv_timeout(Duration::from_secs(2)).unwrap();
+            assert!(report.result.is_ok());
+            assert!(!report.prepared_keyboard);
+            assert!(!worker.keyboard_ready());
+        }
+        let ready = worker.keyboard_ready.clone();
+        drop(worker);
+        assert!(!ready.load(Ordering::Acquire));
+    }
+    #[test]
+    fn cancellation_clears_readiness_immediately() {
+        let worker = Worker::new();
+        // Model the flag only; this test never creates a uinput device.
+        worker.keyboard_ready.store(true, Ordering::Release);
+        worker.cancel();
+        assert!(!worker.keyboard_ready.load(Ordering::Acquire));
+        assert!(!worker.keyboard_ready());
+    }
     #[test]
     fn plans_never_interpret_shell_source() {
         assert!(plan(OPEN, &json!({"path":"/bin/true; touch /tmp/not-created"})).is_err());

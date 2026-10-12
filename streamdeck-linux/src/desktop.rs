@@ -220,6 +220,7 @@ struct PendingDelete {
     name: String,
 }
 struct Desktop {
+    multi_editor: crate::multi_editor::Editor,
     controller: Controller,
     snapshot: Value,
     last_poll: Option<Instant>,
@@ -240,6 +241,7 @@ struct Desktop {
 impl Desktop {
     fn new(controller: Controller) -> Self {
         Self {
+            multi_editor: crate::multi_editor::Editor::default(),
             controller,
             snapshot: json!({}),
             last_poll: None,
@@ -420,6 +422,13 @@ impl Desktop {
         let system_status = string(&self.snapshot, "system_status");
         if !system_status.is_empty() {
             ui.label(system_status);
+        }
+        if self.snapshot["multi_runs"]
+            .as_array()
+            .is_some_and(|runs| !runs.is_empty())
+            && ui.button("Cancel running sequences").clicked()
+        {
+            self.command(json!({"command":"multi_cancel"}));
         }
         let voices = self.snapshot["audio_active"]
             .as_object()
@@ -777,9 +786,10 @@ impl Desktop {
             .width((ui.available_width() - 16.0).max(180.0))
             .show_ui(ui, |ui| {
                 for action in actions.iter().filter(|a| {
-                    a["controllers"]
-                        .as_array()
-                        .is_some_and(|cs| cs.iter().any(|c| c == selection.controller()))
+                    a["multi_only"] != true
+                        && a["controllers"]
+                            .as_array()
+                            .is_some_and(|cs| cs.iter().any(|c| c == selection.controller()))
                 }) {
                     if ui
                         .selectable_value(
@@ -855,6 +865,30 @@ impl Desktop {
         self.drafts.insert(selection, draft);
     }
     fn settings_editor(&mut self, ui: &mut egui::Ui, draft: &mut Draft, assigned_action: &str) {
+        if matches!(
+            assigned_action,
+            "com.elgato.streamdeck.multiactions.routine"
+                | "com.elgato.streamdeck.multiactions.routine2"
+                | "com.elgato.streamdeck.multiactions.random"
+        ) {
+            let parent = self.slot(self.selected).cloned().unwrap_or(json!({}));
+            let actions = self.snapshot["actions"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+            let outputs: Vec<(String, String)> =
+                serde_json::from_value(self.snapshot["audio_outputs"].clone()).unwrap_or_default();
+            let requests = self.multi_editor.show(ui, &parent, &actions, &outputs);
+            for request in requests {
+                let context = string(&request, "context").to_owned();
+                let save = string(&request, "command") == "multi_save";
+                let success = self.command(request);
+                if save {
+                    self.multi_editor.saved(&context, success);
+                }
+            }
+            return;
+        }
         ui.add_enabled_ui(!draft.raw_dirty, |ui| {
             let outputs: Vec<(String, String)> =
                 serde_json::from_value(self.snapshot["audio_outputs"].clone()).unwrap_or_default();

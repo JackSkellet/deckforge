@@ -3,6 +3,8 @@ mod desktop;
 mod hardware;
 mod host;
 mod layout;
+mod multi;
+mod multi_editor;
 mod package;
 mod profile;
 mod render;

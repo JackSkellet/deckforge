@@ -76,9 +76,7 @@ impl Host {
     }
     pub(super) fn open_inspector(&mut self, context: &str) -> Result<()> {
         let slot = self
-            .slots
-            .iter()
-            .find(|s| s.context == context)
+            .visible_slot(context)
             .context("Action no longer exists")?;
         let action = self
             .actions
@@ -142,7 +140,7 @@ impl Host {
     pub(super) fn close_inspector(&mut self, registration: &str) {
         if let Some(inspector) = self.inspectors.remove(registration) {
             if inspector.sender.is_some()
-                && let Some(slot) = self.slots.iter().find(|s| s.context == inspector.context)
+                && let Some(slot) = self.visible_slot(&inspector.context)
             {
                 self.emit(slot, "propertyInspectorDidDisappear", json!({}));
             }
@@ -203,10 +201,9 @@ impl Host {
             .sender
             .clone()
             .context("Inspector not registered")?;
-        let slot_index = self
-            .slots
-            .iter()
-            .position(|s| s.context == context)
+        let mut slot = self
+            .visible_slot(&context)
+            .cloned()
             .context("Inspector action no longer exists")?;
         let event = message["event"].as_str().context("Missing event")?;
         if let Some(supplied) = message.get("context") {
@@ -221,27 +218,27 @@ impl Host {
             bail!("Inspector targetContext is outside its action");
         }
         if let Some(action) = message.get("action")
-            && action.as_str() != Some(&self.slots[slot_index].uuid)
+            && action.as_str() != Some(&slot.uuid)
         {
             bail!("Inspector action UUID does not match its session");
         }
         let payload = message.get("payload").cloned().unwrap_or(json!({}));
         match event {
             "getSettings" => {
-                let _ =
-                    sender.send(self.settings_event(&self.slots[slot_index], message.get("id")));
+                let _ = sender.send(self.settings_event(&slot, message.get("id")));
             }
             "setSettings" => {
                 self.editable()?;
                 if !payload.is_object() {
                     bail!("Settings must be an object");
                 }
-                self.slots[slot_index].settings = payload;
+                slot.settings = payload;
+                self.store_slot(slot.clone());
                 self.persist()?;
-                self.emit(&self.slots[slot_index], "didReceiveSettings", json!({}));
+                self.emit(&slot, "didReceiveSettings", json!({}));
                 self.notify_inspectors(
                     &context,
-                    self.settings_event(&self.slots[slot_index], None),
+                    self.settings_event(&slot, None),
                     Some(registration),
                 );
             }
@@ -262,7 +259,7 @@ impl Host {
                 self.notify_global_settings(plugin, Some(registration), true);
             }
             "sendToPlugin" => {
-                let slot = &self.slots[slot_index];
+                let slot = &slot;
                 if let Some(sender) = &self.plugins[plugin].sender {
                     let _=sender.send(json!({"event":"sendToPlugin","action":slot.uuid,"context":slot.context,"device":self.device,"payload":payload}));
                 }

@@ -34,7 +34,7 @@ impl Host {
             .find(|p| {
                 p.pages
                     .iter()
-                    .any(|page| page.slots.iter().any(|s| s.context == context))
+                    .any(|page| page.slots.iter().any(|s| s.find(context).is_some()))
             })
             .context("Audio resource owner missing")?;
         let source = owner

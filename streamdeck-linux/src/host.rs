@@ -36,6 +36,7 @@ mod display;
 mod export;
 mod inspectors;
 mod library;
+mod multiaction;
 use inspectors::Inspector;
 use library::Library;
 
@@ -120,6 +121,10 @@ pub fn start(options: HostOptions) -> Result<EmbeddedHost> {
 }
 #[derive(Clone, Serialize, Deserialize)]
 struct Slot {
+    #[serde(default)]
+    multi_children: Vec<Vec<Slot>>,
+    #[serde(default)]
+    multi_id: String,
     context: String,
     controller: String,
     index: u8,
@@ -235,6 +240,13 @@ enum HeldControl {
     Dial(u8),
 }
 struct Host {
+    multi_owned: HashSet<String>,
+    multi_held: HashMap<String, crate::multi::Entry>,
+    multi_pending: HashMap<String, Vec<crate::multi::Entry>>,
+    multi_preparing: bool,
+    multi: crate::multi::Scheduler,
+    multi_clock: std::time::Instant,
+    multi_notify: Arc<tokio::sync::Notify>,
     audio: Option<crate::audio_output::Worker>,
     audio_outputs: Vec<(String, String)>,
     audio_active: HashMap<String, usize>,
@@ -265,7 +277,12 @@ struct Host {
 }
 
 fn action_payload(slot: &Slot) -> Value {
-    json!({"controller":slot.controller,"coordinates":{"column":slot.index%4,"row":if slot.controller=="Encoder"{0}else{slot.index/4}},"settings":slot.settings,"state":slot.state,"isInMultiAction":false,"resources":{}})
+    let mut payload = json!({"controller":slot.controller,"settings":slot.settings,"state":slot.state,"isInMultiAction":!slot.multi_id.is_empty(),"resources":{}});
+    if slot.multi_id.is_empty() {
+        payload["coordinates"] =
+            json!({"column":slot.index%4,"row":if slot.controller=="Encoder"{0}else{slot.index/4}});
+    }
+    payload
 }
 impl Host {
     fn import_profile(&mut self, path: &Path) -> Result<()> {
@@ -314,6 +331,11 @@ impl Host {
     }
     fn emit(&self, slot: &Slot, event: &str, extra: Value) {
         let action = self.actions.iter().find(|a| a.uuid == slot.uuid);
+        if !slot.multi_id.is_empty()
+            && action.is_some_and(|a| a.raw["SupportedInMultiActions"] == false)
+        {
+            return;
+        }
         let plugin = action.and_then(|a| self.plugins.iter().find(|p| p.id == a.plugin));
         if let Some(sender) = plugin.and_then(|p| p.sender.as_ref()) {
             let mut payload = action_payload(slot);
@@ -368,6 +390,9 @@ impl Host {
         Ok(())
     }
     fn assign(&mut self, controller: &str, index: u8, uuid: &str) -> Result<()> {
+        if uuid == multiaction::DELAY {
+            bail!("Add Delay inside a Multi Action");
+        }
         if !((controller == "Keypad" && index < 8) || (controller == "Encoder" && index < 4)) {
             bail!("Invalid Stream Deck+ slot");
         }
@@ -395,6 +420,8 @@ impl Host {
             .unwrap_or("")
             .to_owned();
         let mut slot = Slot {
+            multi_children: vec![],
+            multi_id: String::new(),
             context: uuid::Uuid::new_v4().to_string(),
             controller: controller.into(),
             index,
@@ -426,6 +453,12 @@ impl Host {
         };
         if let Some(plugin) = self.plugins.iter().find(|p| p.id == action.plugin) {
             slot.background = state_image(&plugin.root, &slot.states, 0);
+        }
+        if multiaction::container(uuid) {
+            slot.raw = json!({"Actions":[{"Actions":[]},{"Actions":[]}]});
+        }
+        if uuid == multiaction::DELAY {
+            slot.settings = json!({"delay":1000});
         }
         self.library.place(slot)?;
         self.refresh_page()
@@ -547,6 +580,17 @@ impl Host {
                 _ => {}
             }
         }
+        if multiaction::container(&slot.uuid) {
+            if pressed && self.multi_running(&slot.context) {
+                self.cancel_multi(&slot.context);
+                self.held.remove(&control);
+                self.released.insert(control);
+                self.system_status = "Multi Action cancelled".into();
+            } else if owned_release {
+                self.start_multi(&slot)?;
+            }
+            return Ok(());
+        }
         if crate::audio_output::supported(&slot.uuid) {
             if owned_release {
                 self.soundboard_action(&slot)?;
@@ -597,6 +641,9 @@ impl Host {
             .map(|worker| worker.drain())
             .unwrap_or_default();
         for report in reports {
+            if report.prepared_keyboard {
+                self.multi_keyboard_prepared(report.result.is_ok());
+            }
             let name = self
                 .slots
                 .iter()
@@ -699,12 +746,8 @@ impl Host {
             self.notify_global_settings(plugin_index, None, false);
             return Ok(());
         }
-        let active_index = self.slots.iter().position(|s| s.context == context);
-        let Some(original) = active_index
-            .map(|i| &self.slots[i])
-            .or_else(|| self.library.slot(context))
-            .cloned()
-        else {
+        let active = self.visible_slot(context).is_some();
+        let Some(original) = self.slot_any(context).cloned() else {
             if self
                 .retired
                 .iter()
@@ -734,10 +777,7 @@ impl Host {
             }
             let mut slot = original;
             slot.settings = payload;
-            if let Some(index) = active_index {
-                self.slots[index] = slot.clone();
-            }
-            self.library.update(&slot);
+            self.store_slot(slot.clone());
             self.persist()?;
             self.notify_inspectors(context, self.settings_event(&slot, None), None);
             return Ok(());
@@ -820,9 +860,8 @@ impl Host {
         if replacement.controller == "Encoder" {
             display::dial_image(&self.renderer, &mut replacement, Some(&root))?;
         }
-        self.library.update(&replacement);
-        if let Some(index) = active_index {
-            self.slots[index] = replacement;
+        self.store_slot(replacement);
+        if active {
             self.render()?;
         }
         self.persist()?;
@@ -894,10 +933,17 @@ async fn root(
     let token = host.token.clone();
     Html(include_str!("ui.html").replace("__TOKEN__", &token)).into_response()
 }
+fn slot_snapshot(host: &Host, s: &Slot) -> Value {
+    json!({"available":host.actions.iter().any(|a|a.uuid==s.uuid),"pinned":s.pinned,"context":s.context,"controller":s.controller,"index":s.index,"uuid":s.uuid,"name":s.name,"settings":s.settings,"title":s.title,"state":s.state,"feedback":s.feedback,"layout":s.layout,"preview":s.preview,"raw":s.raw,
+        "multi_running":host.multi_running(&s.context),"multi_children":s.multi_children.iter().map(|g|g.iter().map(|c|slot_snapshot(host,c)).collect::<Vec<_>>()).collect::<Vec<_>>(),
+        "has_inspector":host.actions.iter().find(|a|a.uuid==s.uuid).is_some_and(|a|a.raw["PropertyInspectorPath"].is_string()||host.plugins.iter().find(|p|p.id==a.plugin).is_some_and(|p|p.manifest["PropertyInspectorPath"].is_string()))})
+}
 fn snapshot(host: &Host) -> Value {
     json!({"library":host.library.snapshot(),"running":host.running,"device":host.device,"firmware":host.firmware,"simulate":host.simulate,"connected":host.hardware.is_some(),
-        "audio_outputs":host.audio_outputs,"audio_active":host.audio_active,"system_status":host.system_status,"slots":host.slots.iter().map(|s|json!({"available":host.actions.iter().any(|a|a.uuid==s.uuid),"pinned":s.pinned,"context":s.context,"controller":s.controller,"index":s.index,"uuid":s.uuid,"name":s.name,"settings":s.settings,"title":s.title,"state":s.state,"feedback":s.feedback,"layout":s.layout,"preview":s.preview,"has_inspector":host.actions.iter().find(|a|a.uuid==s.uuid).is_some_and(|a|a.raw["PropertyInspectorPath"].is_string()||host.plugins.iter().find(|p|p.id==a.plugin).is_some_and(|p|p.manifest["PropertyInspectorPath"].is_string()))})).collect::<Vec<_>>(),
-        "inspectors":host.inspectors.values().map(|i|json!({"context":i.context,"plugin":host.plugins[i.plugin].id,"connected":i.sender.is_some()})).collect::<Vec<_>>(),"actions":host.actions,"logs":host.logs,"plugins":host.plugins.iter().map(|p|json!({"id":p.id,"name":p.name,"connected":p.sender.is_some()})).collect::<Vec<_>>()})
+        "multi_runs":host.multi.snapshot(),"multi_pending":host.multi_pending.len(),"audio_outputs":host.audio_outputs,"audio_active":host.audio_active,"system_status":host.system_status,"slots":host.slots.iter().map(|s|slot_snapshot(host,s)).collect::<Vec<_>>(),
+        "inspectors":host.inspectors.values().map(|i|json!({"context":i.context,"plugin":host.plugins[i.plugin].id,"connected":i.sender.is_some()})).collect::<Vec<_>>(),
+        "actions":host.actions.iter().map(|a|json!({"uuid":a.uuid,"name":a.name,"plugin":a.plugin,"controllers":a.controllers,"states":a.raw["States"],"supported_in_multi":a.raw["SupportedInMultiActions"]!=false && !multiaction::container(&a.uuid),"multi_only":a.uuid==multiaction::DELAY,"defaults":if a.uuid==multiaction::DELAY{json!({"delay":1000})}else{crate::audio_output::defaults(&a.uuid).unwrap_or_else(||crate::system_actions::defaults(&a.uuid))}})).collect::<Vec<_>>(),
+        "logs":host.logs,"plugins":host.plugins.iter().map(|p|json!({"id":p.id,"name":p.name,"connected":p.sender.is_some()})).collect::<Vec<_>>()})
 }
 async fn dashboard(State(state): State<Shared>) -> Json<Value> {
     Json(snapshot(&state.lock().unwrap()))
@@ -1052,6 +1098,16 @@ fn apply_control(host: &mut Host, r: Value) -> Result<()> {
             };
             host.input(event)
         }
+        "multi_save" => host.save_multi(
+            r["context"]
+                .as_str()
+                .context("Multi Action context missing")?,
+            r["raw"].clone(),
+        ),
+        "multi_cancel" => {
+            host.cancel_all_multi();
+            Ok(())
+        }
         "soundboard_refresh" => host
             .audio
             .get_or_insert_with(crate::audio_output::Worker::new)
@@ -1114,7 +1170,7 @@ async fn socket_session(socket: WebSocket, state: Shared) {
             host.plugins[index].sender = Some(sender);
             let id = host.plugins[index].id.clone();
             host.log(format!("Plugin connected: {id}"));
-            for slot in &host.slots {
+            for slot in host.slots.iter().flat_map(Slot::flatten) {
                 if host
                     .actions
                     .iter()
@@ -1136,7 +1192,7 @@ async fn socket_session(socket: WebSocket, state: Shared) {
             }
             inspector.sender = Some(sender);
             let context = inspector.context.clone();
-            if let Some(slot) = host.slots.iter().find(|s| s.context == context) {
+            if let Some(slot) = host.visible_slot(&context) {
                 host.emit(slot, "propertyInspectorDidAppear", json!({}));
             }
             host.log(format!("Property inspector connected: {context}"));
@@ -1432,6 +1488,7 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
     };
     let (plugins, mut actions) = load_plugins(plugin_paths)?;
     actions.extend(library::navigation_actions());
+    actions.extend(multiaction::definitions());
     for (uuid, name, _) in crate::system_actions::definitions()
         .into_iter()
         .chain(crate::audio_output::definitions())
@@ -1484,6 +1541,13 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
     library.validate()?;
     let slots = library.visible()?;
     let mut host = Host {
+        multi_owned: HashSet::new(),
+        multi_held: HashMap::new(),
+        multi_pending: HashMap::new(),
+        multi_preparing: false,
+        multi: crate::multi::Scheduler::new(),
+        multi_clock: std::time::Instant::now(),
+        multi_notify: Arc::new(tokio::sync::Notify::new()),
         audio: None,
         audio_outputs: Vec::new(),
         audio_active: HashMap::new(),
@@ -1614,6 +1678,9 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
             }
         })
     });
+    host.sync_visible();
+    host.hydrate_library_multi();
+    host.slots = host.library.visible()?;
     host.render()?;
     host.persist()?;
     host.log(format!(
@@ -1696,6 +1763,26 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
                 next.run(request).await
             },
         ));
+    let multi_state = shared.clone();
+    let multi_notify = shared.lock().unwrap().multi_notify.clone();
+    let multi_task = tokio::spawn(async move {
+        loop {
+            let wait = {
+                let mut host = multi_state.lock().unwrap();
+                if !host.running {
+                    break;
+                }
+                host.poll_multi();
+                host.multi
+                    .next_due()
+                    .map(|deadline| deadline.saturating_sub(host.multi_clock.elapsed()))
+            };
+            tokio::select! {
+                _=multi_notify.notified()=>{},
+                _=tokio::time::sleep(wait.unwrap_or(Duration::from_secs(86400)))=>{},
+            }
+        }
+    });
     let monitor_state = shared.clone();
     let monitor_task = tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_millis(250));
@@ -1736,6 +1823,7 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
     let _ = draw_tx.send(Draw::Stop);
     event_task.abort();
     monitor_task.abort();
+    multi_task.abort();
     if let Some(worker) = worker {
         let _ = worker.join();
     }
@@ -1744,6 +1832,7 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
 }
 
 fn stop_plugins(host: &mut Host) {
+    host.cancel_all_multi();
     if let Some(worker) = &host.audio {
         worker.cancel();
     }
@@ -1819,6 +1908,13 @@ mod tests {
     }
     fn fixture(root: &Path) -> Host {
         let mut host = Host {
+            multi_owned: HashSet::new(),
+            multi_held: HashMap::new(),
+            multi_pending: HashMap::new(),
+            multi_preparing: false,
+            multi: crate::multi::Scheduler::new(),
+            multi_clock: std::time::Instant::now(),
+            multi_notify: Arc::new(tokio::sync::Notify::new()),
             audio: None,
             audio_outputs: Vec::new(),
             audio_active: HashMap::new(),
@@ -1847,6 +1943,8 @@ mod tests {
                 raw: json!({"States":[{}]}),
             }],
             slots: vec![Slot {
+                multi_children: vec![],
+                multi_id: String::new(),
                 context: "test.context".into(),
                 controller: "Keypad".into(),
                 index: 0,
@@ -1884,6 +1982,75 @@ mod tests {
         };
         host.library = Library::legacy(host.slots.clone(), "test-device");
         host
+    }
+    fn multi_fixture(host: &mut Host, action: &str, settings: Value) -> Slot {
+        host.actions.extend(multiaction::definitions());
+        host.assign("Keypad", 0, multiaction::ROUTINE).unwrap();
+        let context = host.slots[0].context.clone();
+        host.save_multi(&context,json!({"Actions":[{"Actions":[{"UUID":action,"ActionID":"child","Settings":settings,"State":0,"States":[{}]}]},{"Actions":[]}]})).unwrap();
+        host.slots[0].clone()
+    }
+    #[test]
+    fn cancelling_a_due_batch_releases_only_dispatched_children() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut host = fixture(temp.path());
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        host.plugins[0].sender = Some(tx);
+        let parent = multi_fixture(&mut host, "test.action", json!({}));
+        while rx.try_recv().is_ok() {}
+        host.start_multi(&parent).unwrap();
+        let due = host.multi.due(host.multi_clock.elapsed());
+        host.cancel_multi(&parent.context);
+        for event in due {
+            host.dispatch_multi(event, false).unwrap();
+        }
+        assert!(
+            rx.try_recv().is_err(),
+            "Cancelled queued press must emit neither down nor up"
+        );
+        host.start_multi(&parent).unwrap();
+        host.poll_multi();
+        assert_eq!(rx.try_recv().unwrap()["event"], "keyDown");
+        host.cancel_multi(&parent.context);
+        host.cancel_multi(&parent.context);
+        assert_eq!(rx.try_recv().unwrap()["event"], "keyUp");
+        assert!(rx.try_recv().is_err());
+    }
+    #[test]
+    fn cancelling_keyboard_preparation_cannot_start_the_sequence_later() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut host = fixture(temp.path());
+        let parent = multi_fixture(&mut host, "test.action", json!({}));
+        host.multi_pending.insert(parent.context.clone(), vec![]);
+        host.multi_owned.insert(parent.context.clone());
+        host.cancel_multi(&parent.context);
+        host.multi_keyboard_prepared(true);
+        assert!(!host.multi_running(&parent.context));
+        assert!(host.multi.snapshot().is_empty());
+    }
+    #[test]
+    fn nested_audio_is_embedded_on_export() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut host = fixture(temp.path());
+        let audio = temp.path().join("nested.wav");
+        fs::write(&audio, b"RIFF-preserved-audio").unwrap();
+        multi_fixture(&mut host, crate::audio_output::PLAY, json!({"path":audio}));
+        let export = temp.path().join("multi.streamDeckProfile");
+        host.export_profile(&export).unwrap();
+        let bundle = profile::load_bundle(&export).unwrap();
+        let parent = bundle
+            .pages
+            .iter()
+            .flat_map(|p| &p.slots)
+            .find(|s| s.uuid == multiaction::ROUTINE)
+            .unwrap();
+        let resource = parent.raw["Actions"][0]["Actions"][0]["Resources"]["file"]
+            .as_str()
+            .unwrap();
+        assert_eq!(
+            bundle.resource(resource).unwrap().1,
+            b"RIFF-preserved-audio"
+        );
     }
     #[test]
     fn inactive_state_and_software_target_cannot_change_hardware_title() {
