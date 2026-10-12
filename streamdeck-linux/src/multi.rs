@@ -109,7 +109,10 @@ impl Sequence {
                     None => format!("g{group_index}:index:{index}"),
                 };
                 if let Some(settings) = action.get("Settings") {
-                    ensure!(settings.is_object(), "Child Settings must be an object");
+                    ensure!(
+                        settings.is_null() || settings.is_object(),
+                        "Child Settings must be an object or null"
+                    );
                 }
                 if let Some(state) = action.get("State") {
                     ensure!(
@@ -451,6 +454,13 @@ mod tests {
         let parsed = Sequence::parse(ROUTINE, &raw).unwrap();
         assert_eq!(parsed.groups[0][0].id, "g0:index:0");
         assert_eq!(parsed.groups[0][0].press_ms, 100);
+    }
+    #[test]
+    fn null_child_settings_are_retained_for_runtime_defaulting() {
+        let raw = json!({"Actions":[{"Actions":[{"UUID":"test.action","Settings":null}]}]});
+        let parsed = Sequence::parse(ROUTINE, &raw).unwrap();
+        assert_eq!(parsed.raw, raw);
+        assert_eq!(parsed.groups[0][0].raw["Settings"], Value::Null);
     }
     #[test]
     fn malformed_groups_duplicate_ids_nesting_and_timings_reject() {

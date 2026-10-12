@@ -15,7 +15,7 @@ Current working areas include:
 - An always-dark native Rust editor and Stream Deck+ key/dial/touch-strip support.
 - Profiles, pages, folders, pinned actions, and original-format profile import/export.
 - Node and HTML plugins, native property-inspector windows, and feedback layouts.
-- Multi Actions, Dial Stacks, Linux desktop actions, and a native soundboard.
+- Multi Actions, Dial Stacks, Action Triggers, Linux desktop actions, and a native soundboard.
 - Live system-volume feedback and configurable volume steps.
 
 See the [feature-parity ledger](streamdeck-linux/docs/FEATURE_PARITY.md) for the remaining work and the boundaries of the tests. Passing simulation tests is not a claim of complete hardware or Windows compatibility.

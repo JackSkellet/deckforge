@@ -39,6 +39,7 @@ mod inspectors;
 mod library;
 mod multiaction;
 mod stack;
+mod trigger;
 mod volume;
 use inspectors::Inspector;
 use library::Library;
@@ -245,6 +246,8 @@ enum HeldControl {
     Dial(u8),
 }
 struct Host {
+    triggers: trigger::Runtime,
+    virtual_suppressed: HashSet<String>,
     volume: Option<crate::volume::Worker>,
     volume_state: Option<crate::volume::State>,
     volume_error: Option<String>,
@@ -356,6 +359,41 @@ impl Host {
             let _=sender.send(json!({"event":event,"action":slot.uuid,"context":slot.context,"device":self.device,"payload":payload}));
         }
     }
+    fn advance_key_state(&mut self, slot: &Slot) -> Result<()> {
+        if slot.in_multi_action || slot.controller != "Keypad" {
+            return Ok(());
+        }
+        let Some(action) = self.actions.iter().find(|a| a.uuid == slot.uuid) else {
+            return Ok(());
+        };
+        if action.raw["DisableAutomaticStates"] == true
+            || !self
+                .plugins
+                .iter()
+                .any(|p| p.id == action.plugin && p.sender.is_some())
+        {
+            return Ok(());
+        }
+        let count = action.raw["States"]
+            .as_array()
+            .map_or(1, Vec::len)
+            .max(slot.states.as_array().map_or(1, Vec::len));
+        if count <= 1 {
+            return Ok(());
+        }
+        // Use the current instance, preserving settings/title changes made while held.
+        let Some(mut current) = self.visible_slot(&slot.context).cloned() else {
+            return Ok(());
+        };
+        current.state = (current.state + 1) % count as u64;
+        current.background = self.resolve_state_image(&current, current.state);
+        if let Some(title) = current.states[current.state as usize]["Title"].as_str() {
+            current.title = title.into();
+        }
+        self.store_slot(current);
+        self.render()?;
+        self.persist()
+    }
     fn render(&mut self) -> Result<()> {
         self.update_volume_feedback();
         // Selected container children need the same imported/plugin icon lookup
@@ -410,7 +448,11 @@ impl Host {
                         placeholder.background = None;
                         display::dial_image(&self.renderer, &mut placeholder, None)?
                     } else {
-                        display::dial_image(&self.renderer, target, root)?
+                        if target.uuid == crate::action_trigger::UUID {
+                            trigger::picture(&self.renderer, target)?
+                        } else {
+                            display::dial_image(&self.renderer, target, root)?
+                        }
                     };
                 warnings.append(&mut target.display_warnings);
                 if has_child {
@@ -494,7 +536,9 @@ impl Host {
             settings: if controller == "Encoder" && uuid == crate::system_actions::MULTIMEDIA {
                 json!({"actionIdx":18})
             } else {
-                if uuid == crate::dial_stack::UUID {
+                if uuid == "com.elgato.streamdeck.page.goto" {
+                    json!({"PageIndex":1})
+                } else if uuid == crate::dial_stack::UUID {
                     stack::defaults()
                 } else {
                     crate::audio_output::defaults(uuid)
@@ -527,6 +571,9 @@ impl Host {
         }
         if uuid == crate::dial_stack::UUID {
             slot.raw = json!({"Actions":[],"Settings":slot.settings});
+        }
+        if uuid == crate::action_trigger::UUID {
+            slot.raw = json!({"Actions":[{"Actions":[]},{"Actions":[]},{"Actions":[]}]});
         }
         if uuid == multiaction::DELAY {
             slot.settings = json!({"delay":1000});
@@ -647,6 +694,12 @@ impl Host {
                     }
                     return Ok(());
                 }
+                "com.elgato.streamdeck.page.goto" => {
+                    if !pressed {
+                        self.goto_page(&slot.settings)?;
+                    }
+                    return Ok(());
+                }
                 "com.elgato.streamdeck.page.indicator" => return Ok(()),
                 _ => {}
             }
@@ -654,6 +707,12 @@ impl Host {
         if slot.uuid == crate::dial_stack::UUID {
             if pressed || owned_release {
                 self.stack_button(&slot, pressed)?;
+            }
+            return Ok(());
+        }
+        if slot.uuid == crate::action_trigger::UUID {
+            if pressed || owned_release {
+                self.trigger_button(&slot, pressed)?;
             }
             return Ok(());
         }
@@ -688,6 +747,9 @@ impl Host {
             return Ok(());
         }
         self.emit(&slot, if pressed { down } else { up }, json!({}));
+        if owned_release {
+            self.advance_key_state(&slot)?;
+        }
         Ok(())
     }
     fn run_system_action(
@@ -723,6 +785,7 @@ impl Host {
         for report in reports {
             if report.prepared_keyboard {
                 self.multi_keyboard_prepared(report.result.is_ok());
+                self.trigger_keyboard_prepared(report.result.is_ok());
             }
             let name = self
                 .slots
@@ -778,6 +841,8 @@ impl Host {
         {
             if slot.uuid == crate::dial_stack::UUID {
                 self.stack_input(&slot, name, extra)?;
+            } else if slot.uuid == crate::action_trigger::UUID {
+                self.trigger_input(&slot, name, extra)?;
             } else if crate::system_actions::supported(&slot.uuid) {
                 let trigger = if name == "dialRotate" {
                     crate::system_actions::Trigger::Rotate(
@@ -1017,6 +1082,7 @@ async fn root(
 }
 fn slot_snapshot(host: &Host, s: &Slot) -> Value {
     json!({"available":host.actions.iter().any(|a|a.uuid==s.uuid),"pinned":s.pinned,"context":s.context,"controller":s.controller,"index":s.index,"uuid":s.uuid,"name":s.name,"settings":s.settings,"title":s.title,"state":s.state,"feedback":s.feedback,"layout":s.layout,"preview":s.preview,"raw":s.raw,
+        "trigger_children":if s.uuid==crate::action_trigger::UUID {s.children.iter().map(|g|g.first().map(|c|slot_snapshot(host,c)).unwrap_or(Value::Null)).collect::<Vec<_>>()}else{vec![]},
         "stack_children":if s.uuid==crate::dial_stack::UUID {s.children.first().map(|children|children.iter().map(|c|slot_snapshot(host,c)).collect::<Vec<_>>()).unwrap_or_default()}else{vec![]},
         "multi_running":host.multi_running(&s.context),"multi_children":s.children.iter().map(|g|g.iter().map(|c|slot_snapshot(host,c)).collect::<Vec<_>>()).collect::<Vec<_>>(),
         "has_inspector":host.actions.iter().find(|a|a.uuid==s.uuid).is_some_and(|a|a.raw["PropertyInspectorPath"].is_string()||host.plugins.iter().find(|p|p.id==a.plugin).is_some_and(|p|p.manifest["PropertyInspectorPath"].is_string()))})
@@ -1025,7 +1091,7 @@ fn snapshot(host: &Host) -> Value {
     json!({"library":host.library.snapshot(),"running":host.running,"device":host.device,"firmware":host.firmware,"simulate":host.simulate,"connected":host.hardware.is_some(),
         "volume":host.volume_state,"volume_error":host.volume_error,"multi_runs":host.multi.snapshot(),"multi_pending":host.multi_pending.len(),"audio_outputs":host.audio_outputs,"audio_active":host.audio_active,"system_status":host.system_status,"slots":host.slots.iter().map(|s|slot_snapshot(host,s)).collect::<Vec<_>>(),
         "inspectors":host.inspectors.values().map(|i|json!({"context":i.context,"plugin":host.plugins[i.plugin].id,"connected":i.sender.is_some()})).collect::<Vec<_>>(),
-        "actions":host.actions.iter().map(|a|json!({"uuid":a.uuid,"name":a.name,"plugin":a.plugin,"controllers":a.controllers,"states":a.raw["States"],"supported_in_multi":a.raw["SupportedInMultiActions"]!=false && !multiaction::container(&a.uuid),"multi_only":a.uuid==multiaction::DELAY,"defaults":if a.uuid==multiaction::DELAY{json!({"delay":1000})}else{crate::audio_output::defaults(&a.uuid).unwrap_or_else(||crate::system_actions::defaults(&a.uuid))}})).collect::<Vec<_>>(),
+        "actions":host.actions.iter().map(|a|json!({"uuid":a.uuid,"name":a.name,"plugin":a.plugin,"controllers":a.controllers,"states":a.raw["States"],"supported_in_multi":a.raw["SupportedInMultiActions"]!=false && !multiaction::container(&a.uuid),"multi_only":a.uuid==multiaction::DELAY,"defaults":if a.uuid=="com.elgato.streamdeck.page.goto"{json!({"PageIndex":1})}else if a.uuid==multiaction::DELAY{json!({"delay":1000})}else{crate::audio_output::defaults(&a.uuid).unwrap_or_else(||crate::system_actions::defaults(&a.uuid))}})).collect::<Vec<_>>(),
         "logs":host.logs,"plugins":host.plugins.iter().map(|p|json!({"id":p.id,"name":p.name,"connected":p.sender.is_some()})).collect::<Vec<_>>()})
 }
 async fn dashboard(State(state): State<Shared>) -> Json<Value> {
@@ -1186,6 +1252,10 @@ fn apply_control(host: &mut Host, r: Value) -> Result<()> {
             };
             host.input(event)
         }
+        "trigger_save" => host.save_trigger(
+            r["context"].as_str().context("Missing context")?,
+            r["raw"].clone(),
+        ),
         "stack_save" => host.save_stack(
             r["context"].as_str().context("Stack context missing")?,
             r["raw"].clone(),
@@ -1202,6 +1272,7 @@ fn apply_control(host: &mut Host, r: Value) -> Result<()> {
             r["raw"].clone(),
         ),
         "multi_cancel" => {
+            host.cancel_departing_triggers(&HashSet::new());
             host.cancel_all_multi();
             Ok(())
         }
@@ -1587,6 +1658,7 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
     actions.extend(library::navigation_actions());
     actions.extend(multiaction::definitions());
     actions.push(stack::action());
+    actions.push(trigger::action());
     for (uuid, name, _) in crate::system_actions::definitions()
         .into_iter()
         .chain(crate::audio_output::definitions())
@@ -1642,6 +1714,8 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
         volume: None,
         volume_state: None,
         volume_error: None,
+        triggers: trigger::Runtime::default(),
+        virtual_suppressed: HashSet::new(),
         stack_gestures: HashMap::new(),
         stack_cooldown: HashMap::new(),
         multi_owned: HashSet::new(),
@@ -1876,8 +1950,12 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
                     break;
                 }
                 host.poll_multi();
+                host.poll_triggers();
                 host.multi
                     .next_due()
+                    .into_iter()
+                    .chain(host.triggers.repeater.next_due())
+                    .min()
                     .map(|deadline| deadline.saturating_sub(host.multi_clock.elapsed()))
             };
             tokio::select! {
@@ -1939,6 +2017,7 @@ fn stop_plugins(host: &mut Host) {
     if let Some(worker) = &host.volume {
         worker.cancel();
     }
+    host.cancel_departing_triggers(&HashSet::new());
     host.cancel_all_multi();
     if let Some(worker) = &host.audio {
         worker.cancel();
@@ -2013,11 +2092,13 @@ mod tests {
         );
         drop(restarted);
     }
-    fn fixture(root: &Path) -> Host {
+    pub(super) fn fixture(root: &Path) -> Host {
         let mut host = Host {
             volume: None,
             volume_state: None,
             volume_error: None,
+            triggers: trigger::Runtime::default(),
+            virtual_suppressed: HashSet::new(),
             stack_gestures: HashMap::new(),
             stack_cooldown: HashMap::new(),
             multi_owned: HashSet::new(),
@@ -2489,6 +2570,34 @@ mod tests {
         let snapshot = host.library.snapshot();
         assert_eq!(snapshot["profiles"][0]["pages"][0]["id"], id);
         assert_eq!(snapshot["profiles"][0]["page_order"][0], id);
+    }
+    #[test]
+    fn goto_page_uses_one_based_reordered_pages_and_rejects_invalid_without_mutation() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut host = fixture(temp.path());
+        let first = host.library.active_page.clone();
+        host.library_command(&json!({"command":"page_create","name":"Second"}))
+            .unwrap();
+        let second = host.library.active_page.clone();
+        host.goto_page(&json!({})).unwrap();
+        assert_eq!(host.library.active_page, first);
+        host.goto_page(&json!({"PageIndex":2})).unwrap();
+        assert_eq!(host.library.active_page, second);
+        for bad in [
+            json!(0),
+            json!(-1),
+            json!(3),
+            json!(1.5),
+            json!("1"),
+            Value::Null,
+        ] {
+            assert!(host.goto_page(&json!({"PageIndex":bad})).is_err());
+            assert_eq!(host.library.active_page, second);
+        }
+        host.library_command(&json!({"command":"page_move","id":second,"direction":-1}))
+            .unwrap();
+        host.goto_page(&json!({"PageIndex":2})).unwrap();
+        assert_eq!(host.library.active_page, first);
     }
     #[test]
     fn export_cannot_replace_retained_source() {

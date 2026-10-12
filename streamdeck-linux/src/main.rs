@@ -1,3 +1,4 @@
+mod action_trigger;
 mod audio_output;
 mod desktop;
 mod dial_stack;
@@ -15,6 +16,7 @@ mod stack_editor;
 mod system_actions;
 mod system_editor;
 mod system_keyboard;
+mod trigger_editor;
 mod volume;
 mod webview;
 

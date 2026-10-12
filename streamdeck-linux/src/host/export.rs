@@ -344,6 +344,17 @@ fn export_action(
     files: &mut BTreeMap<String, Vec<u8>>,
     roots: &HashMap<String, PathBuf>,
 ) -> Result<Value> {
+    export_action_at(slot, page_root, files, roots, 0)
+}
+
+fn export_action_at(
+    slot: &Slot,
+    page_root: &str,
+    files: &mut BTreeMap<String, Vec<u8>>,
+    roots: &HashMap<String, PathBuf>,
+    depth: usize,
+) -> Result<Value> {
+    ensure!(depth <= 8, "Container nesting exceeds eight export levels");
     let mut raw = slot.raw.clone();
     let native = raw.as_object().is_none_or(|map| map.is_empty());
     if native {
@@ -423,20 +434,74 @@ fn export_action(
     if native || raw.get("States").is_some() || !states.is_empty() {
         raw["States"] = json!(states);
     }
-    if slot.uuid == crate::dial_stack::UUID && !slot.children.is_empty() {
+    if slot.uuid == crate::action_trigger::UUID && !slot.children.is_empty() {
+        ensure!(
+            slot.children.len() == 3,
+            "Action Trigger runtime must retain three positions"
+        );
+        let mut records = raw
+            .get("Actions")
+            .map(|value| {
+                value
+                    .as_array()
+                    .cloned()
+                    .context("Action Trigger Actions must be an array")
+            })
+            .transpose()?
+            .unwrap_or_default();
+        ensure!(
+            records.len() <= 3,
+            "Action Trigger export would discard extra children"
+        );
+        for (index, children) in slot.children.iter().enumerate() {
+            ensure!(
+                children.len() <= 1,
+                "Action Trigger position contains multiple runtime children"
+            );
+            if let Some(child) = children.first() {
+                records.resize_with(records.len().max(index + 1), || json!({"Actions":[]}));
+                records[index] = export_action_at(child, page_root, files, roots, depth + 1)?;
+            } else if let Some(record) = records.get_mut(index)
+                && record["UUID"].as_str().is_some_and(|uuid| !uuid.is_empty())
+            {
+                // A removed assignment must not reappear. Already-blank records,
+                // including their unknown metadata, are otherwise retained verbatim.
+                *record = json!({"Actions":[]});
+            }
+        }
+        raw["Actions"] = json!(records);
+    } else if slot.uuid == crate::dial_stack::UUID && !slot.children.is_empty() {
+        ensure!(
+            slot.children.len() == 1,
+            "Dial Stack runtime must have one child group"
+        );
         raw["Actions"] = json!(
             slot.children[0]
                 .iter()
-                .map(|child| export_action(child, page_root, files, roots))
+                .map(|child| export_action_at(child, page_root, files, roots, depth + 1))
                 .collect::<Result<Vec<_>>>()?
         );
-    } else if !slot.children.is_empty() {
+    } else if multiaction::container(&slot.uuid) && !slot.children.is_empty() {
+        if raw.get("Actions").is_none() {
+            raw["Actions"] = json!([]);
+        }
+        let groups = raw["Actions"]
+            .as_array_mut()
+            .context("Multi Action groups must be an array")?;
+        groups.resize_with(
+            groups.len().max(slot.children.len()),
+            || json!({"Actions":[]}),
+        );
         for (branch, children) in slot.children.iter().enumerate() {
             let exported = children
                 .iter()
-                .map(|child| export_action(child, page_root, files, roots))
+                .map(|child| export_action_at(child, page_root, files, roots, depth + 1))
                 .collect::<Result<Vec<_>>>()?;
-            raw["Actions"][branch]["Actions"] = json!(exported);
+            ensure!(
+                groups[branch].is_object(),
+                "Multi Action group must be an object"
+            );
+            groups[branch]["Actions"] = json!(exported);
         }
     }
     Ok(raw)
@@ -1269,6 +1334,100 @@ mod tests {
         assert_eq!(action["States"][0]["FutureState"], 7);
     }
 
+    #[test]
+    fn trigger_export_recurses_through_multi_and_preserves_positional_blank_records() {
+        let raw = json!({"UUID":crate::action_trigger::UUID,"ActionID":"trigger","Name":"Trigger","Settings":{},"State":0,"States":[{}],"FutureParent":1,"Actions":[
+            {"Actions":[],"FutureBlank":{"keep":true}},
+            {"UUID":crate::multi::ROUTINE,"ActionID":"multi","Settings":null,"State":0,"States":[{}],"FutureMulti":2,"Actions":[
+                {"FutureGroup":3,"Actions":[
+                    {"UUID":"test.action","ActionID":"first","Settings":null,"State":0,"States":[{"Title":"Before","FutureState":4}],"FutureLeaf":5},
+                    {"UUID":"test.action","ActionID":"second","Settings":{"value":1},"State":0,"States":[{}]}
+                ]},{"Actions":[]}
+            ]},{"Actions":[],"OtherBlank":9}
+        ]});
+        let mut slot = runtime_slot(&profile::Slot {
+            controller: "Encoder".into(),
+            column: 2,
+            row: 0,
+            uuid: crate::action_trigger::UUID.into(),
+            settings: json!({}),
+            states: json!([{}]),
+            raw: raw.clone(),
+        });
+        slot.hydrate_children(&[]).unwrap();
+        slot.children[1][0].children[0][0].title = "Edited nested title".into();
+        slot.children[1][0].children[0][0].title_changed = true;
+        slot.children[1][0].children[0][1].settings = json!({"value":42});
+        let library = Library::legacy(vec![slot], "test-device");
+        let files =
+            build_profile_files(&library.profiles[0], &library.active_page, &HashMap::new())
+                .unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let output = temp.path().join("trigger.streamDeckProfile");
+        write_archive(&output, &files).unwrap();
+        let imported = profile::load_bundle(&output).unwrap();
+        let action = &imported.page(&library.active_page).unwrap().slots[0].raw;
+        assert_eq!(action["Actions"].as_array().unwrap().len(), 3);
+        assert_eq!(action["Actions"][0], raw["Actions"][0]);
+        assert_eq!(action["Actions"][2], raw["Actions"][2]);
+        assert!(action["Actions"][0].get("ActionID").is_none());
+        assert_eq!(action["Actions"][1]["Settings"], Value::Null);
+        let first = &action["Actions"][1]["Actions"][0]["Actions"][0];
+        assert_eq!(first["Settings"], Value::Null);
+        assert_eq!(first["States"][0]["Title"], "Edited nested title");
+        assert_eq!(first["States"][0]["FutureState"], 4);
+        assert_eq!(first["FutureLeaf"], 5);
+        assert_eq!(
+            action["Actions"][1]["Actions"][0]["Actions"][1]["Settings"]["value"],
+            42
+        );
+        assert_eq!(action["Actions"][1]["Actions"][0]["FutureGroup"], 3);
+        assert_eq!(action["FutureParent"], 1);
+    }
+    #[test]
+    fn trigger_export_keeps_short_untouched_arrays_and_does_not_resurrect_removed_children() {
+        let raw = json!({"UUID":crate::action_trigger::UUID,"ActionID":"trigger","Settings":null,"Actions":[{"Actions":[],"UnknownBlank":7}]});
+        let mut slot = runtime_slot(&profile::Slot {
+            controller: "Encoder".into(),
+            column: 0,
+            row: 0,
+            uuid: crate::action_trigger::UUID.into(),
+            settings: json!({}),
+            states: json!([]),
+            raw: raw.clone(),
+        });
+        slot.hydrate_children(&[]).unwrap();
+        let mut files = BTreeMap::new();
+        assert_eq!(
+            export_action(&slot, "p/", &mut files, &HashMap::new()).unwrap(),
+            raw
+        );
+        slot.raw["Actions"] = json!([{"UUID":"test.action","ActionID":"remove","Settings":{}}]);
+        slot.hydrate_children(&[]).unwrap();
+        slot.children[0].clear();
+        let exported = export_action(&slot, "p/", &mut files, &HashMap::new()).unwrap();
+        assert_eq!(exported["Actions"][0], json!({"Actions":[]}));
+    }
+    #[test]
+    fn recursive_export_rejects_excessive_runtime_depth() {
+        let mut slot = runtime_slot(&profile::Slot {
+            controller: "Keypad".into(),
+            column: 0,
+            row: 0,
+            uuid: "test.action".into(),
+            settings: json!({}),
+            states: json!([]),
+            raw: json!({"UUID":"test.action","ActionID":"leaf"}),
+        });
+        for _ in 0..9 {
+            let mut parent = slot.clone();
+            parent.uuid = crate::multi::ROUTINE.into();
+            parent.raw = json!({"UUID":crate::multi::ROUTINE,"Actions":[{"Actions":[]}]});
+            parent.children = vec![vec![slot]];
+            slot = parent;
+        }
+        assert!(export_action(&slot, "p/", &mut BTreeMap::new(), &HashMap::new()).is_err());
+    }
     #[test]
     fn overwrite_keeps_exact_backup_and_invalid_export_keeps_destination() {
         let dir = tempfile::tempdir().unwrap();

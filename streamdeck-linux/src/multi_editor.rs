@@ -109,7 +109,7 @@ impl Editor {
             return vec![];
         };
         let uuid = parent["uuid"].as_str().unwrap_or_default();
-        if !matches!(uuid, ROUTINE | SWITCH) {
+        if !matches!(uuid, ROUTINE | SWITCH | RANDOM) {
             ui.weak("This action's sequence format is preserved. Editing is not available yet.");
             return vec![];
         }
@@ -140,6 +140,8 @@ fn show_draft(
     let switching = parent["uuid"] == SWITCH;
     ui.heading(if switching {
         "Multi Action Switch"
+    } else if parent["uuid"] == RANDOM {
+        "Random Action"
     } else {
         "Multi Action"
     });
@@ -193,7 +195,11 @@ fn show_draft(
         draft.select(None);
     }
     if entries.is_empty() {
-        ui.weak("Add actions in the order you want them to run.");
+        ui.weak(if parent["uuid"] == RANDOM {
+            "Add actions to choose from. Each press runs one action."
+        } else {
+            "Add actions in the order you want them to run."
+        });
     }
     ui.add_enabled_ui(!draft.detail.pending(), |ui| {
         egui::ScrollArea::vertical()
@@ -771,6 +777,19 @@ mod tests {
         output.drop_without_applying_deltas();
         assert_eq!(editor.drafts["parent"].raw, parent["raw"]);
         assert!(!editor.drafts["parent"].dirty);
+    }
+
+    #[test]
+    fn random_action_uses_the_native_editor_without_changing_its_raw_groups() {
+        let mut editor = Editor::default();
+        let parent = json!({"context":"random","uuid":RANDOM,"raw":raw()});
+        let context = egui::Context::default();
+        let output = context.run_ui(egui::RawInput::default(), |ui| {
+            assert!(editor.show(ui, &parent, &[], &[]).is_empty());
+        });
+        output.drop_without_applying_deltas();
+        assert_eq!(editor.drafts["random"].raw, parent["raw"]);
+        assert!(!editor.drafts["random"].dirty);
     }
 
     #[test]

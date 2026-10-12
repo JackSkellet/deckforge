@@ -763,7 +763,7 @@ mod tests {
 
     fn fixture(name: &str) -> std::path::PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../evidence/official-samples/lights-out/com.elgato.lightsout.sdPlugin")
+            .join("tests/fixtures/official-profiles")
             .join(name)
     }
 

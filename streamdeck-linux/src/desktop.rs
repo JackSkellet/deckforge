@@ -227,9 +227,58 @@ struct PendingDelete {
     id: String,
     name: String,
 }
+#[derive(Clone)]
+struct NestedContainer {
+    root_context: String,
+    child_context: String,
+}
+
+/// Visit runtime child snapshots only. Raw profile/settings objects can contain
+/// arbitrary lookalike fields and must not become navigation targets.
+fn nested_snapshot<'a>(snapshot: &'a Value, context: &str) -> Option<&'a Value> {
+    if let Some(children) = snapshot.as_array() {
+        return children
+            .iter()
+            .find_map(|child| nested_snapshot(child, context));
+    }
+    if !snapshot.is_object() {
+        return None;
+    }
+    if !context.is_empty() && string(snapshot, "context") == context {
+        return Some(snapshot);
+    }
+    ["trigger_children", "stack_children", "multi_children"]
+        .into_iter()
+        .filter_map(|key| snapshot.get(key))
+        .find_map(|children| nested_snapshot(children, context))
+}
+
+fn nested_container_target(parent: &Value, context: &str) -> Option<NestedContainer> {
+    let child = nested_snapshot(parent, context)?;
+    if !matches!(
+        string(child, "uuid"),
+        crate::multi::ROUTINE
+            | crate::multi::SWITCH
+            | crate::multi::RANDOM
+            | "com.elgato.streamdeck.keys.adaptor"
+    ) {
+        return None;
+    }
+    let root_context = string(parent, "context");
+    if root_context.is_empty() || context == root_context {
+        return None;
+    }
+    Some(NestedContainer {
+        root_context: root_context.to_owned(),
+        child_context: context.to_owned(),
+    })
+}
+
 struct Desktop {
     stack_editor: crate::stack_editor::Editor,
     multi_editor: crate::multi_editor::Editor,
+    trigger_editor: crate::trigger_editor::Editor,
+    container_navigation: Vec<NestedContainer>,
     controller: Controller,
     snapshot: Value,
     last_poll: Option<Instant>,
@@ -251,6 +300,8 @@ impl Desktop {
     fn new(controller: Controller) -> Self {
         Self {
             multi_editor: crate::multi_editor::Editor::default(),
+            trigger_editor: crate::trigger_editor::Editor::default(),
+            container_navigation: Vec::new(),
             stack_editor: crate::stack_editor::Editor::default(),
             controller,
             snapshot: json!({}),
@@ -378,6 +429,10 @@ impl Desktop {
         match self.controller.command(command) {
             Ok(()) => {
                 self.error.clear();
+                // Container editors acknowledge saves immediately; use the host's
+                // committed snapshot before their clean drafts can reconcile.
+                self.snapshot = self.controller.snapshot();
+                self.last_poll = None;
                 true
             }
             Err(error) => {
@@ -722,6 +777,49 @@ impl Desktop {
     fn editor(&mut self, ui: &mut egui::Ui) {
         let selection = self.selected;
         let slot = self.slot(selection).cloned();
+        if self.container_navigation.last().is_some_and(|nested| {
+            slot.as_ref()
+                .is_none_or(|parent| string(parent, "context") != nested.root_context)
+        }) {
+            self.container_navigation.clear();
+        }
+        if let Some(nested) = self.container_navigation.last().cloned() {
+            ui.heading(selection.label());
+            let previous = self
+                .container_navigation
+                .iter()
+                .rev()
+                .nth(1)
+                .and_then(|target| {
+                    slot.as_ref()
+                        .and_then(|root| nested_snapshot(root, &target.child_context))
+                })
+                .or(slot.as_ref());
+            let back_label = match previous.map(|parent| string(parent, "uuid")) {
+                Some("com.elgato.streamdeck.keys.adaptor") => "Back to Action Trigger",
+                Some("com.elgato.streamdeck.dial.stack") => "Back to Dial Stack",
+                _ => "Back",
+            };
+            if ui.button(back_label).clicked() {
+                self.container_navigation.pop();
+                ui.ctx().request_repaint();
+                return;
+            }
+            let child = slot
+                .as_ref()
+                .and_then(|parent| nested_snapshot(parent, &nested.child_context))
+                .cloned();
+            if let Some(child) = child {
+                if child["uuid"] == "com.elgato.streamdeck.keys.adaptor" {
+                    self.trigger_settings_editor(ui, &child);
+                } else {
+                    self.multi_settings_editor(ui, &child);
+                }
+            } else {
+                ui.weak("This nested action is no longer available. Use Back to return.");
+            }
+            return;
+        }
         let mut draft = self
             .drafts
             .remove(&selection)
@@ -881,7 +979,73 @@ impl Desktop {
         });
         self.drafts.insert(selection, draft);
     }
+    fn container_request(&mut self, request: Value) -> bool {
+        let command = string(&request, "command").to_owned();
+        let context = string(&request, "context").to_owned();
+        if matches!(
+            command.as_str(),
+            "edit_nested_multi" | "edit_nested_trigger"
+        ) {
+            let target = self
+                .slot(self.selected)
+                .and_then(|root| nested_container_target(root, &context));
+            if let Some(target) = target {
+                if self
+                    .container_navigation
+                    .last()
+                    .is_none_or(|current| current.child_context != target.child_context)
+                {
+                    self.container_navigation.push(target);
+                }
+                return true;
+            }
+            self.error = "The nested action is no longer available.".into();
+            return false;
+        }
+        let success = self.command(request);
+        match command.as_str() {
+            "multi_save" => self.multi_editor.saved(&context, success),
+            "stack_save" => self.stack_editor.saved(&context, success),
+            "trigger_save" => self.trigger_editor.saved(&context, success),
+            _ => {}
+        }
+        success
+    }
+
+    fn multi_settings_editor(&mut self, ui: &mut egui::Ui, parent: &Value) {
+        let actions = self.snapshot["actions"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let outputs: Vec<(String, String)> =
+            serde_json::from_value(self.snapshot["audio_outputs"].clone()).unwrap_or_default();
+        for request in self.multi_editor.show(ui, parent, &actions, &outputs) {
+            if !self.container_request(request) {
+                break;
+            }
+        }
+    }
+
+    fn trigger_settings_editor(&mut self, ui: &mut egui::Ui, parent: &Value) {
+        let actions = self.snapshot["actions"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let outputs: Vec<(String, String)> =
+            serde_json::from_value(self.snapshot["audio_outputs"].clone()).unwrap_or_default();
+        for request in self.trigger_editor.show(ui, parent, &actions, &outputs) {
+            if !self.container_request(request) {
+                break;
+            }
+        }
+    }
+
     fn settings_editor(&mut self, ui: &mut egui::Ui, draft: &mut Draft, assigned_action: &str) {
+        if assigned_action == "com.elgato.streamdeck.keys.adaptor" {
+            let parent = self.slot(self.selected).cloned().unwrap_or(json!({}));
+            self.trigger_settings_editor(ui, &parent);
+            return;
+        }
         if assigned_action == crate::dial_stack::UUID {
             let parent = self.slot(self.selected).cloned().unwrap_or(json!({}));
             let actions = self.snapshot["actions"]
@@ -891,11 +1055,8 @@ impl Desktop {
             let outputs: Vec<(String, String)> =
                 serde_json::from_value(self.snapshot["audio_outputs"].clone()).unwrap_or_default();
             for request in self.stack_editor.show(ui, &parent, &actions, &outputs) {
-                let context = string(&request, "context").to_owned();
-                let save = string(&request, "command") == "stack_save";
-                let success = self.command(request);
-                if save {
-                    self.stack_editor.saved(&context, success);
+                if !self.container_request(request) {
+                    break;
                 }
             }
             return;
@@ -907,21 +1068,7 @@ impl Desktop {
                 | "com.elgato.streamdeck.multiactions.random"
         ) {
             let parent = self.slot(self.selected).cloned().unwrap_or(json!({}));
-            let actions = self.snapshot["actions"]
-                .as_array()
-                .cloned()
-                .unwrap_or_default();
-            let outputs: Vec<(String, String)> =
-                serde_json::from_value(self.snapshot["audio_outputs"].clone()).unwrap_or_default();
-            let requests = self.multi_editor.show(ui, &parent, &actions, &outputs);
-            for request in requests {
-                let context = string(&request, "context").to_owned();
-                let save = string(&request, "command") == "multi_save";
-                let success = self.command(request);
-                if save {
-                    self.multi_editor.saved(&context, success);
-                }
-            }
+            self.multi_settings_editor(ui, &parent);
             return;
         }
         ui.add_enabled_ui(!draft.raw_dirty, |ui| {
@@ -1209,6 +1356,48 @@ impl eframe::App for Desktop {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn nested_multi_navigation_resolves_runtime_snapshots_without_following_raw_data() {
+        let parent = json!({"context":"trigger","uuid":"com.elgato.streamdeck.keys.adaptor",
+            "raw":{"context":"fake","uuid":crate::multi::ROUTINE},
+            "trigger_children":[null,{"context":"sequence","uuid":crate::multi::SWITCH,
+                "multi_children":[[{"context":"counter","uuid":"com.elgato.counter.action"}],[]]},null]});
+        let target = nested_container_target(&parent, "sequence").unwrap();
+        assert_eq!(target.root_context, "trigger");
+        assert_eq!(target.child_context, "sequence");
+        assert_eq!(
+            nested_snapshot(&parent, "counter").unwrap()["uuid"],
+            "com.elgato.counter.action"
+        );
+        assert!(nested_container_target(&parent, "counter").is_none());
+        assert!(nested_container_target(&parent, "trigger").is_none());
+        assert!(nested_snapshot(&parent, "fake").is_none());
+        assert!(nested_snapshot(&parent, "").is_none());
+        assert!(nested_snapshot(&parent, "removed").is_none());
+    }
+
+    #[test]
+    fn stack_trigger_multi_navigation_keeps_one_root_and_returns_one_level() {
+        let root = json!({"context":"stack","uuid":"com.elgato.streamdeck.dial.stack","stack_children":[
+            {"context":"trigger","uuid":"com.elgato.streamdeck.keys.adaptor","trigger_children":[
+                null,{"context":"sequence","uuid":crate::multi::ROUTINE,"multi_children":[[],[]]},null
+            ]}
+        ]});
+        let trigger = nested_container_target(&root, "trigger").unwrap();
+        let sequence = nested_container_target(&root, "sequence").unwrap();
+        assert_eq!(trigger.root_context, "stack");
+        assert_eq!(sequence.root_context, "stack");
+        let mut path = vec![trigger, sequence];
+        assert_eq!(path.pop().unwrap().child_context, "sequence");
+        assert_eq!(path.last().unwrap().child_context, "trigger");
+        assert_eq!(
+            nested_snapshot(&root, &path[0].child_context).unwrap()["uuid"],
+            "com.elgato.streamdeck.keys.adaptor"
+        );
+        assert_eq!(path.pop().unwrap().child_context, "trigger");
+        assert!(path.is_empty());
+    }
+
     #[test]
     fn profile_name_polling_preserves_edits_but_resets_on_selection_change() {
         let mut name = NameDraft::default();

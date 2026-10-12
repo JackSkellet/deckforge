@@ -10,6 +10,7 @@ pub(super) fn navigation_actions() -> Vec<Action> {
     [
         ("com.elgato.streamdeck.page.next", "Next page"),
         ("com.elgato.streamdeck.page.previous", "Previous page"),
+        ("com.elgato.streamdeck.page.goto", "Go to page"),
         ("com.elgato.streamdeck.page.indicator", "Page indicator"),
         (BACK_FOLDER, "Back from folder"),
     ]
@@ -394,6 +395,8 @@ impl Host {
         for (context, action) in removed {
             self.remember_removed(&context, &action);
         }
+        self.cancel_changed_triggers(&next);
+        self.cancel_departing_triggers(&new);
         self.cancel_departing_stacks(&new);
         self.cancel_departing_multi(&new);
         self.cancel_departing_inputs(&new);
@@ -495,6 +498,28 @@ impl Host {
         let next = (position as i64 + direction.signum())
             .clamp(0, profile.page_order.len() as i64 - 1) as usize;
         let id = profile.page_order[next].clone();
+        self.select_page(&id, false)
+    }
+    pub(super) fn goto_page(&mut self, settings: &Value) -> Result<()> {
+        // Elgato saves PageIndex as one-based; folder and pinned pages are
+        // excluded from the numbered top-level page order.
+        let number = match settings.get("PageIndex") {
+            None => 1,
+            Some(value) => value
+                .as_u64()
+                .context("PageIndex must be a positive integer")?,
+        };
+        let index = number
+            .checked_sub(1)
+            .and_then(|index| usize::try_from(index).ok())
+            .context("PageIndex must be a positive integer")?;
+        let id = self
+            .library
+            .current()?
+            .page_order
+            .get(index)
+            .cloned()
+            .context("PageIndex is outside the current profile's pages")?;
         self.select_page(&id, false)
     }
     pub(super) fn folder_back(&mut self) -> Result<()> {

@@ -203,6 +203,7 @@ impl Host {
         let parents: Vec<_> = self
             .slots
             .iter()
+            .flat_map(Slot::visible_flatten)
             .filter(|s| !visible.contains(&s.context) && container(&s.uuid))
             .map(|s| s.context.clone())
             .collect();
@@ -219,7 +220,26 @@ impl Host {
         let _ = self.multi.cancel_all();
         self.multi_notify.notify_one();
     }
-    fn virtual_action(&mut self, slot: &Slot, pressed: bool, cancelled: bool) -> Result<()> {
+    pub(super) fn virtual_action(
+        &mut self,
+        slot: &Slot,
+        pressed: bool,
+        cancelled: bool,
+    ) -> Result<()> {
+        if container(&slot.uuid) {
+            if cancelled {
+                self.cancel_multi(&slot.context);
+                self.virtual_suppressed.remove(&slot.context);
+            } else if pressed {
+                if self.multi_running(&slot.context) {
+                    self.cancel_multi(&slot.context);
+                    self.virtual_suppressed.insert(slot.context.clone());
+                }
+            } else if !self.virtual_suppressed.remove(&slot.context) {
+                self.start_multi(slot)?;
+            }
+            return Ok(());
+        }
         if crate::system_actions::supported(&slot.uuid) {
             if cancelled && slot.uuid != crate::system_actions::HOTKEY {
                 return Ok(());
@@ -250,6 +270,7 @@ impl Host {
                     );
                 }
                 library::BACK_FOLDER => return self.folder_back(),
+                "com.elgato.streamdeck.page.goto" => return self.goto_page(&slot.settings),
                 "com.elgato.streamdeck.page.next" => return self.step_page(1),
                 "com.elgato.streamdeck.page.previous" => return self.step_page(-1),
                 _ => {}
@@ -270,8 +291,15 @@ impl Host {
         self.emit(
             slot,
             if pressed { "keyDown" } else { "keyUp" },
-            json!({"userDesiredState":slot.raw["OverrideState"].as_u64().unwrap_or(0)}),
+            if slot.in_multi_action {
+                json!({"userDesiredState":slot.raw["OverrideState"].as_u64().unwrap_or(0)})
+            } else {
+                json!({})
+            },
         );
+        if !pressed && !cancelled {
+            self.advance_key_state(slot)?;
+        }
         Ok(())
     }
     pub(super) fn save_multi(&mut self, context: &str, raw: Value) -> Result<()> {
@@ -288,6 +316,7 @@ impl Host {
         Sequence::parse(&candidate.uuid, &candidate.raw)?;
         // Preserve unsupported imported steps; execution validates availability.
         candidate.hydrate_children(&self.actions)?;
+        self.cancel_triggers_for_child(context);
         self.cancel_multi(context);
         // Stable instances remain; removed/replaced children receive lifecycle end.
         let old: HashSet<_> = slot.flatten().iter().map(|s| s.context.clone()).collect();

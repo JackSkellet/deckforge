@@ -40,7 +40,7 @@ Desktop interaction requirements come from the official [plugin setup guide][plu
 | --- | --- | --- | --- |
 | PR-01 | Read existing `.streamDeckProfile` archives/directories without losing unknown data | **Verified subset, A/T.** Six SDK sample profiles and two shipped Plus profiles import; raw fields, settings, states and images are retained. | Expand corpus to user exports from supported app versions and device types. Compare complete logical trees and assets, including missing plugins and non-ASCII names. [Profiles][profiles] |
 | PR-02 | Profile library: create, rename, duplicate, delete, select and bind to device | **Verified subset, C/T.** Native library create/rename/duplicate/delete/select and restart persistence implemented for one Plus device; multi-device bindings remain open. | Perform each operation through native GUI, restart, and verify stable per-profile identities and device associations. [Preferences][preferences] |
-| PR-03 | Pages: create/reorder/delete, next/previous/go-to and page indicator | **Verified subset, A/C/T.** Native page CRUD/reorder, next/previous/indicator and swipe navigation implemented. Held controls release before disappearing; stable pinned contexts retain ownership. Serialized go-to settings and physical swipe acceptance remain open. | Import both shipped Plus profiles; change every page with GUI, action and swipe; verify boundary behavior and action disappearance/appearance ordering. [Pages release][pages] |
+| PR-03 | Pages: create/reorder/delete, next/previous/go-to and page indicator | **Verified subset, A/C/T.** Native page CRUD/reorder, next/previous/indicator and swipe navigation implemented. Held controls release before disappearing; stable pinned contexts retain ownership. Original one-based go-to settings are implemented; physical swipe acceptance remains open. | Import both shipped Plus profiles; change every page with GUI, action and swipe; verify boundary behavior and action disappearance/appearance ordering. [Pages release][pages] |
 | PR-04 | Nested folders, return-to-parent and configured auto-exit | **Verified subset, A/T.** Shipped folder/back links navigate, with per-profile folder cursor restoration. Configured auto-exit remains missing. | Traverse nested folders from shipped profiles; return to exact parent/page; check per-folder and per-action auto-exit timers. [Auto folder exit][autoexit] |
 | PR-05 | Pinned actions/folders with page-specific overrides | **Verified subset, C/T.** Pins span pages/folders, local overrides win, hidden pins have a dedicated editor, and unpin preserves placements. Mapping the Default page to pin storage remains an inference until a nonempty Windows pin export is obtained. | A pinned slot appears across pages, a page override wins locally, and unpin preserves intended assignments. Do not assume an empty Default page means pins are unsupported. [Pinned actions][pinned] |
 | PR-06 | Export profiles and action-sharing files; interoperable import/export round trip | **Partial, A/C/T.** Original-format profile ZIP export preserves source fields, assets and duplicate-page references; both shipped Plus round trips pass. Windows app acceptance and action-sharing files remain unverified. | Linux export imports into official Windows app; Windows export reimports into Linux with equivalent pages, folders, actions, settings and assets. [Profiles][profiles], [sharing][sharing] |
@@ -61,7 +61,7 @@ The shipped profiles contain real action identifiers and settings; their presenc
 | AC-04 | Soundboard playback, looping, overlap/restart, fades, volume and output device | **Verified subset, A/C/T.** Native controls, independent streaming mixer and Pulse/PipeWire transport implement four playback modes, volume, fades, routing and soundboard-wide stop. Captured virtual-sink PCM verifies WAV/embedded MP3, volume and fade envelopes. Audible/physical acceptance, Windows timing/visual equivalence and multichannel downmix remain open. | Play supported audio fixtures in each documented mode, route to selected output, stop/retrigger and restart host safely. Verify captured audio and audible output. [Soundboard][soundboard] |
 | AC-05 | Multi Actions, delays, switch/random variants and plugin multi-action context | **Verified subset, A/C/T.** Native ordered-step editor, delays, Switch and Random run through an incremental scheduler. Child SDK payloads, desired states, settings/PI ownership, cancellation and restart identities pass real-process tests; unchanged Hello World runs nested. Physical shortcuts and full Windows workflow equivalence remain open. | Import/reorder sequences, check measured timing and stateful branches, then verify plugin events with a fixture that consumes multi-action state. Inventory switch/random behavior before marking those variants passed. [Multi Actions][multi], [delay controls][delays] |
 | AC-06 | Dial Stacks | **Verified subset, A/C/T.** Native editing, selected-child lifecycle, click/held-turn/touch routing, fast navigation and persistence work. Unchanged Layouts instances produce verified PNG changes. Physical acceptance and exact artwork/restore behavior remain open. | Load multiple real dial actions; dial push cycles active action and corresponding touch display; settings persist independently. [Dial Stacks][stacks] |
-| AC-07 | Action Trigger adapts key actions to dial directions/press | **Missing, A/C.** Shipped key-adaptor actions are preserved without execution. | Configure three different actions, exercise both rotation directions and press, and verify corresponding plugin key-event semantics. [Action Trigger][trigger] |
+| AC-07 | Action Trigger adapts key actions to dial directions/press | **Verified subset, A/C/T.** Native three-slot editor, key-event routing, timed rotation/touch pulses, normal plugin states, nested sequences and Dial Stack integration implemented. Unchanged Counter and all eleven original records pass process tests; physical gesture acceptance remains open. | Configure three different actions, exercise both rotation directions and press, and verify corresponding plugin key-event semantics. [Action Trigger][trigger] |
 | AC-08 | Action Wheel and Key Logic/Key Stack behaviors | **Missing/Unresolved, A/C.** Shipped `keys.logic`/`keys.stack` descriptors exist; semantics are not fully investigated. | Implement documented wheel selection/activation and record actual 7.6 Key Logic/Stack reference behavior before creating differential tests. [Action Wheel][wheel], [7.4 fixes][release74] |
 | AC-09 | Device brightness, sleep/screensaver and profile/page navigation actions | **Partial, A/C/T.** Profile/page/folder navigation implemented and process-tested. Brightness, sleep and screensaver remain missing. | Execute user-configured actions on hardware, verify ranges/state restoration, and ensure navigation targets the correct device. [Preferences][preferences], [screensaver][screensaver] |
 | AC-10 | Built-in/tutorial onboarding and meaningful errors for unavailable actions | **Partial, A/C/T.** Native editor explains unavailable imported actions and retains their data; tutorial HTML registers. Broader tutorial screens and every default-profile action remain open. | Import untouched default Plus profile; every action either works or has an actionable visible compatibility error. Run tutorial screens through the supported browser runtime. [Artifact evidence](../../evidence/elgato-7.6/findings.md) |
@@ -398,3 +398,42 @@ both percentage and step control. The live read-only percentage exactly matches
 the audio server, and the installed build connects to the actual Plus and default
 AirPods output. Logs, virtual-sink metrics and source/binary hashes are retained
 in `../../evidence/system-volume/`; the prior user session is backed up.
+
+
+### Action Trigger evidence update, 2026-10-12
+
+`../../evidence/action-trigger-contracts.json` and its follow-up retain the eleven
+original adaptor records, archive/member hashes and bounded native dispatch slices.
+The original format is a flat three-position `Actions` array: CCW, press, CW.
+Blank records use `{"Actions":[]}`. Children are ordinary Keypad contexts with
+the parent dial coordinates and no `userDesiredState`. Multi Action opt-out does
+not exclude these children. Rotation queues use 60 ms holds, 15 ms gaps and a
+three-item pending cap; direct physical pushes bypass that queue.
+
+`src/action_trigger.rs` implements the independent parser/hit-test/repeater;
+`src/host/trigger.rs` handles actual event ownership and composite rendering.
+Cancellation releases only dispatched holds, and overlapping physical/touch holds
+share ownership. These are explicit Linux cleanup choices; native extra-release
+edge cases are not copied. Half-open hit-rectangle edges remain a Linux convention.
+Automatic state advancement follows the [manifest contract][manifest] and recovered
+native keyUp path, honoring `DisableAutomaticStates` for ordinary key actions.
+
+Native editors support Dial Stack → Action Trigger → Multi Action navigation,
+with per-context drafts and Back. Recursive child hydration/export preserves
+unknown fields, resources, positional blanks and identities. Go-to-page dispatch
+uses the recovered one-based `PageIndex` and current profile page order.
+
+`tests/trigger_interop.py` runs a generated protocol probe and unchanged official
+Counter, measuring pulse timing, cancellation, contexts, nested sequences,
+selected-stack lifecycle, persistence and all eleven original adaptor round trips.
+Pure tests cover prefetched-event cancellation, edits during queue gaps and shared
+hold ownership. Windows execution, exact reference visuals and physical Action
+Trigger acceptance are still unverified; broader ledger gaps remain open.
+
+This checkpoint passes 183 non-injection tests plus the explicitly gated keyboard
+test's default no-op path, strict Clippy on Rust 1.99, and twelve process suites.
+Native app-owned capture verifies the always-dark Trigger editor. The installed
+build retains the user's saved controls; hardware startup and sample registration
+are checked separately from physical gesture acceptance. Evidence is retained in
+`../../evidence/action-triggers/`. Public tests now include MIT-licensed official
+layout/profile fixtures; proprietary installers and private sessions stay local.

@@ -147,7 +147,7 @@ plugin events. Desired state uses the original `OverrideState` field. Plugins
 that declare `SupportedInMultiActions: false`, including the official Counter,
 are excluded. The unchanged Hello World sample is tested inside sequences and is installed
 alongside Counter and Layouts in the native action library.
-Nested Multi Actions are rejected, as specified by Elgato; unknown imported steps
+Multi Actions inside other Multi Actions are rejected; unknown imported steps
 stay preserved and block execution with a useful error.
 
 Profiles retain nested settings and assets, including newly embedded audio.
@@ -178,6 +178,31 @@ Original Wave Link stacks are preserved with unavailable actions identified;
 implementing the container does not make the Windows Wave Link plugin work.
 The unchanged Layouts plugin is tested with multiple independent stack instances
 and actual PNG comparisons. Physical dial-stack acceptance remains pending.
+
+## Action Triggers
+
+Assign **Action Trigger** to a dial to run key actions from counterclockwise turns,
+physical presses, and clockwise turns. The editor keeps these three positions
+fixed; empty slots stay empty. Each child has independent settings, images and a
+property inspector. The touch strip shows three icons, each tappable within its
+own rectangle. A physical press holds the middle action until release.
+
+Rotation produces 60 ms key presses with 15 ms between repeats. An initial burst
+is capped at three presses; more turns can queue three behind the current press.
+Turning the other direction replaces pending work. Page changes, stack selection,
+and edits cancel departing work with balanced releases. Overlapping physical and
+touch presses share a held child until both release, a Linux ownership policy.
+
+Action Trigger accepts ordinary key plugins even when they opt out of Multi
+Actions; the unchanged Counter sample is tested. Automatic multi-state toggles
+honor `DisableAutomaticStates`. Multi Actions can be assigned to these slots and
+opened through **Edit sequence…**. Add Action Trigger inside a Dial Stack through
+**Edit Action Trigger…**; stack pushes still cycle the stack, so touch activates
+the middle key action there. **Go to page** uses the original one-based page number.
+
+All eleven recovered original Action Trigger records round-trip in tests.
+Simulation verifies plugin events and rendered images; physical acceptance of
+these new gestures and Windows acceptance of exported profiles remain pending.
 
 ## Commands
 
@@ -270,6 +295,7 @@ python tests/soundboard_interop.py --binary target/release/deckforge
 python tests/multi_interop.py --binary target/release/deckforge
 python tests/stack_interop.py --binary target/release/deckforge
 python tests/volume_interop.py --binary target/release/deckforge
+python tests/trigger_interop.py --binary target/release/deckforge
 ```
 
 The optional installer test needs the local Windows artifacts. The sample

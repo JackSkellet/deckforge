@@ -5,6 +5,7 @@ use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 
 const STACK: &str = "com.elgato.streamdeck.dial.stack";
+const TRIGGER: &str = "com.elgato.streamdeck.keys.adaptor";
 const MEDIA: &str = "com.elgato.streamdeck.system.multimedia";
 
 #[derive(Default)]
@@ -335,30 +336,57 @@ fn show_draft(
                     ui.weak("Save this stack before opening plugin settings.");
                 }
             }
-            let mut settings = child.get("Settings").cloned().unwrap_or_else(|| json!({}));
-            let mut changed = false;
-            ui.add_enabled_ui(!draft.detail.json_dirty, |ui| {
-                if let Some(result) =
-                    crate::system_editor::edit(ui, &uuid, "Encoder", &mut settings)
-                {
-                    changed |= result;
-                } else if let Some(result) =
-                    crate::soundboard_editor::edit(ui, &uuid, &mut settings, outputs)
-                {
-                    changed |= result.changed;
-                    if result.refresh_outputs {
-                        requests.push(json!({"command":"soundboard_refresh"}));
-                    }
+            if uuid == TRIGGER {
+                let child_context = live["context"].as_str();
+                let label = if Some(index) == active {
+                    "Edit Action Trigger…"
                 } else {
-                    changed |= primitive_settings(ui, &mut settings, &mut draft.detail);
+                    "Activate & edit Action Trigger…"
+                };
+                if ui
+                    .add_enabled(
+                        !draft.dirty && !draft.detail.pending() && child_context.is_some(),
+                        egui::Button::new(label),
+                    )
+                    .clicked()
+                    && let Some(child_context) = child_context
+                {
+                    requests.extend(trigger_navigation_requests(
+                        context,
+                        child_context,
+                        index,
+                        active,
+                    ));
                 }
-            });
-            changed |= settings_json(ui, &mut settings, &mut draft.detail);
-            if changed {
-                child["Settings"] = settings;
-            }
-            if changed || draft.detail.pending() {
-                draft.changed();
+                if draft.dirty {
+                    ui.weak("Save this stack before editing its Action Trigger.");
+                }
+            } else {
+                let mut settings = child.get("Settings").cloned().unwrap_or_else(|| json!({}));
+                let mut changed = false;
+                ui.add_enabled_ui(!draft.detail.json_dirty, |ui| {
+                    if let Some(result) =
+                        crate::system_editor::edit(ui, &uuid, "Encoder", &mut settings)
+                    {
+                        changed |= result;
+                    } else if let Some(result) =
+                        crate::soundboard_editor::edit(ui, &uuid, &mut settings, outputs)
+                    {
+                        changed |= result.changed;
+                        if result.refresh_outputs {
+                            requests.push(json!({"command":"soundboard_refresh"}));
+                        }
+                    } else {
+                        changed |= primitive_settings(ui, &mut settings, &mut draft.detail);
+                    }
+                });
+                changed |= settings_json(ui, &mut settings, &mut draft.detail);
+                if changed {
+                    child["Settings"] = settings;
+                }
+                if changed || draft.detail.pending() {
+                    draft.changed();
+                }
             }
         }
     }
@@ -392,6 +420,20 @@ fn show_draft(
     if let Some(error) = &draft.error {
         ui.colored_label(ui.visuals().error_fg_color, error);
     }
+    requests
+}
+
+fn trigger_navigation_requests(
+    parent: &str,
+    child: &str,
+    index: usize,
+    active: Option<usize>,
+) -> Vec<Value> {
+    let mut requests = Vec::new();
+    if active != Some(index) {
+        requests.push(json!({"command":"stack_select","context":parent,"index":index}));
+    }
+    requests.push(json!({"command":"edit_nested_trigger","context":child}));
     requests
 }
 
@@ -516,8 +558,12 @@ fn new_child(metadata: &Value) -> Value {
         }
         settings["actionIdx"] = json!(18);
     }
-    json!({"ActionID":uuid::Uuid::new_v4().to_string(),"UUID":metadata["uuid"],"Name":metadata["name"],
-        "Settings":settings,"State":0,"States":metadata.get("states").cloned().unwrap_or_else(||json!([]))})
+    let mut child = json!({"ActionID":uuid::Uuid::new_v4().to_string(),"UUID":metadata["uuid"],"Name":metadata["name"],
+        "Settings":settings,"State":0,"States":metadata.get("states").cloned().unwrap_or_else(||json!([]))});
+    if metadata["uuid"] == TRIGGER {
+        child["Actions"] = json!([{"Actions":[]},{"Actions":[]},{"Actions":[]}]);
+    }
+    child
 }
 
 fn primitive_settings(ui: &mut egui::Ui, settings: &mut Value, draft: &mut SettingsDraft) -> bool {
@@ -704,6 +750,29 @@ mod tests {
         output.drop_without_applying_deltas();
         assert_eq!(editor.drafts["parent"].raw, parent["raw"]);
     }
+    #[test]
+    fn nested_trigger_navigation_activates_before_opening_and_new_records_parse() {
+        let requests = trigger_navigation_requests("stack", "trigger", 2, Some(0));
+        assert_eq!(
+            requests[0],
+            json!({"command":"stack_select","context":"stack","index":2})
+        );
+        assert_eq!(
+            requests[1],
+            json!({"command":"edit_nested_trigger","context":"trigger"})
+        );
+        assert_eq!(
+            trigger_navigation_requests("stack", "trigger", 2, Some(2)),
+            vec![requests[1].clone()]
+        );
+        let child = new_child(
+            &json!({"uuid":TRIGGER,"name":"Action Trigger","controllers":["Encoder"],"defaults":{},"states":[]}),
+        );
+        let parsed = crate::action_trigger::parse(&child).unwrap();
+        assert_eq!(parsed.children.len(), 3);
+        assert!(parsed.children.iter().all(Option::is_none));
+    }
+
     #[test]
     fn invalid_current_selection_is_read_only_until_structural_edit() {
         let mut raw = raw();
