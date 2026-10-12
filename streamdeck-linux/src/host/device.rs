@@ -311,7 +311,7 @@ impl Host {
                     self.device_config = Some(config);
                 }
                 if announce {
-                    self.device_broadcast(json!({"event":"deviceDidConnect","device":self.device,"deviceInfo":info(self.model)}));
+                    self.device_broadcast(json!({"event":"deviceDidConnect","device":self.device,"deviceInfo":self.device_info()}));
                 }
                 if changed {
                     for slot in self.slots.iter().flat_map(Slot::visible_flatten) {

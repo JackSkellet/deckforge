@@ -201,6 +201,22 @@ def main():
             b_probe = assign(host, B, 5, ACTION, {'owner': 'B'})
             require(len({a_counter, b_counter, a_probe, b_probe}) == 4, 'Device action contexts collide')
             initial_a, initial_b = inspect(host, A), inspect(host, B)
+            sdk.send()
+            name_offset = len(rows(proof))
+            post(host, A, 'device_rename', name='Editing desk')
+            post(host, B, 'device_rename', name='  Studio 🎛  ')
+            sdk.send()
+            changes = [e for e in rows(proof)[name_offset:] if e.get('event') == 'deviceDidChange']
+            require([(e['device'], e['deviceInfo']['name']) for e in changes] == [(A, 'Editing desk'), (B, 'Studio 🎛')], 'Names did not reach the plugin as deviceDidChange')
+            require(not lifecycle(rows(proof)[name_offset:]), 'Renaming recreated actions or connections')
+            require(pid_map(host) == pids and host.state()['device'] == A, 'Renaming changed plugin process or editor selection')
+            for device, before in [(A, initial_a), (B, initial_b)]:
+                require([s['context'] for s in inspect(host, device)['slots']] == [s['context'] for s in before['slots']], 'Renaming changed action identities')
+            host.post({'command': 'device_rename', 'device': B, 'name': 'x' * 65}, expected=400)
+            post(host, B, 'device_rename', name='')
+            require(inspect(host, B)['device_name'] == 'Stream Deck Mini', 'Reset did not restore model name')
+            post(host, B, 'device_rename', name='Studio 🎛')
+            report['device_names_and_change_events'] = True
             a_profile, a_page = initial_a['library']['active_profile'], initial_a['library']['active_page']
             b_profile, b_page = initial_b['library']['active_profile'], initial_b['library']['active_page']
             sdk.send()
@@ -400,9 +416,11 @@ def main():
             require(len(launches) == 1, 'Restart spawned duplicate probe processes')
             require({d['id'] for d in launches[0]['info']['devices']} == {A, B, C}, 'Restart registration omitted an associated device')
             metadata = {d['id']: d for d in launches[0]['info']['devices']}
+            require(metadata[A]['name'] == 'Editing desk' and metadata[B]['name'] == 'Studio 🎛', 'Restart registration lost custom device names')
             for device, columns, rows_count, kind in [(A, 4, 2, 7), (B, 3, 2, 1), (C, 3, 2, 1)]:
                 require(metadata[device]['type'] == kind and metadata[device]['size'] == {'columns': columns, 'rows': rows_count}, 'Restart metadata used selected-device geometry for every device')
             reconnects = [e for e in rows(proof)[launch_offset:] if e.get('event') == 'deviceDidConnect']
+            require(all(e['deviceInfo']['name'] == metadata[e['device']]['name'] for e in reconnects), 'Reconnect metadata lost a custom name')
             require(sorted(e['device'] for e in reconnects) == sorted([A, B, C]), 'Restart must announce each online device once')
             for device in (A, B, C):
                 restored = inspect(host, device)

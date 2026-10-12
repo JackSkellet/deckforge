@@ -178,7 +178,30 @@ if(!expected.copy_target){
 if(options.parentElement.open)options.click();
 const afterCopy=await read();
 if(afterCopy.device!==expected.a||afterCopy.library.active_profile!==sourceProfile||JSON.stringify(afterCopy.library.profiles.map(profile=>profile.id))!==JSON.stringify(sourceProfiles)||JSON.stringify(counter(afterCopy).settings)!==JSON.stringify(counter(final).settings))throw Error('Copy dialog changed the original device profile/settings');
+const button=name=>[...document.querySelectorAll('button')].find(item=>item.textContent.trim()===name);
+const nameField=()=>document.querySelector('.device-name-form input');
+button('Preferences').click();
+await until(()=>nameField(),'native device name field');
+set(nameField(),'Editing desk 🎛');
+await until(()=>button('Save name')&&!button('Save name').disabled,'name save enabled');
+button('Save name').click();
+await until(async()=>{const s=await read();return s.device_name==='Editing desk 🎛'&&s.device_custom_name==='Editing desk 🎛'},'saved custom device name');
+await until(()=>picker().selectedOptions[0].textContent.includes('Editing desk 🎛'),'custom name in header');
+button('Use default name').click();
+await until(async()=>{const s=await read();return s.device_custom_name===null&&s.device_name===s.device_model_name},'default name reset');
+await until(()=>!nameField().disabled&&nameField().value==='','name reset acknowledged');
+set(nameField(),'Editing desk 🎛');
+await until(()=>!button('Save name').disabled,'second name save');
+button('Save name').click();
+await until(async()=>{const s=await read();return s.device_name==='Editing desk 🎛'&&s},'retained custom name');
+document.querySelector('[aria-label="Close Preferences"]').click();
+await pick(expected.b,6,0);
+if((await read()).device_custom_name!==null)throw Error('Renaming A changed B');
+await pick(expected.a,8,4);
+button('Preferences').click();
+await until(()=>nameField()?.value==='Editing desk 🎛','name restored when reopening Preferences');
 return {
+ device_name_ui:{saved:'Editing desk 🎛',reset_verified:true,other_device_unchanged:true},
  profile_copy_ui:profileCopy,
  device_inventory:inventory,
  counter_process:{id:'com.elgato.counter',pid,shared_across_devices:true,unchanged_across_picker_switches:true},
@@ -309,6 +332,7 @@ def main():
                     cleanup(process)
             report["phase"] = "persisted-result"
             persisted = json.loads((state / "session.json").read_text())
+            assert next(record for record in persisted["devices"] if record["device"] == expected["a"])["name"] == "Editing desk 🎛", "Custom name did not persist"
             for name in ("a", "b"):
                 item = report["native"][name]
                 matches = list(saved_slots(persisted, item["context"]))

@@ -12,6 +12,19 @@ inspectors use the action's owning device, regardless of which editor is open.
 Plugin global settings, the audio mixer, soundboard and system-volume services
 remain shared.
 
+**Preferences → Device → Device name** gives each deck a custom name. The picker,
+profile-copy destinations and plugin metadata use it. Empty names reset to the
+model name. Names accept up to 64 Unicode characters without control characters;
+leading and trailing whitespace is removed. Duplicate names are allowed because
+the picker also shows device identity. Renaming works while a device is offline
+and preserves its serial, profiles and action contexts.
+
+Names are saved before plugins receive the documented
+[`deviceDidChange`](https://docs.elgato.com/streamdeck/sdk/references/websocket/plugin/#devicedidchange)
+event. Failed saves preserve the previous name and emit no change. Launch
+registration and reconnect events include the current name; an offline metadata
+refresh after plugin registration also covers renames during plugin startup.
+
 ## Profiles and action editing
 
 Each device owns its profiles and navigation history. **Profile options → Copy
@@ -54,7 +67,7 @@ On shutdown, every worker receives an ordered Stop before any worker is joined.
 No device reset or firmware update is part of discovery or shutdown.
 
 The current limits are 32 associated device runtimes and 32 USB workers. Device
-forgetting and custom device names are unfinished. Unsupported transports remain
+forgetting is unfinished. Unsupported transports remain
 listed in [Device models](DEVICES.md); simulated devices do not establish physical
 USB acceptance.
 
@@ -87,6 +100,8 @@ connection metadata, independent held controls and timed actions, global setting
 bundled profiles, cross-device profile copy and restart after a background save.
 `tests/native_multi_device_interop.py` exercises the actual embedded picker,
 retained drafts and live settings through two concurrent Counter contexts.
+Both suites also check renaming: SDK notifications and restart metadata in the
+process test, plus save/reset, picker updates and retained names in the native UI.
 
 Unit tests cover exclusive path reservations, metadata identity checks,
 generations, Stop ordering, device limits, inspector permissions, restart cleanup,

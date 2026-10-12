@@ -33,6 +33,8 @@ impl Navigation {
 pub(super) struct Record {
     pub scope: String,
     pub device: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     pub model: Model,
     pub firmware: String,
     pub config: Option<device::Config>,
@@ -42,6 +44,7 @@ pub(super) struct Record {
 pub(super) struct DeviceRuntime {
     pub scope: String,
     pub device: String,
+    pub device_name: Option<String>,
     pub model: Model,
     pub firmware: String,
     pub device_config: Option<device::Config>,
@@ -79,6 +82,7 @@ impl DeviceRuntime {
         Self {
             scope: record.scope,
             device: record.device,
+            device_name: record.name,
             model,
             firmware: record.firmware,
             device_config: record.config,
@@ -115,6 +119,7 @@ impl DeviceRuntime {
         Record {
             scope: self.scope.clone(),
             device: self.device.clone(),
+            name: self.device_name.clone(),
             model: self.model,
             firmware: self.firmware.clone(),
             config: self.device_config.clone(),
@@ -126,6 +131,7 @@ impl DeviceRuntime {
         swap!(
             scope,
             device,
+            device_name,
             model,
             firmware,
             device_config,
@@ -160,10 +166,40 @@ impl DeviceRuntime {
     }
 }
 impl Host {
+    pub(super) fn device_display_name(&self) -> &str {
+        self.device_name.as_deref().unwrap_or(self.model.name())
+    }
+    pub(super) fn device_info(&self) -> Value {
+        let mut info = device::info(self.model);
+        info["name"] = json!(self.device_display_name());
+        info
+    }
+    pub(super) fn rename_device(&mut self, name: &str) -> Result<()> {
+        ensure!(
+            name.chars().count() <= 64 && !name.chars().any(char::is_control),
+            "Device name must contain at most 64 characters and no control characters"
+        );
+        let name = name.trim();
+        // An empty name resets to the model's default name, including after upgrades.
+        let next = (!name.is_empty()).then(|| name.to_owned());
+        if self.device_name == next {
+            return Ok(());
+        }
+        let previous = std::mem::replace(&mut self.device_name, next);
+        if let Err(error) = self.persist() {
+            self.device_name = previous;
+            return Err(error);
+        }
+        self.device_broadcast(
+            json!({"event":"deviceDidChange","device":self.device,"deviceInfo":self.device_info()}),
+        );
+        Ok(())
+    }
     pub(super) fn current_record(&self) -> Record {
         Record {
             scope: self.scope.clone(),
             device: self.device.clone(),
+            name: self.device_name.clone(),
             model: self.model,
             firmware: self.firmware.clone(),
             config: self.device_config.clone(),
@@ -233,6 +269,9 @@ impl Host {
             .into_iter()
             .map(|record| {
                 let mut info = device::info(record.model);
+                if let Some(name) = record.name {
+                    info["name"] = json!(name);
+                }
                 info["id"] = json!(record.device);
                 info
             })
@@ -339,6 +378,7 @@ impl Host {
         let record = Record {
             scope: uuid::Uuid::new_v4().to_string(),
             device: device.into(),
+            name: None,
             model,
             firmware: if self.simulate {
                 "simulation".into()
@@ -354,7 +394,7 @@ impl Host {
         self.library.profiles.extend(library.profiles);
         self.other_devices.insert(state.scope.clone(), state);
         self.with_device(device,|host|{
-            if connected {host.device_broadcast(json!({"event":"deviceDidConnect","device":host.device,"deviceInfo":device::info(host.model)}));host.install_bundled_profiles(true)?;}
+            if connected {host.device_broadcast(json!({"event":"deviceDidConnect","device":host.device,"deviceInfo":host.device_info()}));host.install_bundled_profiles(true)?;}
             host.hydrate_library_children();host.slots=host.library.visible()?;host.render()?;
             host.persist()
         })
@@ -464,6 +504,7 @@ impl Host {
             "Active saved device is missing"
         );
         let current = records.iter().find(|r| r.scope == self.scope).unwrap();
+        self.device_name = current.name.clone();
         ensure!(
             current.device == self.device && current.model == self.model,
             "Saved active device metadata does not match"
@@ -586,9 +627,9 @@ impl Host {
             .current()
             .map_or(self.model, |profile| profile.model);
         let mut records = vec![
-            json!({"id":self.device,"name":self.model.name(),"model":self.model,"connected":self.connected&&!self.simulate,"online":self.connected,"firmware":self.firmware,"selected":self.scope==self.selected_scope,"profile_compatible":profile_model.profile_compatible(self.model)}),
+            json!({"id":self.device,"name":self.device_display_name(),"model":self.model,"connected":self.connected&&!self.simulate,"online":self.connected,"firmware":self.firmware,"selected":self.scope==self.selected_scope,"profile_compatible":profile_model.profile_compatible(self.model)}),
         ];
-        records.extend(self.other_devices.values().map(|state|json!({"id":state.device,"name":state.model.name(),"model":state.model,"connected":state.connected&&!self.simulate,"online":state.connected,"firmware":state.firmware,"selected":state.scope==self.selected_scope,"profile_compatible":profile_model.profile_compatible(state.model)})));
+        records.extend(self.other_devices.values().map(|state|json!({"id":state.device,"name":state.device_name.as_deref().unwrap_or(state.model.name()),"model":state.model,"connected":state.connected&&!self.simulate,"online":state.connected,"firmware":state.firmware,"selected":state.scope==self.selected_scope,"profile_compatible":profile_model.profile_compatible(state.model)})));
         json!(records)
     }
 }
@@ -598,6 +639,74 @@ mod tests {
     use super::*;
     fn fixture(root: &Path) -> Host {
         super::super::tests::fixture(root)
+    }
+    #[test]
+    fn names_are_scoped_persisted_and_announced_without_action_lifecycle() {
+        let root = tempfile::tempdir().unwrap();
+        let mut host = fixture(root.path());
+        let a = host.device.clone();
+        host.add_simulated_device("B", Model::Mini).unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        host.plugins[0].sender = Some(tx);
+        let context = host.slots[0].context.clone();
+        super::super::apply_control(
+            &mut host,
+            json!({"command":"device_rename","device":"B","name":"  Studio 🎛  "}),
+        )
+        .unwrap();
+        assert_eq!(host.device, a);
+        assert_eq!(host.slots[0].context, context);
+        assert_eq!(host.device_display_name(), Model::Plus.name());
+        let changed = rx.try_recv().unwrap();
+        assert_eq!(
+            changed,
+            json!({"event":"deviceDidChange","device":"B","deviceInfo":{"name":"Studio 🎛","type":Model::Mini.sdk_type(),"size":{"columns":3,"rows":2}}})
+        );
+        assert!(rx.try_recv().is_err());
+        assert_eq!(
+            host.registration_devices()
+                .iter()
+                .find(|v| v["id"] == "B")
+                .unwrap()["name"],
+            "Studio 🎛"
+        );
+        let saved: Saved = serde_json::from_slice(&fs::read(&host.state_path).unwrap()).unwrap();
+        assert_eq!(
+            saved
+                .devices
+                .iter()
+                .find(|r| r.device == "B")
+                .unwrap()
+                .name
+                .as_deref(),
+            Some("Studio 🎛")
+        );
+        host.with_device("B", |h| h.rename_device("Studio 🎛"))
+            .unwrap();
+        assert!(rx.try_recv().is_err());
+        host.with_device("B", |h| h.rename_device("")).unwrap();
+        assert_eq!(
+            rx.try_recv().unwrap()["deviceInfo"]["name"],
+            Model::Mini.name()
+        );
+        assert!(host.device_records().iter().all(|r| r.name.is_none()));
+    }
+    #[test]
+    fn name_validation_and_failed_save_preserve_current_metadata() {
+        let root = tempfile::tempdir().unwrap();
+        let mut host = fixture(root.path());
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        host.plugins[0].sender = Some(tx);
+        host.rename_device("Desk").unwrap();
+        rx.try_recv().unwrap();
+        for name in ["a".repeat(65), "bad\nname".into(), "bad\0name".into()] {
+            assert!(host.rename_device(&name).is_err());
+            assert_eq!(host.device_display_name(), "Desk");
+        }
+        host.state_path = root.path().join("absent").join("session.json");
+        assert!(host.rename_device("Lost").is_err());
+        assert_eq!(host.device_display_name(), "Desk");
+        assert!(rx.try_recv().is_err());
     }
     #[test]
     fn transport_is_bound_only_after_model_identity_and_stale_generations_are_ignored() {
@@ -695,9 +804,10 @@ mod tests {
         host.with_device("XL-B", |host| host.assign("Keypad", 31, "test.action"))
             .unwrap();
         host.select_device("XL-B").unwrap();
+        host.rename_device("Main XL").unwrap();
         host.with_device(&a, |host| {
             host.slots[0].settings = json!({"latest":42});
-            host.persist()
+            host.rename_device("Small desk")
         })
         .unwrap();
         let saved: Value = serde_json::from_slice(&fs::read(&host.state_path).unwrap()).unwrap();
@@ -714,6 +824,16 @@ mod tests {
         })
         .unwrap();
         let snapshot = running.controller.snapshot();
+        assert_eq!(snapshot["device_name"], "Main XL");
+        assert_eq!(
+            snapshot["devices"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|d| d["id"] == a)
+                .unwrap()["name"],
+            "Small desk"
+        );
         assert_eq!(snapshot["device"], "XL-B");
         assert_eq!(snapshot["device_model"], "xl");
         assert_eq!(snapshot["slots"][0]["index"], 31);

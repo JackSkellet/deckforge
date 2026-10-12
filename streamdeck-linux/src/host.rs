@@ -361,6 +361,7 @@ struct Host {
     scope: String,
     selected_scope: String,
     other_devices: BTreeMap<String, device_pool::DeviceRuntime>,
+    device_name: Option<String>,
     transport_generation: Option<u64>,
     pending_hardware: Option<std::sync::mpsc::Sender<Draw>>,
     model: Model,
@@ -1571,7 +1572,7 @@ fn action_snapshot(host: &Host, action: &Action) -> Value {
     })
 }
 fn snapshot(host: &Host) -> Value {
-    json!({"devices":host.devices_snapshot(),"page_navigation":host.page_navigation(),"device_model":host.model,"device_name":host.model.name(),"overflow_slots":host.overflow_slots(),"device_capabilities":host.model.capabilities(),"device_geometry":{"columns":host.model.columns(),"rows":host.model.rows(),"keys":host.model.key_count(),"dials":host.model.dial_count(),"key_width":host.model.key_width(),"key_height":host.model.key_height(),"strip_width":host.model.strip_width(),"strip_height":host.model.strip_height()},"clipboard":host.clipboard_snapshot(),"mixer":host.mixer_snapshot(),"screensaver":{"supported":host.model==Model::Plus,"active":host.saver.active,"reason":host.saver.reason,"generation":host.saver.generation,"preferences":host.saver_preferences(),"preview":host.saver.preview,"error":host.saver.error,"frames":host.saver.animation.as_ref().map(|animation|animation.len())},"session":host.session_state,"device_settings":{"desired":host.configured_controls(),"applied":host.controls_observed,"error":host.controls_error},"library":host.library.snapshot(),"running":host.running,"device":host.device,"firmware":host.firmware,"simulate":host.simulate,"connected":host.connected && !host.simulate,"device_online":host.connected,"connection_error":host.connection_error,
+    json!({"devices":host.devices_snapshot(),"page_navigation":host.page_navigation(),"device_model":host.model,"device_name":host.device_display_name(),"device_model_name":host.model.name(),"device_custom_name":host.device_name,"overflow_slots":host.overflow_slots(),"device_capabilities":host.model.capabilities(),"device_geometry":{"columns":host.model.columns(),"rows":host.model.rows(),"keys":host.model.key_count(),"dials":host.model.dial_count(),"key_width":host.model.key_width(),"key_height":host.model.key_height(),"strip_width":host.model.strip_width(),"strip_height":host.model.strip_height()},"clipboard":host.clipboard_snapshot(),"mixer":host.mixer_snapshot(),"screensaver":{"supported":host.model==Model::Plus,"active":host.saver.active,"reason":host.saver.reason,"generation":host.saver.generation,"preferences":host.saver_preferences(),"preview":host.saver.preview,"error":host.saver.error,"frames":host.saver.animation.as_ref().map(|animation|animation.len())},"session":host.session_state,"device_settings":{"desired":host.configured_controls(),"applied":host.controls_observed,"error":host.controls_error},"library":host.library.snapshot(),"running":host.running,"device":host.device,"firmware":host.firmware,"simulate":host.simulate,"connected":host.connected && !host.simulate,"device_online":host.connected,"connection_error":host.connection_error,
         "volume":host.volume_state,"volume_error":host.volume_error,"multi_runs":host.multi.snapshot(),"multi_pending":host.multi_pending.len(),"audio_outputs":host.audio_outputs,"audio_active":host.audio_active,"system_status":host.system_status,"slots":host.slots.iter().map(|s|slot_snapshot(host,s)).collect::<Vec<_>>(),
         "reference_app":host.reference_app,"inspectors":host.inspectors.values().map(|i|json!({"context":i.context,"plugin":host.plugins[i.plugin].id,"connected":i.sender.is_some()})).collect::<Vec<_>>(),
         "actions":host.actions.iter().map(|action|action_snapshot(host,action)).collect::<Vec<_>>(),
@@ -1663,6 +1664,9 @@ fn apply_control(host: &mut Host, r: Value) -> Result<()> {
     apply_control_local(host, r)
 }
 fn apply_control_local(host: &mut Host, r: Value) -> Result<()> {
+    if r["command"] == "device_rename" {
+        return host.rename_device(r["name"].as_str().context("Device name missing")?);
+    }
     if r["command"] == "profile_copy_to_device" {
         return host.copy_profile_to_device(&r);
     }
@@ -2024,8 +2028,11 @@ async fn socket_session(socket: WebSocket, state: Shared) {
             host.log(format!("Plugin connected: {id}"));
             for device in host.device_ids() {
                 let result=host.with_device(&device,|host| {
-                    if host.connected && let Some(sender)=&host.plugins[index].sender {
-                        let _=sender.send(json!({"event":"deviceDidConnect","device":host.device,"deviceInfo":device::info(host.model)}));
+                    if let Some(sender)=&host.plugins[index].sender {
+                        // The launch-time registration can precede a rename. Refresh
+                        // offline metadata too, without claiming a connection.
+                        let event = if host.connected { "deviceDidConnect" } else { "deviceDidChange" };
+                        let _=sender.send(json!({"event":event,"device":host.device,"deviceInfo":host.device_info()}));
                     }
                     for slot in host.slots.iter().flat_map(Slot::visible_flatten) {
                         if host.actions.iter().any(|a|a.uuid==slot.uuid&&a.plugin==id) {host.emit(slot,"willAppear",json!({}));}
@@ -2510,6 +2517,7 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
         scope: saved_scope.clone(),
         selected_scope: saved_scope,
         other_devices: BTreeMap::new(),
+        device_name: None,
         transport_generation: None,
         pending_hardware: None,
         model,
@@ -2991,6 +2999,7 @@ mod tests {
             scope: "primary".into(),
             selected_scope: "primary".into(),
             other_devices: BTreeMap::new(),
+            device_name: None,
             transport_generation: None,
             pending_hardware: None,
             model: Model::Plus,

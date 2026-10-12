@@ -98,6 +98,8 @@ export interface Snapshot {
   device_model?: string;
   device_name?: string;
   device_geometry?: DeviceGeometry;
+  device_model_name?: string;
+  device_custom_name?: string | null;
   device_capabilities?: DeviceCapabilities;
   overflow_slots?: RecordValue[];
   clipboard?: Clipboard | null;

@@ -262,6 +262,7 @@ export function Preferences({
           <p className="hint">
             {snapshot.device} · Firmware {snapshot.firmware || "unavailable"}
           </p>
+          <DeviceNameForm snapshot={snapshot} run={run} />
           {snapshot.device_capabilities?.brightness !== false ? (
             <>
               <Field label={`Brightness · ${brightness}%`}>
@@ -408,5 +409,98 @@ export function Preferences({
           </section>
         )}
     </>
+  );
+}
+
+export function DeviceNameForm({
+  snapshot,
+  run,
+}: {
+  snapshot: Snapshot;
+  run: Run;
+}) {
+  const key = `device-name:${snapshot.device}`;
+  const current = snapshot.device_custom_name ?? "";
+  const [draft, setDraft] = useState(() => {
+    const saved = getFormDraft(key);
+    return saved && saved.value !== saved.source
+      ? (saved as { value: string; source: string })
+      : { value: current, source: current };
+  });
+  const [busy, setBusy] = useState(false);
+  const [status, setStatus] = useState("");
+  const hintId = useId();
+  const invalid =
+    Array.from(draft.value).length > 64 ||
+    /[\u0000-\u001f\u007f-\u009f]/u.test(draft.value);
+  useEffect(() => {
+    setDraft((previous) =>
+      previous.value === previous.source
+        ? { value: current, source: current }
+        : previous,
+    );
+  }, [current]);
+  useEffect(() => setFormDraft(key, draft), [key, draft]);
+  const save = async (name: string) => {
+    setBusy(true);
+    setStatus("");
+    try {
+      if (
+        await run({ command: "device_rename", device: snapshot.device, name })
+      ) {
+        setDraft({ value: name.trim(), source: name.trim() });
+        setStatus(
+          name.trim() ? "Device name saved." : "Default name restored.",
+        );
+      } else
+        setStatus("Could not save the device name. Your draft is preserved.");
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <form
+      className="device-name-form"
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (!invalid && !busy) void save(draft.value);
+      }}
+    >
+      <Field label="Device name">
+        <input
+          value={draft.value}
+          placeholder={snapshot.device_model_name ?? deviceName(snapshot)}
+          disabled={busy}
+          aria-invalid={invalid}
+          aria-describedby={hintId}
+          onChange={(event) => {
+            setDraft({ ...draft, value: event.target.value });
+            setStatus("");
+          }}
+        />
+      </Field>
+      <p id={hintId} className={invalid ? "error" : "hint"}>
+        {invalid
+          ? "Use at most 64 characters without control characters."
+          : "Choose a name for the device picker and plugins. Leave blank to use the model name."}
+      </p>
+      <div className="row">
+        <button
+          className="primary"
+          type="submit"
+          disabled={busy || invalid || draft.value === current}
+        >
+          {busy ? "Saving…" : "Save name"}
+        </button>
+        <button
+          type="button"
+          disabled={busy || (!current && !draft.value)}
+          onClick={() => void save("")}
+        >
+          Use default name
+        </button>
+      </div>
+      {status && <p role="status">{status}</p>}
+    </form>
   );
 }
