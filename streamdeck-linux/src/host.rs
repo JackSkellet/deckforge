@@ -52,6 +52,7 @@ mod mixer_actions;
 mod multiaction;
 mod plugins;
 mod reference;
+mod removal;
 mod resources;
 mod screensaver;
 mod settings;
@@ -502,6 +503,9 @@ impl Host {
         }
     }
     fn persist(&mut self) -> Result<()> {
+        self.persist_without_plugin(None)
+    }
+    fn persist_without_plugin(&mut self, excluded: Option<usize>) -> Result<()> {
         if !self.canonical_graph_update {
             self.sync_all_devices();
         }
@@ -523,7 +527,7 @@ impl Host {
             globals: &'a HashMap<String, Value>,
             application_mappings: &'a applications::Mappings,
             plugin_language: &'a str,
-            disabled_plugins: &'a BTreeSet<PathBuf>,
+            disabled_plugins: Vec<&'a Path>,
         }
         let data = serde_json::to_vec_pretty(&View {
             devices: self.device_records(),
@@ -536,12 +540,23 @@ impl Host {
             device_controls: &self.device_controls,
             device_config: &self.device_config,
             library: &self.library,
-            plugins: self.plugins.iter().map(|p| p.root.as_path()).collect(),
+            plugins: self
+                .plugins
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| Some(*index) != excluded)
+                .map(|(_, p)| p.root.as_path())
+                .collect(),
             slots: &self.slots,
             globals: &self.globals,
             application_mappings: &self.application_mappings,
             plugin_language: &self.plugin_language,
-            disabled_plugins: &self.disabled_plugins,
+            disabled_plugins: self
+                .disabled_plugins
+                .iter()
+                .filter(|root| excluded.is_none_or(|index| self.plugins[index].root != **root))
+                .map(PathBuf::as_path)
+                .collect(),
         })?;
         {
             use std::io::Write;
@@ -650,7 +665,23 @@ impl Host {
                 slot.preview.clear();
                 continue;
             }
-            let mut picture = if slot.controller == "Neo" {
+            let mut picture = if !self.actions.iter().any(|action| action.uuid == slot.uuid) {
+                let size = if slot.controller == "Encoder" {
+                    (
+                        self.model.strip_width() / u32::from(self.model.dial_count()).max(1),
+                        self.model.strip_height(),
+                    )
+                } else if slot.controller == "Neo" {
+                    (232, 50)
+                } else if self.model.key_width() == self.model.key_height() {
+                    // Pedal has no physical key pixels; retain its 120x120
+                    // software preview, as for ordinary square-key rendering.
+                    (120, 120)
+                } else {
+                    (self.model.key_width(), self.model.key_height())
+                };
+                appearance::unavailable_picture(&self.renderer, size)
+            } else if slot.controller == "Neo" {
                 let root = self
                     .actions
                     .iter()
@@ -1723,6 +1754,7 @@ fn apply_control(host: &mut Host, r: Value) -> Result<()> {
             | "plugin_applications"
             | "plugin_language"
             | "plugin_enabled"
+            | "uninstall_plugin"
             | "restart_plugin"
             | "reference_app"
             | "mixer_config"
@@ -1882,6 +1914,7 @@ fn apply_control_local(host: &mut Host, r: Value) -> Result<()> {
         "plugin_applications" => host.save_application_mappings(&r),
         "plugin_language" => host.save_plugin_language(&r),
         "plugin_enabled" => host.set_plugin_enabled(&r),
+        "uninstall_plugin" => host.uninstall_plugin(&r),
         "install_plugin" => {
             let state_dir = host
                 .state_path
@@ -2097,11 +2130,7 @@ fn apply_control_local(host: &mut Host, r: Value) -> Result<()> {
 }
 
 enum Client {
-    Plugin {
-        index: usize,
-        launch: String,
-        session: String,
-    },
+    Plugin { launch: String, session: String },
     Inspector(String),
 }
 async fn socket_session(socket: WebSocket, state: Shared) {
@@ -2157,11 +2186,7 @@ async fn socket_session(socket: WebSocket, state: Shared) {
             host.flush_deep_links(&id);
             host.application_delivered.remove(&id);
             host.poll_applications();
-            Client::Plugin {
-                index,
-                launch,
-                session,
-            }
+            Client::Plugin { launch, session }
         } else if frame["event"] == "registerPropertyInspector" {
             let Some(registration) = frame["uuid"].as_str() else {
                 return;
@@ -2206,7 +2231,7 @@ async fn socket_session(socket: WebSocket, state: Shared) {
             incoming=stream.next()=>{match incoming {
                 Some(Ok(Message::Text(text)))=>{
                     let result=serde_json::from_str::<Value>(&text).map_err(anyhow::Error::from).and_then(|message|{
-                        let mut host=state.lock().unwrap();match &client {Client::Plugin { index, launch, session }=>{if host.plugin_session_current(*index,launch,session){host.plugin_message(*index,message)}else{Ok(())}},Client::Inspector(id)=>host.inspector_message(id,message)}
+                        let mut host=state.lock().unwrap();match &client {Client::Plugin { launch, session }=>{if let Some(index)=host.plugin_session_index(launch,session){host.plugin_message(index,message)}else{Ok(())}},Client::Inspector(id)=>host.inspector_message(id,message)}
                     });
                     if let Err(error)=result {state.lock().unwrap().log(format!("SDK command rejected: {error}"));}
                 }
@@ -2223,11 +2248,11 @@ async fn socket_session(socket: WebSocket, state: Shared) {
     }
     let mut host = state.lock().unwrap();
     match client {
-        Client::Plugin {
-            index,
-            launch,
-            session,
-        } => host.plugin_disconnected(index, &launch, &session),
+        Client::Plugin { launch, session } => {
+            if let Some(index) = host.plugin_session_index(&launch, &session) {
+                host.plugin_disconnected(index, &launch, &session);
+            }
+        }
         Client::Inspector(id) => host.close_inspector(&id),
     }
 }

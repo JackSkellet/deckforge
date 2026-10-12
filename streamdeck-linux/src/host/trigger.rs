@@ -35,11 +35,15 @@ pub(super) fn picture(
     ));
     for (index, (x, y)) in [(12, 29), (72, 14), (132, 29)].into_iter().enumerate() {
         if let Some(child) = slot.children.get_mut(index).and_then(|g| g.first_mut()) {
-            let mut key = renderer.key_styled(
-                &child.title,
-                child.background.as_ref(),
-                &appearance::style(child, actions),
-            );
+            let mut key = if actions.iter().any(|action| action.uuid == child.uuid) {
+                renderer.key_styled(
+                    &child.title,
+                    child.background.as_ref(),
+                    &appearance::style(child, actions),
+                )
+            } else {
+                appearance::unavailable_picture(renderer, (120, 120))
+            };
             feedback::paint_key(badges, &mut key, child, now);
             let mut png = Cursor::new(Vec::new());
             key.write_to(&mut png, image::ImageFormat::Png)?;
@@ -352,6 +356,60 @@ impl Host {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn missing_child_changes_only_its_derived_miniature() {
+        let root = tempfile::tempdir().unwrap();
+        let host = super::super::tests::fixture(root.path());
+        let mut parent = host.slots[0].clone();
+        let mut missing = host.slots[0].clone();
+        missing.uuid = "missing.plugin.action".into();
+        missing.settings = json!({"preserve":42});
+        missing.background = Some(DynamicImage::ImageRgb8(RgbImage::from_pixel(
+            120,
+            120,
+            Rgb([255, 0, 0]),
+        )));
+        let retained = missing.clone();
+        parent.children = vec![vec![missing], vec![host.slots[0].clone()]];
+        let before = picture(
+            &host.renderer,
+            &[
+                host.actions[0].clone(),
+                Action {
+                    uuid: retained.uuid.clone(),
+                    ..host.actions[0].clone()
+                },
+            ],
+            &mut parent,
+            &HashMap::new(),
+            Duration::ZERO,
+        )
+        .unwrap();
+        let unchanged_preview = parent.children[1][0].preview.clone();
+        let after = picture(
+            &host.renderer,
+            &host.actions,
+            &mut parent,
+            &HashMap::new(),
+            Duration::ZERO,
+        )
+        .unwrap();
+        assert_ne!(before.to_rgba8(), after.to_rgba8());
+        assert_eq!(parent.children[1][0].preview, unchanged_preview);
+        let child = &parent.children[0][0];
+        assert_eq!(child.settings, retained.settings);
+        assert_eq!(child.raw, retained.raw);
+        assert_eq!(child.title, retained.title);
+        assert_eq!(
+            child.background.as_ref().unwrap().to_rgba8(),
+            retained.background.as_ref().unwrap().to_rgba8()
+        );
+        let preview = image::load_from_memory(&STANDARD.decode(&child.preview).unwrap()).unwrap();
+        assert_eq!(
+            preview.to_rgba8(),
+            appearance::unavailable_picture(&host.renderer, (120, 120)).to_rgba8()
+        );
+    }
     fn setup() -> (
         tempfile::TempDir,
         Host,

@@ -33,6 +33,7 @@ const globalCommands = new Set([
   "plugin_applications",
   "plugin_language",
   "plugin_enabled",
+  "uninstall_plugin",
   "reference_app",
   "mixer_refresh",
   "mixer_config",

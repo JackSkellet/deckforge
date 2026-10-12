@@ -8,6 +8,15 @@ import { PluginLanguage } from "./PluginLanguage";
 import { ReferenceInstaller } from "./ReferenceInstaller";
 import { deviceName } from "./device";
 export type Run = (payload: RecordValue) => Promise<boolean>;
+type PluginRemoval = {
+  id: string;
+  name: string;
+  path: string;
+  enabled: boolean;
+  mode: "archive" | "detach" | "missing";
+  reason?: string;
+  error?: string;
+};
 export function Modal({
   title,
   children,
@@ -64,8 +73,49 @@ export function Plugins({
   error?: string;
 }) {
   const [pluginBusy, setPluginBusy] = useState<
-    Record<string, "enable" | "disable" | "restart" | undefined>
+    Record<string, "enable" | "disable" | "restart" | "remove" | undefined>
   >({});
+  const [removal, setRemoval] = useState<PluginRemoval | null>(null);
+  async function removePlugin() {
+    if (!removal || pluginBusy[removal.id]) return;
+    const captured = removal;
+    setPluginBusy((previous) => ({ ...previous, [captured.id]: "remove" }));
+    setRemoval((current) => current && { ...current, error: undefined });
+    try {
+      if (
+        await run({
+          command: "uninstall_plugin",
+          id: captured.id,
+          expected_path: captured.path,
+          expected_enabled: captured.enabled,
+          confirm: true,
+        })
+      )
+        setRemoval((current) => (current?.id === captured.id ? null : current));
+      else
+        setRemoval((current) =>
+          current?.id === captured.id
+            ? {
+                ...current,
+                error:
+                  "Removal did not complete. Review the reported error, or cancel and review its current state.",
+              }
+            : current,
+        );
+    } catch (error) {
+      onError(error);
+      setRemoval((current) =>
+        current?.id === captured.id
+          ? {
+              ...current,
+              error: error instanceof Error ? error.message : String(error),
+            }
+          : current,
+      );
+    } finally {
+      setPluginBusy((previous) => ({ ...previous, [captured.id]: undefined }));
+    }
+  }
   async function pluginCommand(
     id: string,
     operation: "enable" | "disable" | "restart",
@@ -204,7 +254,90 @@ export function Plugins({
               >
                 {pluginBusy[p.id] === "restart" ? "Restarting…" : "Restart"}
               </button>
+              <button
+                type="button"
+                className="danger quiet"
+                aria-label={`Remove ${p.name}`}
+                disabled={
+                  !!pluginBusy[p.id] ||
+                  typeof p.path !== "string" ||
+                  !["archive", "detach", "missing"].includes(p.removal_mode)
+                }
+                title={
+                  p.removal_reason ||
+                  (!["archive", "detach", "missing"].includes(p.removal_mode)
+                    ? "Removal is unavailable in this host."
+                    : undefined)
+                }
+                onClick={() =>
+                  setRemoval({
+                    id: p.id,
+                    name: p.name,
+                    path: p.path,
+                    enabled: p.enabled !== false,
+                    mode: p.removal_mode,
+                    reason: p.removal_reason,
+                  })
+                }
+              >
+                {pluginBusy[p.id] === "remove" ? "Removing…" : "Remove"}
+              </button>
             </div>
+            {removal && removal.id === p.id && (
+              <section
+                className="plugin-removal"
+                aria-label={`Remove ${removal.name} confirmation`}
+                onKeyDown={(event) => {
+                  if (event.key === "Escape" && !pluginBusy[p.id]) {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    setRemoval(null);
+                  }
+                }}
+              >
+                <h4>Remove {removal.name}?</h4>
+                <code>{removal.path}</code>
+                <p>
+                  {removal.mode === "archive"
+                    ? "The managed plugin folder will be moved to a private removed-plugins backup."
+                    : removal.mode === "detach"
+                      ? "The external plugin folder will be left untouched. Deckforge will stop loading it."
+                      : "The unavailable plugin entry will be removed from Deckforge."}
+                </p>
+                <p className="hint">
+                  Profile assignments, action settings, and private plugin data
+                  are retained. Assigned controls will be unavailable until you
+                  reinstall the plugin.
+                </p>
+                {removal.reason && <p className="hint">{removal.reason}</p>}
+                {removal.error && (
+                  <p className="error" role="alert">
+                    {removal.error}
+                  </p>
+                )}
+                <div className="row">
+                  <button
+                    type="button"
+                    className="danger"
+                    disabled={!!pluginBusy[p.id]}
+                    aria-label={`Confirm removal of ${removal.name}`}
+                    onClick={() => void removePlugin()}
+                  >
+                    {pluginBusy[p.id] === "remove"
+                      ? "Removing…"
+                      : "Remove plugin"}
+                  </button>
+                  <button
+                    type="button"
+                    autoFocus
+                    disabled={!!pluginBusy[p.id]}
+                    onClick={() => setRemoval(null)}
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </section>
+            )}
             {p.error && (
               <p role="status" className="error">
                 {p.error}

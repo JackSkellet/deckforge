@@ -203,6 +203,7 @@ export function installFixture(modelId?: string) {
         connected: true,
         status: "connected",
         path: "/fixture/plugins/counter",
+        removal_mode: "detach",
       },
       {
         id: "discord",
@@ -211,6 +212,7 @@ export function installFixture(modelId?: string) {
         connected: true,
         status: "connected",
         path: "/fixture/plugins/discord",
+        removal_mode: "detach",
       },
     ],
     library: {
@@ -503,6 +505,39 @@ export function installFixture(modelId?: string) {
           );
           if (!source) throw new Error("Unknown source action");
           transfer(source, payload, payload.copy, payload.expected_target);
+        }
+        if (payload.command === "uninstall_plugin") {
+          const plugin = snapshot.plugins.find(
+            (plugin) => plugin.id === payload.id,
+          );
+          if (
+            !plugin ||
+            payload.confirm !== true ||
+            payload.expected_path !== plugin.path ||
+            payload.expected_enabled !== (plugin.enabled !== false)
+          )
+            throw new Error("Plugin state changed; review removal again");
+          const removed = new Set(
+            snapshot.actions
+              .filter((action) => action.plugin === plugin.id)
+              .map((action) => action.uuid),
+          );
+          snapshot.plugins = snapshot.plugins.filter(
+            (candidate) => candidate.id !== plugin.id,
+          );
+          snapshot.actions = snapshot.actions.filter(
+            (action) => !removed.has(action.uuid),
+          );
+          snapshot.slots = snapshot.slots.map((slot) =>
+            removed.has(slot.uuid)
+              ? {
+                  ...slot,
+                  available: false,
+                  plugin_disabled: false,
+                  has_inspector: false,
+                }
+              : slot,
+          );
         }
         if (payload.command === "plugin_enabled") {
           const plugin = snapshot.plugins.find(

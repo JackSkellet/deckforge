@@ -21,6 +21,21 @@ pub(super) struct StateAppearance {
 }
 pub(super) type States = BTreeMap<u64, StateAppearance>;
 
+/// Missing plugin artwork is derived, never written into saved action state.
+pub(super) fn unavailable_picture(renderer: &Renderer, size: (u32, u32)) -> DynamicImage {
+    renderer.key_styled_size(
+        "?",
+        None,
+        &TitleStyle {
+            font_size: 34.,
+            title_alignment: "middle".into(),
+            font_style: "Bold".into(),
+            ..Default::default()
+        },
+        size,
+    )
+}
+
 pub(super) fn count(slot: &Slot, actions: &[Action]) -> usize {
     slot.states
         .as_array()

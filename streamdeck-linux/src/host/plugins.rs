@@ -236,6 +236,14 @@ impl Host {
             // retried; it must not silently revert the user's saved preference.
             return self.restart_plugin(id);
         }
+        self.stop_plugin_runtime(index, id);
+        self.log(format!("Plugin disabled: {id}"));
+        if let Some(redraw) = &self.redraw {
+            redraw();
+        }
+        Ok(())
+    }
+    pub(super) fn stop_plugin_runtime(&mut self, index: usize, id: &str) {
         for device in self.device_ids() {
             if let Err(error) = self.with_device(&device, |host| {
                 host.prepare_plugin_restart(index, id);
@@ -251,7 +259,7 @@ impl Host {
                 host.sync_visible();
                 Ok(())
             }) {
-                self.log(format!("Plugin disable cleanup: {error:#}"));
+                self.log(format!("Plugin stop cleanup: {error:#}"));
             }
         }
         let plugin = &mut self.plugins[index];
@@ -269,11 +277,12 @@ impl Host {
         self.discard_plugin_links(id);
         self.application_delivered.remove(id);
         self.poll_applications();
-        self.log(format!("Plugin disabled: {id}"));
-        if let Some(redraw) = &self.redraw {
-            redraw();
-        }
-        Ok(())
+    }
+    pub(super) fn plugin_session_index(&self, launch: &str, session: &str) -> Option<usize> {
+        self.plugins.iter().enumerate().find_map(|(index, _)| {
+            self.plugin_session_current(index, launch, session)
+                .then_some(index)
+        })
     }
     pub(super) fn plugin_session_current(&self, index: usize, launch: &str, session: &str) -> bool {
         self.plugins.get(index).is_some_and(|plugin| {

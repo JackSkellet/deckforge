@@ -2468,3 +2468,22 @@ dialog.mixer-dialog {
 .reference-path {
   overflow-wrap: anywhere;
 }
+
+.plugin-removal {
+  border: 1px solid #71614d;
+  border-radius: 5px;
+  background: #292a28;
+  padding: 12px;
+  margin: 12px 0;
+}
+.plugin-removal h4 {
+  margin: 0 0 8px;
+}
+.plugin-removal code {
+  display: block;
+  overflow-wrap: anywhere;
+  font-size: 11px;
+}
+.plugin-removal p {
+  margin: 10px 0;
+}

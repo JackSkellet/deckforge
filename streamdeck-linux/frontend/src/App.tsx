@@ -1420,8 +1420,15 @@ export default function App() {
                     ) : (
                       slot.available === false && (
                         <p className="warning">
-                          This action's plugin is unavailable. Its settings are
-                          preserved; install or restart the plugin to use it.
+                          This action's plugin is unavailable. Your assignment
+                          and settings are preserved. Reinstall the plugin in
+                          Plugins, or restart it if it is already installed.{" "}
+                          <button
+                            type="button"
+                            onClick={() => setPanel("plugins")}
+                          >
+                            Open Plugins
+                          </button>
                         </p>
                       )
                     )}
