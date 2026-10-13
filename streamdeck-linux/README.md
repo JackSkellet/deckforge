@@ -405,7 +405,7 @@ Drop actions from the library into the wheel editor or add them from its selecto
 
 Child settings and inspectors stay independent, selection persists, and imported
 flat wheel records round-trip. Native tests use the unchanged Counter plugin and
-an original Plus XL wheel. Smooth carousel animation and physical acceptance
+an original Plus XL wheel. Carousel transitions are animated; physical acceptance and the remaining visual details
 remain open; see [Action Wheel contracts and coverage](docs/ACTION_WHEEL.md).
 
 ## Action Triggers

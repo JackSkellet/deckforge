@@ -692,7 +692,10 @@ impl Host {
         let candidates = self
             .slots
             .iter()
-            .map(|slot| display_targets::has_hardware(slot).then(|| slot.clone()))
+            .map(|slot| {
+                (display_targets::has_hardware(slot) || self.wheels.requires_hardware_plane(slot))
+                    .then(|| slot.clone())
+            })
             .collect::<Vec<_>>();
         let mut projections = candidates
             .into_iter()
@@ -715,6 +718,7 @@ impl Host {
             .map(|s| s.context.clone())
             .collect();
         let display = display_targets::Display {
+            hardware_plane: false,
             wheels: &self.wheels,
             wheel_pressed: &wheel_pressed,
             progress: &progress,
@@ -747,7 +751,11 @@ impl Host {
             slot.preview = display_targets::png(&software)?;
             let physical = if let Some(projected) = projection {
                 appearance::apply_user_titles(projected, &self.actions);
-                display.picture(projected, &mut Vec::new())?
+                display_targets::Display {
+                    hardware_plane: true,
+                    ..display
+                }
+                .picture(projected, &mut Vec::new())?
             } else {
                 software
             };

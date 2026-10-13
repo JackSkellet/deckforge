@@ -86,8 +86,11 @@ Side cards have opacity 0.6 and radius 9; the front has radius 12 and paints
 above them. The model hit-tests front-first with half-open rectangle edges;
 exact native rounded-corner/edge inclusion is still unverified. Native side
 backdrops also have blur radius 16, and a separate animation layer sits above
-the cards. Carousel frame notifications run every 40 ms. Interpolation and
-press-animation details still need implementation and further trace.
+the cards. Carousel frame notifications run every 40 ms. The Rust renderer now uses the
+recovered 160 ms two-card and 320 ms multi-card transitions, including the native
+cubic Bézier, changing depth, opacity, size and rounded occlusion. See the
+[carousel implementation and evidence](WHEEL_ANIMATION.md). The separate touch
+press-animation curve still needs implementation.
 
 `ExtTitles` configures the child renderer with additional flags `0x600`
 (`0x4b` becomes `0x64b`) and enables a separate selected-title item over
@@ -148,9 +151,9 @@ The existing Dial Stack workflow passes. The Action Trigger script completes its
 generated workflows but still stops at the separately known unsupported GRETSCH
 profile import. That entire script is not reported as passing.
 
-Remaining work includes smooth carousel interpolation, native blur/press-animation
+Remaining work includes native backdrop-blur and touch press-animation
 fidelity, the full native title-fallback matrix, rounded hit-test edge comparison,
 manual hardware acceptance, and broader nested-action/editor parity. The current
-renderer shows the recovered static layouts and a pressed-card scale; it does
-not claim pixel-identical Windows animation. Existing configured-slot drag/drop
+renderer shows the recovered carousel transitions, static layouts and physical
+pressed-card scale; it does not claim pixel-identical Windows rendering. Existing configured-slot drag/drop
 into the wheel and child appearance editing need further native UX coverage.

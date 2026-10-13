@@ -342,6 +342,7 @@ impl Host {
             .map(|s| s.context.clone())
             .collect();
         for parent in changed {
+            self.wheels.cancel(&parent);
             self.cancel_trigger(&parent);
             let sequences: Vec<_> = self
                 .slot_any(&parent)

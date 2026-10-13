@@ -1,8 +1,10 @@
 //! Action Wheel: key-action children controlled by an encoder.
 use super::*;
 use crate::action_wheel::{self, Hit, Indicators, Rotation};
+use crate::wheel_animation::{Card as MovingCard, Carousel};
 use anyhow::ensure;
 use image::Pixel;
+use std::cell::RefCell;
 
 pub(super) fn action() -> Action {
     Action {
@@ -35,17 +37,39 @@ struct IndicatorState {
     offset: usize,
     bar: Indicators,
 }
+struct Animation {
+    timeline: Carousel,
+    next_frame: Duration,
+    split: bool,
+    extended: bool,
+    frames: RefCell<[Option<BTreeMap<usize, DynamicImage>>; 2]>,
+}
 #[derive(Default)]
 pub(super) struct Runtime {
+    animations: HashMap<String, Animation>,
     rotations: BTreeMap<String, Rotation>,
     indicators: HashMap<String, IndicatorState>,
 }
 impl Runtime {
     pub(super) fn next_due(&self) -> Option<Duration> {
-        self.rotations.values().filter_map(Rotation::next_due).min()
+        self.rotations
+            .values()
+            .filter_map(Rotation::next_due)
+            .chain(self.animations.values().map(|a| a.next_frame))
+            .min()
     }
     pub(super) fn stop_turns(&mut self) {
         self.rotations.clear();
+        self.animations.clear();
+    }
+    pub(super) fn cancel(&mut self, context: &str) {
+        self.rotations.remove(context);
+        self.animations.remove(context);
+    }
+    pub(super) fn requires_hardware_plane(&self, slot: &Slot) -> bool {
+        slot.visible_flatten()
+            .iter()
+            .any(|s| self.animations.get(&s.context).is_some_and(|a| a.split))
     }
     pub(super) fn sync(&mut self, slots: &[Slot]) {
         let mut visible = HashSet::new();
@@ -59,6 +83,13 @@ impl Runtime {
             let offset = (slot.settings["ControlOffset"].as_f64().unwrap_or(0.) as usize)
                 .min(count.saturating_sub(1));
             let current = current(slot);
+            if self.animations.get(&slot.context).is_some_and(|a| {
+                a.timeline.count != count
+                    || a.timeline.target != current
+                    || a.extended != (slot.settings["ExtTitles"] == true)
+            }) {
+                self.animations.remove(&slot.context);
+            }
             let state = self
                 .indicators
                 .entry(slot.context.clone())
@@ -77,6 +108,7 @@ impl Runtime {
             state.bar.select(current);
         }
         self.rotations.retain(|id, _| visible.contains(id));
+        self.animations.retain(|id, _| visible.contains(id));
         self.indicators.retain(|id, _| visible.contains(id));
     }
 }
@@ -168,20 +200,42 @@ impl Host {
                 count,
                 now,
             );
-            if let Some(index) = next
-                && let Err(error) = self.select_wheel(&context, index, false)
+            if let Some(movement) = next
+                && let Err(error) =
+                    self.select_wheel_impl(&context, movement.index, false, Some(movement))
             {
                 self.log(format!("Action Wheel selection: {error:#}"));
                 self.wheels.rotations.remove(&context);
             }
         }
         self.wheels.rotations.retain(|_, r| r.next_due().is_some());
+        let redraw = self.wheels.animations.values().any(|a| a.next_frame <= now);
+        self.wheels.animations.retain(|_, animation| {
+            if let Some(next) = animation.timeline.next_frame(now) {
+                animation.next_frame = next;
+                true
+            } else {
+                false
+            }
+        });
+        if redraw && let Err(error) = self.render() {
+            self.log(format!("Wheel animation redraw: {error:#}"));
+        }
     }
     pub(super) fn select_wheel(
         &mut self,
         context: &str,
         index: usize,
         cancel_turns: bool,
+    ) -> Result<()> {
+        self.select_wheel_impl(context, index, cancel_turns, None)
+    }
+    fn select_wheel_impl(
+        &mut self,
+        context: &str,
+        index: usize,
+        cancel_turns: bool,
+        movement: Option<action_wheel::Movement>,
     ) -> Result<()> {
         let mut slot = self
             .visible_slot(context)
@@ -195,6 +249,7 @@ impl Host {
         ensure!(index < count, "Wheel selection is out of range");
         if cancel_turns {
             self.wheels.rotations.remove(context);
+            self.wheels.animations.remove(context);
         }
         self.wheels.sync(&self.slots);
         let offset = if let Some(state) = self.wheels.indicators.get_mut(context) {
@@ -204,6 +259,24 @@ impl Host {
         } else {
             0
         };
+        if self.model.capabilities().strip
+            && let Some(movement) = movement
+            && let Some(timeline) =
+                Carousel::new(count, current(&slot), movement, self.multi_clock.elapsed())
+        {
+            self.wheels.animations.insert(
+                context.into(),
+                Animation {
+                    next_frame: timeline
+                        .next_frame(self.multi_clock.elapsed())
+                        .unwrap_or(timeline.end()),
+                    timeline,
+                    split: display_targets::has_hardware(&slot),
+                    extended: slot.settings["ExtTitles"] == true,
+                    frames: RefCell::new([None, None]),
+                },
+            );
+        }
         slot.settings["CurrentIdx"] = json!(index);
         slot.settings["ControlOffset"] = json!(offset);
         slot.raw["Settings"] = slot.settings.clone();
@@ -248,6 +321,7 @@ impl Host {
         if old.raw["Actions"] != parent.raw["Actions"] {
             self.cancel_trigger(context);
             self.wheels.rotations.remove(context);
+            self.wheels.animations.remove(context);
             for child in old.flatten() {
                 if multiaction::container(&child.uuid) {
                     self.cancel_multi(&child.context);
@@ -317,43 +391,52 @@ pub(super) fn picture(display: &display_targets::Display<'_>, slot: &Slot) -> Re
     let extended = slot.settings["ExtTitles"] == true;
     let pressed = display.wheel_pressed.contains(&slot.context);
     let mut canvas = image::RgbaImage::from_pixel(200, 100, image::Rgba([0, 0, 0, 255]));
-    for card in action_wheel::cards(children.len(), selected) {
-        let child = &children[card.index];
-        let mut style = appearance::style(child, display.actions);
-        if extended {
-            style.show_title = false;
+    let animation = display
+        .wheels
+        .animations
+        .get(&slot.context)
+        .and_then(|animation| {
+            animation
+                .timeline
+                .cards(display.now)
+                .map(|cards| (animation, cards))
+        });
+    if let Some((animation, cards)) = animation {
+        let plane = usize::from(display.hardware_plane);
+        let mut frames = animation.frames.borrow_mut();
+        if frames[plane].is_none() {
+            let mut images = BTreeMap::new();
+            for index in animation.timeline.indices() {
+                images
+                    .entry(index)
+                    .or_insert_with(|| key_picture(display, &children[index], animation.extended));
+            }
+            frames[plane] = Some(images);
+            // A shared initial plane stays frozen on both surfaces even if a
+            // later SDK update splits them before this transition finishes.
+            if !animation.split {
+                frames[1 - plane] = frames[plane].clone();
+            }
         }
-        let mut key = if display.actions.iter().any(|a| a.uuid == child.uuid) {
-            display.renderer.key_styled_size(
-                &child.title,
-                child.background.as_ref(),
-                &style,
-                (72, 72),
-            )
-        } else {
-            appearance::unavailable_picture(display.renderer, (72, 72))
-        };
-        feedback::paint_key(
-            display.badges,
-            &mut key,
-            child,
-            display.now,
-            display.progress.get(&child.context).copied(),
-        );
-        let [mut x, mut y, mut w, mut h] = card.rect;
-        if pressed && card.hit == Hit::Activate {
-            let nw = w * 4 / 5;
-            let nh = h * 4 / 5;
-            x += (w - nw) / 2;
-            y += (h - nh) / 2;
-            w = nw;
-            h = nh;
+        paint_motion(&mut canvas, &cards, frames[plane].as_ref().unwrap());
+    } else {
+        for card in action_wheel::cards(children.len(), selected) {
+            let key = key_picture(display, &children[card.index], extended);
+            let [mut x, mut y, mut w, mut h] = card.rect;
+            if pressed && card.hit == Hit::Activate {
+                let nw = w * 4 / 5;
+                let nh = h * 4 / 5;
+                x += (w - nw) / 2;
+                y += (h - nh) / 2;
+                w = nw;
+                h = nh;
+            }
+            let mut layer = key
+                .resize_exact(w, h, image::imageops::FilterType::Triangle)
+                .to_rgba8();
+            round(&mut layer, card.radius.min(h / 2), card.opacity, true);
+            image::imageops::overlay(&mut canvas, &layer, i64::from(x), i64::from(y));
         }
-        let mut layer = key
-            .resize_exact(w, h, image::imageops::FilterType::Triangle)
-            .to_rgba8();
-        round(&mut layer, card.radius.min(h / 2), card.opacity, true);
-        image::imageops::overlay(&mut canvas, &layer, i64::from(x), i64::from(y));
     }
     let fallback = Indicators::new(
         children.len(),
@@ -416,6 +499,135 @@ pub(super) fn picture(display: &display_targets::Display<'_>, slot: &Slot) -> Re
         style.as_ref(),
     )
 }
+fn key_picture(
+    display: &display_targets::Display<'_>,
+    child: &Slot,
+    extended: bool,
+) -> DynamicImage {
+    let mut style = appearance::style(child, display.actions);
+    if extended {
+        style.show_title = false;
+    }
+    let mut key = if display
+        .actions
+        .iter()
+        .any(|action| action.uuid == child.uuid)
+    {
+        display
+            .renderer
+            .key_styled_size(&child.title, child.background.as_ref(), &style, (72, 72))
+    } else {
+        appearance::unavailable_picture(display.renderer, (72, 72))
+    };
+    feedback::paint_key(
+        display.badges,
+        &mut key,
+        child,
+        display.now,
+        display.progress.get(&child.context).copied(),
+    );
+    key
+}
+fn aligned(rect: [f64; 4]) -> [f64; 4] {
+    let [x, y, w, h] = rect;
+    let left = x.floor();
+    let top = y.floor();
+    [left, top, (x + w).ceil() - left, (y + h).ceil() - top]
+}
+fn rounded_contains(rect: [f64; 4], radius: f64, x: f64, y: f64) -> bool {
+    let [left, top, w, h] = rect;
+    if x < left || y < top || x >= left + w || y >= top + h {
+        return false;
+    }
+    let radius = radius.min(w / 2.).min(h / 2.);
+    let dx = x - x.clamp(left + radius, left + w - radius);
+    let dy = y - y.clamp(top + radius, top + h - radius);
+    dx * dx + dy * dy <= radius * radius
+}
+fn paint_motion(
+    canvas: &mut image::RgbaImage,
+    cards: &[MovingCard],
+    images: &BTreeMap<usize, DynamicImage>,
+) {
+    let rects: Vec<_> = cards.iter().map(|card| aligned(card.rect)).collect();
+    for (index, card) in cards.iter().enumerate() {
+        if card.opacity <= 0. {
+            continue;
+        }
+        let [left, top, width, height] = rects[index];
+        let radius = width / 6.;
+        let w = width as u32;
+        let h = height as u32;
+        if w < 3 || h < 3 {
+            continue;
+        }
+        let Some(source) = images.get(&card.index) else {
+            continue;
+        };
+        let source = source
+            .resize_exact(w - 2, h - 2, image::imageops::FilterType::Triangle)
+            .to_rgba8();
+        let inner = [left + 1., top + 1., width - 2., height - 2.];
+        for y in 0..h {
+            for x in 0..w {
+                let gx = left as i64 + i64::from(x);
+                let gy = top as i64 + i64::from(y);
+                if gx < 0
+                    || gy < 0
+                    || gx >= i64::from(canvas.width())
+                    || gy >= i64::from(canvas.height())
+                {
+                    continue;
+                }
+                let p = source.get_pixel(
+                    x.saturating_sub(1).min(w - 3),
+                    y.saturating_sub(1).min(h - 3),
+                );
+                let mut sum = [0u32; 3];
+                let mut coverage = 0u32;
+                for sy in 0..4 {
+                    for sx in 0..4 {
+                        let px = gx as f64 + (sx as f64 + 0.5) / 4.;
+                        let py = gy as f64 + (sy as f64 + 0.5) / 4.;
+                        if !rounded_contains(rects[index], radius, px, py) {
+                            continue;
+                        }
+                        if rects[index + 1..].iter().any(|r| {
+                            rounded_contains(
+                                [r[0] + 0.5, r[1] + 0.5, r[2] - 1., r[3] - 1.],
+                                r[2] / 6.,
+                                px,
+                                py,
+                            )
+                        }) {
+                            continue;
+                        }
+                        let inside = rounded_contains(inner, radius, px, py);
+                        for channel in 0..3 {
+                            sum[channel] += if inside {
+                                u32::from(p[channel]) * u32::from(p[3]) / 255
+                            } else {
+                                38
+                            };
+                        }
+                        coverage += 1;
+                    }
+                }
+                if coverage == 0 {
+                    continue;
+                }
+                let pixel = image::Rgba([
+                    (sum[0] / coverage) as u8,
+                    (sum[1] / coverage) as u8,
+                    (sum[2] / coverage) as u8,
+                    ((coverage as f64 / 16.) * card.opacity * 255.).round() as u8,
+                ]);
+                canvas.get_pixel_mut(gx as u32, gy as u32).blend(&pixel);
+            }
+        }
+    }
+}
+
 fn round(layer: &mut image::RgbaImage, radius: u32, opacity: f32, border: bool) {
     let (w, h) = layer.dimensions();
     let r = radius as f32;
@@ -438,6 +650,188 @@ fn round(layer: &mut image::RgbaImage, radius: u32, opacity: f32, border: bool) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn animation_updates_device_frames_and_page_changes_stop_the_timer() {
+        let root = tempfile::tempdir().unwrap();
+        let (mut host, mut peer) = fixture(root.path(), 6);
+        let context = parent(&host).context;
+        let index = host
+            .slots
+            .iter()
+            .position(|s| s.context == context)
+            .unwrap();
+        for (i, child) in host.slots[index].children[0].iter_mut().enumerate() {
+            child.background = Some(DynamicImage::ImageRgb8(RgbImage::from_pixel(
+                72,
+                72,
+                Rgb([30 + i as u8 * 30, 50, 200 - i as u8 * 20]),
+            )));
+        }
+        while peer.try_recv().is_ok() {}
+        let (sender, receiver) = std::sync::mpsc::channel();
+        host.hardware = Some(sender);
+        let strip = |receiver: &std::sync::mpsc::Receiver<Draw>| {
+            receiver
+                .try_iter()
+                .filter_map(|draw| {
+                    if let Draw::Strip(image) = draw {
+                        Some(image.to_rgb8())
+                    } else {
+                        None
+                    }
+                })
+                .last()
+                .unwrap()
+        };
+        host.select_wheel_impl(
+            &context,
+            1,
+            false,
+            Some(action_wheel::Movement { index: 1, delta: 1 }),
+        )
+        .unwrap();
+        let first = strip(&receiver);
+        let timeline = host.wheels.animations[&context].timeline;
+        let halfway = timeline.end() - timeline.duration() + Duration::from_millis(120);
+        host.multi_clock = std::time::Instant::now() - halfway;
+        host.poll_wheels();
+        let middle = strip(&receiver);
+        assert_ne!(first, middle);
+        assert_eq!(current(&parent(&host)), 1);
+        while let Ok(event) = peer.try_recv() {
+            assert!(!matches!(
+                event["event"].as_str(),
+                Some("keyDown" | "keyUp")
+            ));
+        }
+        host.library_command(&json!({"command":"page_create","name":"Away"}))
+            .unwrap();
+        assert!(host.wheels.animations.is_empty());
+        assert!(host.wheels.next_due().is_none());
+    }
+    #[test]
+    fn moving_cards_clip_lower_artwork_instead_of_blending_it_through() {
+        let images = BTreeMap::from([
+            (
+                0,
+                DynamicImage::ImageRgb8(RgbImage::from_pixel(72, 72, Rgb([255, 0, 0]))),
+            ),
+            (
+                1,
+                DynamicImage::ImageRgb8(RgbImage::from_pixel(72, 72, Rgb([0, 0, 255]))),
+            ),
+        ]);
+        let cards = vec![
+            MovingCard {
+                index: 0,
+                rect: [50., 10., 72., 72.],
+                opacity: 1.,
+                depth: 0.,
+            },
+            MovingCard {
+                index: 1,
+                rect: [80., 10., 72., 72.],
+                opacity: 0.5,
+                depth: 1.,
+            },
+        ];
+        let mut canvas = image::RgbaImage::from_pixel(200, 100, image::Rgba([0, 0, 0, 255]));
+        paint_motion(&mut canvas, &cards, &images);
+        assert_eq!(canvas.get_pixel(65, 40).0, [255, 0, 0, 255]);
+        assert_eq!(
+            canvas.get_pixel(100, 40)[0],
+            0,
+            "Lower red card must not show through the blue card"
+        );
+        assert!((127..=128).contains(&canvas.get_pixel(100, 40)[2]));
+    }
+    #[test]
+    fn animation_snapshots_keep_hardware_and_software_planes_isolated() {
+        use image::GenericImageView;
+        for initially_split in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let (mut host, _receiver) = fixture(root.path(), 2);
+            let context = parent(&host).context;
+            let root_index = host
+                .slots
+                .iter()
+                .position(|s| s.context == context)
+                .unwrap();
+            let blue = DynamicImage::ImageRgb8(RgbImage::from_pixel(72, 72, Rgb([0, 0, 255])));
+            let red = DynamicImage::ImageRgb8(RgbImage::from_pixel(72, 72, Rgb([255, 0, 0])));
+            for child in &mut host.slots[root_index].children[0] {
+                child.background = Some(blue.clone());
+                child.appearances.insert(
+                    0,
+                    appearance::StateAppearance {
+                        plugin_pixels: Some(blue.clone()),
+                        hardware: initially_split.then(|| appearance::PluginAppearance {
+                            title: None,
+                            pixels: Some(red.clone()),
+                        }),
+                        ..Default::default()
+                    },
+                );
+            }
+            let (sender, receiver) = std::sync::mpsc::channel();
+            host.hardware = Some(sender);
+            let strip = |receiver: &std::sync::mpsc::Receiver<Draw>| {
+                receiver
+                    .try_iter()
+                    .filter_map(|draw| {
+                        if let Draw::Strip(image) = draw {
+                            Some(image)
+                        } else {
+                            None
+                        }
+                    })
+                    .last()
+                    .unwrap()
+            };
+            host.select_wheel_impl(
+                &context,
+                1,
+                false,
+                Some(action_wheel::Movement { index: 1, delta: 1 }),
+            )
+            .unwrap();
+            let first = strip(&receiver);
+            assert_eq!(
+                first.get_pixel(100, 42)[if initially_split { 2 } else { 0 }],
+                0
+            );
+            // Change the live target relationship while the motion is active.
+            for child in &mut host.slots[root_index].children[0] {
+                child.appearances.get_mut(&0).unwrap().hardware =
+                    (!initially_split).then(|| appearance::PluginAppearance {
+                        title: None,
+                        pixels: Some(red.clone()),
+                    });
+            }
+            host.render().unwrap();
+            let hardware = strip(&receiver);
+            let software =
+                image::load_from_memory(&STANDARD.decode(parent(&host).preview).unwrap()).unwrap();
+            assert_eq!(software.get_pixel(100, 42)[0], 0);
+            assert!(software.get_pixel(100, 42)[2] > 80);
+            assert_eq!(
+                hardware.get_pixel(100, 42)[if initially_split { 2 } else { 0 }],
+                0
+            );
+            assert!(hardware.get_pixel(100, 42)[if initially_split { 0 } else { 2 }] > 80);
+            let expired =
+                host.wheels.animations[&context].timeline.end() + Duration::from_millis(1);
+            host.multi_clock = std::time::Instant::now() - expired;
+            host.poll_wheels();
+            assert!(host.wheels.animations.is_empty());
+            assert!(host.wheels.next_due().is_none());
+            let settled = strip(&receiver);
+            assert_eq!(
+                settled.get_pixel(100, 42)[if initially_split { 0 } else { 2 }],
+                0
+            );
+        }
+    }
     #[test]
     fn option_and_child_edits_preserve_live_selection_counts_and_states() {
         let base = json!({"Settings":{"CurrentIdx":1,"InvertRotation":false},"Actions":[

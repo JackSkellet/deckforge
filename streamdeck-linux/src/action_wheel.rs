@@ -134,6 +134,12 @@ pub fn parse(raw: &Value) -> Result<Wheel> {
     })
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Movement {
+    pub index: usize,
+    pub delta: i32,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Rotation {
     pending: i32,
@@ -160,7 +166,7 @@ impl Rotation {
         self.due.get_or_insert(now);
         true
     }
-    pub fn advance(&mut self, current: usize, count: usize, now: Duration) -> Option<usize> {
+    pub fn advance(&mut self, current: usize, count: usize, now: Duration) -> Option<Movement> {
         let now = now.max(self.last_now);
         self.last_now = now;
         if self.due.is_none_or(|due| due > now) {
@@ -178,7 +184,7 @@ impl Rotation {
         // Even the last consumed batch rearms the native timer once. A turn
         // arriving before it expires must not become an immediate extra step.
         self.due = now.checked_add(ROTATION_INTERVAL);
-        Some(next)
+        Some(Movement { index: next, delta })
     }
     pub fn next_due(&self) -> Option<Duration> {
         self.due

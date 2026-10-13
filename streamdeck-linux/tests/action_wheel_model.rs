@@ -33,18 +33,39 @@ fn profiles_keep_unknown_data_and_normalize_native_selection() {
 fn turns_are_capped_replaced_and_consumed_on_the_native_cadence() {
     let mut rotation = Rotation::default();
     assert!(rotation.request(127, false, false, 10, ms(0)));
-    assert_eq!(rotation.advance(0, 10, ms(0)), Some(4));
+    assert_eq!(
+        rotation.advance(0, 10, ms(0)),
+        Some(Movement { index: 4, delta: 4 })
+    );
     assert_eq!(rotation.next_due(), Some(ms(61)));
     assert_eq!(rotation.advance(4, 10, ms(60)), None);
-    assert_eq!(rotation.advance(4, 10, ms(61)), Some(5));
+    assert_eq!(
+        rotation.advance(4, 10, ms(61)),
+        Some(Movement { index: 5, delta: 1 })
+    );
     assert!(rotation.request(-2, false, false, 10, ms(62)));
     assert_eq!(rotation.advance(5, 10, ms(62)), None);
     assert!(!rotation.request(5, true, false, 10, ms(80)));
-    assert_eq!(rotation.advance(5, 10, ms(122)), Some(3));
+    assert_eq!(
+        rotation.advance(5, 10, ms(122)),
+        Some(Movement {
+            index: 3,
+            delta: -2
+        })
+    );
     assert!(rotation.request(-128, false, true, 10, ms(123)));
-    assert_eq!(rotation.advance(3, 10, ms(183)), Some(7));
+    assert_eq!(
+        rotation.advance(3, 10, ms(183)),
+        Some(Movement { index: 7, delta: 4 })
+    );
     assert!(rotation.request(-1, false, false, 10, ms(184)));
-    assert_eq!(rotation.advance(7, 10, ms(244)), Some(6));
+    assert_eq!(
+        rotation.advance(7, 10, ms(244)),
+        Some(Movement {
+            index: 6,
+            delta: -1
+        })
+    );
     assert!(rotation.request(0, false, false, 10, ms(245)));
     assert_eq!(rotation.advance(6, 10, ms(305)), None);
     assert_eq!(rotation.next_due(), None);

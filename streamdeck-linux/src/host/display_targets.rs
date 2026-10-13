@@ -2,7 +2,9 @@
 //! Nested Trigger/Stack composition follows the same target as its parent frame.
 use super::*;
 
+#[derive(Clone, Copy)]
 pub(super) struct Display<'a> {
+    pub hardware_plane: bool,
     pub model: Model,
     pub renderer: &'a Renderer,
     pub actions: &'a [Action],

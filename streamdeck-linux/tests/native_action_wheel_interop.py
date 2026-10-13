@@ -29,6 +29,11 @@ await until(()=>strip()?.complete&&strip().naturalWidth===200&&previews().length
 const original=strip().src;
 await command({command:'input',event:'dialRotate',index:0,ticks:1});
 await until(async()=>{const w=await wheel();return w.settings.CurrentIdx===1&&strip().src!==original},'dial selection redraw');
+const frames=new Set();const animationStart=performance.now();
+while(performance.now()-animationStart<380){if(strip()?.complete)frames.add(strip().src);await pause(20);}
+if(frames.size<3)throw Error('Carousel did not produce intermediate native frames: '+frames.size);
+const settled=strip().src;await pause(100);if(strip().src!==settled)throw Error('Carousel did not settle');
+
 (await until(()=>document.querySelector('[aria-label="Show action 1 on dial"]'),'Show control')).click();
 await until(async()=>(await wheel()).settings.CurrentIdx===0,'Show selects saved child');
 document.querySelector('.wheel-options summary').click();
@@ -42,7 +47,7 @@ await command({command:'input',event:'dialDown',index:0});await command({command
 const w=await until(async()=>{const w=await wheel();return w.multi_children[0][0].settings.count===4&&w.multi_children[0][0].title==='4'&&w},'Counter consumed wheel push').catch(async error=>{const w=await wheel();throw Error(String(error)+' '+JSON.stringify({selected:w.settings.CurrentIdx,children:w.multi_children[0].map(c=>({count:c.settings.count,title:c.title,appearance:c.appearance}))}))});
 if(w.multi_children[0][1].settings.count!==7)throw Error('Sibling Counter changed');
 await until(()=>strip().src==='data:image/png;base64,'+w.preview&&strip().complete,'extended title frame');
-return{native_strip:[strip().naturalWidth,strip().naturalHeight],child_previews:previews().length,physical_input_simulated:true,show_control:true,options_saved:true,counter_counts:[4,7,0],library_drop:true,usb_access:false};
+return{native_strip:[strip().naturalWidth,strip().naturalHeight],animation_frames:frames.size,animation_settled:true,child_previews:previews().length,physical_input_simulated:true,show_control:true,options_saved:true,counter_counts:[4,7,0],library_drop:true,usb_access:false};
 '''
 
 def main():
