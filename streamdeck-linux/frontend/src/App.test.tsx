@@ -773,3 +773,22 @@ describe("desktop interactions", () => {
     );
   });
 });
+
+it("keeps one folder-exit panel across live snapshots and action selection", async () => {
+  snapshot.library.folder_depth = 1;
+  snapshot.slots.push({
+    ...structuredClone(slot),
+    context: "counter-2",
+    index: 1,
+  });
+  render(<App />);
+  await screen.findByText("Folder auto-exit");
+  for (let i = 0; i < 4; i++) {
+    snapshot.slots[0].settings.count++;
+    await act(async () => emit(structuredClone(snapshot)));
+    expect(screen.getAllByText("Folder auto-exit")).toHaveLength(1);
+    const keys = document.querySelectorAll<HTMLButtonElement>(".deck-key");
+    fireEvent.click(keys[i % 2]);
+    expect(screen.getAllByText("Folder auto-exit")).toHaveLength(1);
+  }
+});

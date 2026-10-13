@@ -8,6 +8,19 @@ pub(super) struct Pending {
     folders: Vec<String>,
     back: String,
     pub due: Duration,
+    started: Duration,
+    last_percent: u8,
+    next_frame: Duration,
+}
+
+impl Pending {
+    fn percent(&self, now: Duration) -> u8 {
+        let total = self.due.saturating_sub(self.started).as_secs_f64();
+        if total <= 0.0 {
+            return 100;
+        }
+        (now.saturating_sub(self.started).as_secs_f64() / total * 100.0).clamp(0.0, 100.0) as u8
+    }
 }
 
 fn excluded(uuid: &str) -> bool {
@@ -38,6 +51,49 @@ fn delay(raw: &Value, parent: &Value) -> Option<Duration> {
 }
 
 impl Host {
+    pub(super) fn reset_folder_exits(&mut self, request: &Value) -> Result<()> {
+        self.editable()?;
+        let context = request["context"].as_str().context("Back action missing")?;
+        anyhow::ensure!(
+            request["confirm"] == true,
+            "Confirm resetting action overrides"
+        );
+        anyhow::ensure!(
+            !self.library.folders.is_empty()
+                && request["page"].as_str() == Some(self.library.active_page.as_str())
+                && self
+                    .slots
+                    .iter()
+                    .any(|s| s.context == context && s.uuid == library::BACK_FOLDER),
+            "The folder changed; reopen its Back action before resetting overrides"
+        );
+        self.sync_visible();
+        let originals: Vec<_> = self
+            .library
+            .current()?
+            .pages
+            .iter()
+            .find(|p| p.id == self.library.active_page)
+            .context("Folder missing")?
+            .slots
+            .iter()
+            .filter(|s| s.context != context && s.raw.get("AutoExit").is_some())
+            .cloned()
+            .collect();
+        for original in &originals {
+            let mut slot = original.clone();
+            slot.raw.as_object_mut().unwrap().remove("AutoExit");
+            self.store_slot(slot);
+        }
+        if let Err(error) = self.persist() {
+            for original in originals {
+                self.store_slot(original);
+            }
+            return Err(error);
+        }
+        self.folder_exit = None;
+        self.render()
+    }
     pub(super) fn folder_exit_input(&mut self, event: &InputEvent) -> Option<Pending> {
         if self.library.folders.is_empty() {
             return None;
@@ -76,8 +132,9 @@ impl Host {
             .iter()
             .find(|s| s.controller == controller && s.index == index)?;
         // Native activity cancels an existing countdown before starting another.
-        if pressed || owned {
-            self.folder_exit = None;
+        if (pressed || owned) && self.folder_exit.take().is_some() {
+            // Dispatch renders after this borrow ends, restoring the Back image.
+            self.multi_notify.notify_one();
         }
         if pressed || !owned || excluded(&slot.uuid) {
             return None;
@@ -90,6 +147,9 @@ impl Host {
             folders: self.library.folders.clone(),
             back: back.context.clone(),
             due: self.multi_clock.elapsed().saturating_add(duration),
+            started: self.multi_clock.elapsed(),
+            last_percent: 0,
+            next_frame: self.multi_clock.elapsed() + Duration::from_millis(16),
         })
     }
     fn folder_exit_valid(&self, pending: &Pending) -> bool {
@@ -117,6 +177,14 @@ impl Host {
             self.poll_folder_exit();
         }
     }
+    pub(super) fn folder_exit_percent(&self) -> Option<(&str, u8)> {
+        self.folder_exit
+            .as_ref()
+            .map(|p| (p.back.as_str(), p.percent(self.multi_clock.elapsed())))
+    }
+    pub(super) fn next_folder_exit(&self) -> Option<Duration> {
+        self.folder_exit.as_ref().map(|p| p.next_frame.min(p.due))
+    }
     pub(super) fn poll_folder_exit(&mut self) {
         self.retain_folder_exit();
         if self
@@ -127,6 +195,23 @@ impl Host {
             self.folder_exit = None;
             if let Err(error) = self.folder_back() {
                 self.log(format!("Folder auto-exit: {error:#}"));
+            }
+        } else if let Some(pending) = &mut self.folder_exit {
+            let now = self.multi_clock.elapsed();
+            if now < pending.next_frame {
+                return;
+            }
+            let percent = pending.percent(now);
+            let duration = pending.due.saturating_sub(pending.started);
+            pending.next_frame = (pending.started
+                + duration.mul_f64(f64::from(percent.saturating_add(1)) / 100.0))
+            .max(now + Duration::from_millis(16))
+            .min(pending.due);
+            if percent != pending.last_percent {
+                pending.last_percent = percent;
+                if let Err(error) = self.render() {
+                    self.log(format!("Folder countdown: {error:#}"));
+                }
             }
         }
     }
@@ -169,7 +254,8 @@ impl Host {
         }
         self.store_slot(slot);
         self.folder_exit = None;
-        self.persist()
+        self.persist()?;
+        self.render()
     }
 }
 
@@ -375,6 +461,167 @@ mod tests {
             Ok(())
         })
         .unwrap();
+    }
+    #[test]
+    fn reset_preserves_folder_default_other_pages_pins_and_plugin_settings() {
+        let root = tempfile::tempdir().unwrap();
+        let mut host = fixture(root.path());
+        let back = host
+            .slots
+            .iter()
+            .find(|s| s.uuid == library::BACK_FOLDER)
+            .unwrap()
+            .context
+            .clone();
+        let local = host
+            .slots
+            .iter()
+            .find(|s| s.uuid == "test.action")
+            .unwrap()
+            .context
+            .clone();
+        host.save_folder_exit(&json!({"context":local,"auto_exit":{"Enabled":false,"Delay":8}}))
+            .unwrap();
+        host.assign("Keypad", 2, "test.action").unwrap();
+        let pin = host
+            .slots
+            .iter()
+            .find(|s| s.index == 2)
+            .unwrap()
+            .context
+            .clone();
+        host.save_folder_exit(&json!({"context":pin,"auto_exit":{"Enabled":true,"Delay":12}}))
+            .unwrap();
+        host.library_command(&json!({"command":"slot_pin","context":pin,"pinned":true}))
+            .unwrap();
+        let page = host.library.active_page.clone();
+        let parent = host.library.folders[0].clone();
+        let outside = host
+            .library
+            .current_mut()
+            .unwrap()
+            .pages
+            .iter_mut()
+            .find(|p| p.id == parent)
+            .unwrap()
+            .slots
+            .iter_mut()
+            .find(|s| s.uuid == "test.action")
+            .unwrap();
+        outside.raw["AutoExit"] = json!({"Enabled":true,"Delay":30});
+        let outside_id = outside.context.clone();
+        let before = host.visible_slot(&local).unwrap().settings.clone();
+        let request = json!({"context":back,"page":page,"confirm":true});
+        assert!(
+            host.reset_folder_exits(&json!({"context":back,"page":"stale","confirm":true}))
+                .is_err()
+        );
+        assert!(
+            host.reset_folder_exits(&json!({"context":back,"page":page,"confirm":false}))
+                .is_err()
+        );
+        host.reset_folder_exits(&request).unwrap();
+        assert!(
+            host.visible_slot(&local)
+                .unwrap()
+                .raw
+                .get("AutoExit")
+                .is_none()
+        );
+        assert_eq!(host.visible_slot(&local).unwrap().settings, before);
+        assert_eq!(
+            host.visible_slot(&back).unwrap().raw["AutoExit"]["Delay"],
+            1
+        );
+        assert_eq!(
+            host.visible_slot(&pin).unwrap().raw["AutoExit"]["Delay"],
+            12
+        );
+        assert_eq!(
+            host.library.slot(&outside_id).unwrap().raw["AutoExit"]["Delay"],
+            30
+        );
+        host.save_folder_exit(&json!({"context":local,"auto_exit":{"Enabled":false,"Delay":8}}))
+            .unwrap();
+        let good_path = host.state_path.clone();
+        host.state_path = root.path().join("missing").join("state.json");
+        assert!(host.reset_folder_exits(&request).is_err());
+        assert_eq!(
+            host.visible_slot(&local).unwrap().raw["AutoExit"]["Delay"],
+            8
+        );
+        host.state_path = good_path;
+        host.library.current_mut().unwrap().readonly = true;
+        assert!(host.reset_folder_exits(&request).is_err());
+    }
+    #[test]
+    fn countdown_updates_hardware_and_editor_then_restores_on_cancel_and_save() {
+        let root = tempfile::tempdir().unwrap();
+        let mut host = fixture(root.path());
+        let (sender, receiver) = std::sync::mpsc::channel();
+        host.hardware = Some(sender);
+        let frame = |receiver: &std::sync::mpsc::Receiver<Draw>| {
+            receiver
+                .try_iter()
+                .filter_map(|draw| {
+                    if let Draw::Key(0, image) = draw {
+                        Some(image.to_rgba8())
+                    } else {
+                        None
+                    }
+                })
+                .last()
+                .unwrap()
+        };
+        let back_id = host
+            .slots
+            .iter()
+            .find(|s| s.uuid == library::BACK_FOLDER)
+            .unwrap()
+            .context
+            .clone();
+        host.render().unwrap();
+        let original = frame(&receiver);
+        let preview = host.visible_slot(&back_id).unwrap().preview.clone();
+        let raw = host.visible_slot(&back_id).unwrap().raw.clone();
+        host.input(InputEvent::Key {
+            index: 1,
+            pressed: true,
+        })
+        .unwrap();
+        host.input(InputEvent::Key {
+            index: 1,
+            pressed: false,
+        })
+        .unwrap();
+        let start = frame(&receiver);
+        assert_ne!(start, original);
+        let halfway = host.folder_exit.as_ref().unwrap().started + Duration::from_millis(500);
+        host.multi_clock = std::time::Instant::now() - halfway;
+        host.poll_folder_exit();
+        let middle = frame(&receiver);
+        assert_ne!(start, middle);
+        assert_ne!(host.visible_slot(&back_id).unwrap().preview, preview);
+        assert_eq!(host.visible_slot(&back_id).unwrap().raw, raw);
+        assert!(host.next_folder_exit().unwrap() > halfway);
+        host.input(InputEvent::Key {
+            index: 1,
+            pressed: true,
+        })
+        .unwrap();
+        assert_eq!(frame(&receiver), original);
+        assert_eq!(host.visible_slot(&back_id).unwrap().preview, preview);
+        assert!(host.next_folder_exit().is_none());
+        host.input(InputEvent::Key {
+            index: 1,
+            pressed: false,
+        })
+        .unwrap();
+        assert!(host.folder_exit.is_some());
+        host.save_folder_exit(&json!({"context":back_id,"auto_exit":{"Enabled":false,"Delay":1}}))
+            .unwrap();
+        assert_eq!(frame(&receiver), original);
+        assert!(host.next_folder_exit().is_none());
     }
     #[test]
     fn original_record_inheritance_and_disabled_overrides() {

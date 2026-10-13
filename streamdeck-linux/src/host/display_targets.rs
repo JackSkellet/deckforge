@@ -5,6 +5,7 @@ use super::*;
 #[derive(Clone, Copy)]
 pub(super) struct Display<'a> {
     pub hardware_plane: bool,
+    pub folder_progress: Option<&'a (String, u8)>,
     pub model: Model,
     pub renderer: &'a Renderer,
     pub actions: &'a [Action],
@@ -231,6 +232,12 @@ impl Display<'_> {
             );
         }
 
+        if let Some((context, percent)) = self.folder_progress
+            && context == &slot.context
+            && slot.controller == "Keypad"
+        {
+            crate::folder_countdown::paint(&mut picture, *percent);
+        }
         warnings.append(&mut slot.display_warnings);
         Ok(picture)
     }

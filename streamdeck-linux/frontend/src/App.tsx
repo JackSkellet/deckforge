@@ -1491,6 +1491,38 @@ export default function App() {
                         "com.elgato.streamdeck.page.indicator",
                       ].includes(slot.uuid) && (
                         <FolderExit
+                          key={`folder-exit:${slot.context}`}
+                          resetCount={
+                            snapshot.slots.filter(
+                              (s) =>
+                                !s.pinned &&
+                                s.context !== slot.context &&
+                                s.raw.AutoExit != null,
+                            ).length
+                          }
+                          onReset={async () => {
+                            if (
+                              snapshot.slots.some((s) => hasUnsaved(s.context))
+                            ) {
+                              onError(
+                                new Error(
+                                  "Save or revert this folder's action drafts before resetting overrides.",
+                                ),
+                              );
+                              return;
+                            }
+                            if (
+                              await run({
+                                command: "folder_exit_reset",
+                                context: slot.context,
+                                page: snapshot.library.active_page,
+                                confirm: true,
+                              })
+                            )
+                              setNotice(
+                                "Action overrides reset to the folder default",
+                              );
+                          }}
                           raw={draft.raw}
                           parent={
                             snapshot.slots.find(
@@ -1503,7 +1535,19 @@ export default function App() {
                             slot.uuid ===
                             "com.elgato.streamdeck.profile.backtoparent"
                           }
-                          onChange={(raw) => change({ raw })}
+                          onChange={(update) =>
+                            setDrafts((previous) => {
+                              const latest =
+                                previous[slot.context] ??
+                                reconcileDraft(undefined, slot);
+                              return {
+                                ...previous,
+                                [slot.context]: editDraft(latest, {
+                                  raw: update(latest.raw),
+                                }),
+                              };
+                            })
+                          }
                         />
                       )}
                     {isContainer(slot.uuid) ? (

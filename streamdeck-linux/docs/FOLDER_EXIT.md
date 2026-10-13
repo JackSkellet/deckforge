@@ -8,9 +8,19 @@ A key release starts the delay. Another press cancels it; releasing that action
 can start a new delay. Zero returns immediately after dispatching the action's
 release. Nested folders return to their immediate parent. Navigation actions
 are excluded, so opening another folder does not start the old folder's timer.
-Timers belong to the device that received the input, not the device selected in
-the editor. Leaving the page, removing its Back action, disconnecting the device
+Timers belong to the device that received the input. Selecting another device in
+the editor does not move a running countdown. Leaving the page, removing its Back action, disconnecting the device
 or editing auto-exit settings retires the pending countdown.
+
+The Back key shows a grey ring and a blue clockwise sweep while the timer runs.
+Cancelling the timer restores its normal artwork. The ring is drawn into both
+the editor preview and generated device frames without changing saved images.
+
+The Back action also offers **Reset action overrides** with an explicit
+confirmation. It removes overrides belonging to that folder while preserving the
+selected Back action's default, other pages, shared pinned actions and plugin
+settings. Unsaved action drafts must be saved or reverted first. Stale-folder and
+read-only requests are rejected; a failed save restores the changed overrides.
 
 ## Original format and reference evidence
 
@@ -36,6 +46,13 @@ establishes:
 - `0x14038a120` excludes folder/page navigation, selects action override or folder
   default, and multiplies seconds by 1000 for the timer.
 - `0x14038a3a0` stops the active timer; `0x14038a600` resolves the parent on completion.
+- `0x140388c00` requests countdown artwork from the active integer 0–100 animation.
+  `0x14079c390` draws a 75% diameter circle, a 6/72-width grey pen, a blue clockwise
+  arc from twelve o'clock with round caps, and a black alpha-128 background. Rust
+  reproduces this geometry independently. Updates are bounded to 16 ms or the next
+  integer percentage, whichever is later.
+- `0x1402f6110` clears the optional setting on other actions with the matching
+  device/page identities. The selected Back action retains its default.
 
 Unknown fields remain in the raw record. The editor changes only `Enabled` and
 `Delay`, or removes `AutoExit` to restore inheritance. Plugin settings and live
@@ -47,15 +64,22 @@ but inactive; new edits reject them instead of producing an unintended exit.
 Rust tests cover inheritance/override, immediate and delayed exit, repeated and
 unowned releases, press cancellation, navigation/disconnection cleanup, nested
 return, per-device isolation and invalid-edit atomicity. Frontend tests cover
-inherited controls, draft changes and saving without reverting live plugin data.
+inherited controls, rapid field edits before props refresh, reset confirmation,
+and saving without reverting live plugin data.
 
 `tests/native_folder_exit_interop.py` opens the actual WebKit desktop window with
 an unchanged official Counter plugin. It edits both forms, verifies Counter
 execution and timer cancellation, measures the delay, exports original-format
-records and checks persistence after restart. It uses a simulated device and
+records and checks persistence after restart. It also checks countdown restoration, reset
+cancellation/confirmation and exported inheritance. It uses a simulated device and
 private temporary state. No physical USB or Windows runtime acceptance is claimed.
 
-The original Back-key countdown artwork and its reset-all-overrides button are
-not implemented yet. Nested child-action override semantics, timing relative to
-long Multi Actions, and original dial/touch dispatch need further reference
-comparison. Top-level dial/touch actions use the same device-owned deadline.
+Physical display acceptance and pixel-exact Qt raster/compositing equivalence
+remain unverified. Nested child-action override semantics, timing relative to long
+Multi Actions, and original dial/touch dispatch need further reference comparison.
+Top-level dial/touch actions use the same device-owned deadline.
+
+A separate navigation gap was recovered at `0x140389230`: holding Back for more
+than 500 ms resolves the root page, while a short release returns one level. That
+long-press behavior is not implemented yet. Current Back input returns one level.
+The retained follow-up evidence is in `evidence/folder-exit/finish-rea-bundle.json`.

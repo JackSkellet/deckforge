@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { Check, NumberField } from "./Fields";
 import type { RecordValue } from "./model";
 
@@ -6,20 +7,26 @@ export function FolderExit({
   parent,
   back,
   onChange,
+  resetCount = 0,
+  onReset,
 }: {
   raw: RecordValue;
   parent?: RecordValue;
   back: boolean;
-  onChange: (raw: RecordValue) => void;
+  onChange: (update: (raw: RecordValue) => RecordValue) => void;
+  resetCount?: number;
+  onReset?: () => Promise<void>;
 }) {
+  const [confirmReset, setConfirmReset] = useState(false);
+  const [resetting, setResetting] = useState(false);
   const follows = raw.AutoExit == null;
   const value = raw.AutoExit ??
     parent?.AutoExit ?? { Enabled: false, Delay: 1 };
   const set = (patch: RecordValue) =>
-    onChange({
-      ...raw,
-      AutoExit: { ...value, ...patch },
-    });
+    onChange((current) => ({
+      ...current,
+      AutoExit: { ...(current.AutoExit ?? value), ...patch },
+    }));
   return (
     <details className="folder-exit-options">
       <summary>Folder auto-exit</summary>
@@ -33,10 +40,12 @@ export function FolderExit({
           label="Follow folder settings"
           checked={follows}
           onChange={(checked) => {
-            const next = { ...raw };
-            if (checked) delete next.AutoExit;
-            else next.AutoExit = { ...value };
-            onChange(next);
+            onChange((current) => {
+              const next = { ...current };
+              if (checked) delete next.AutoExit;
+              else next.AutoExit = { ...(current.AutoExit ?? value) };
+              return next;
+            });
           }}
         />
       )}
@@ -57,6 +66,50 @@ export function FolderExit({
         </fieldset>
       </fieldset>
       <p className="hint">0 seconds returns immediately after release.</p>
+      {back && onReset && (
+        <div className="folder-exit-reset">
+          {confirmReset ? (
+            <>
+              <p>
+                Reset {resetCount} action overrides to this folder's default?
+                Pinned actions keep their shared settings.
+              </p>
+              <div className="row">
+                <button
+                  type="button"
+                  disabled={resetting}
+                  onClick={async () => {
+                    setResetting(true);
+                    try {
+                      await onReset();
+                      setConfirmReset(false);
+                    } finally {
+                      setResetting(false);
+                    }
+                  }}
+                >
+                  Reset overrides
+                </button>
+                <button
+                  type="button"
+                  disabled={resetting}
+                  onClick={() => setConfirmReset(false)}
+                >
+                  Cancel
+                </button>
+              </div>
+            </>
+          ) : (
+            <button
+              type="button"
+              disabled={resetCount === 0}
+              onClick={() => setConfirmReset(true)}
+            >
+              Reset action overrides ({resetCount})
+            </button>
+          )}
+        </div>
+      )}
     </details>
   );
 }

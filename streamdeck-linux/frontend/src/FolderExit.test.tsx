@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { useState } from "react";
 import { afterEach, expect, it } from "vitest";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { FolderExit } from "./FolderExit";
 import { editDraft, reconcileDraft, saveRequests, type Slot } from "./model";
@@ -25,8 +25,8 @@ it("edits inherited options and saves only exit intent beside live plugin settin
           raw={draft.raw}
           parent={{ AutoExit: { Enabled: true, Delay: 10 } }}
           back={false}
-          onChange={(raw) => {
-            const edited = editDraft(draft, { raw });
+          onChange={(update) => {
+            const edited = editDraft(draft, { raw: update(draft.raw) });
             setDraft(edited);
             requests = saveRequests(
               { ...slot, settings: { count: 9 } },
@@ -80,4 +80,53 @@ it("saves removal of an existing explicit override", () => {
   expect(saveRequests(slot, draft)).toEqual([
     { command: "folder_exit", context: "key", auto_exit: null },
   ]);
+});
+it("requires confirmation for reset and cancellation keeps overrides", async () => {
+  const user = userEvent.setup();
+  let resets = 0;
+  render(
+    <FolderExit
+      raw={{ AutoExit: { Enabled: true, Delay: 1 } }}
+      back
+      resetCount={2}
+      onChange={() => {}}
+      onReset={async () => {
+        resets++;
+      }}
+    />,
+  );
+  await user.click(screen.getByText("Folder auto-exit"));
+  await user.click(
+    screen.getByRole("button", { name: "Reset action overrides (2)" }),
+  );
+  expect(resets).toBe(0);
+  await user.click(screen.getByRole("button", { name: "Cancel" }));
+  expect(resets).toBe(0);
+  await user.click(
+    screen.getByRole("button", { name: "Reset action overrides (2)" }),
+  );
+  await user.click(screen.getByRole("button", { name: "Reset overrides" }));
+  expect(resets).toBe(1);
+});
+
+it("merges rapid field edits against the latest draft even before props refresh", () => {
+  let raw: Record<string, any> = { Future: 3 };
+  render(
+    <FolderExit
+      raw={{ Future: 3 }}
+      back
+      onChange={(update) => {
+        raw = update(raw);
+      }}
+    />,
+  );
+  fireEvent.click(screen.getByText("Folder auto-exit"));
+  fireEvent.click(
+    screen.getByRole("checkbox", { name: "Automatically exit folder" }),
+  );
+  fireEvent.change(
+    screen.getByRole("spinbutton", { name: "Exit delay (seconds)" }),
+    { target: { value: "0" } },
+  );
+  expect(raw).toEqual({ Future: 3, AutoExit: { Enabled: true, Delay: 0 } });
 });

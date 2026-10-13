@@ -719,8 +719,10 @@ impl Host {
             })
             .map(|s| s.context.clone())
             .collect();
+        let folder_progress = self.folder_exit_percent().map(|(id, p)| (id.to_owned(), p));
         let display = display_targets::Display {
             hardware_plane: false,
+            folder_progress: folder_progress.as_ref(),
             wheels: &self.wheels,
             wheel_pressed: &wheel_pressed,
             progress: &progress,
@@ -1220,10 +1222,14 @@ impl Host {
         if self.saver_input(&event)? {
             return Ok(());
         }
+        let had_countdown = self.folder_exit.is_some();
         let pending = self.folder_exit_input(&event);
         let result = self.dispatch_input(event);
         if result.is_ok() {
             self.arm_folder_exit(pending);
+        }
+        if had_countdown || self.folder_exit.is_some() {
+            self.render()?;
         }
         result
     }
@@ -2046,6 +2052,7 @@ fn apply_control_local(host: &mut Host, r: Value) -> Result<()> {
             host.input(event)
         }
         "folder_exit" => host.save_folder_exit(&r),
+        "folder_exit_reset" => host.reset_folder_exits(&r),
         "wheel_save" => host.save_wheel_draft(
             r["context"].as_str().context("Context missing")?,
             r["raw"].clone(),
@@ -2981,7 +2988,7 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
                             .into_iter()
                             .chain(host.triggers.repeater.next_due())
                             .chain(host.wheels.next_due())
-                            .chain(host.folder_exit.as_ref().map(|p| p.due))
+                            .chain(host.next_folder_exit())
                             .chain(host.next_feedback())
                             .chain(host.next_brightness())
                             .chain(host.next_saver())
