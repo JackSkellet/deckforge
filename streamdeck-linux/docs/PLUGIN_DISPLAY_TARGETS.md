@@ -64,9 +64,14 @@ unproven. Runtime cache persistence is local policy. Native title-parameter even
 after target divergence, raw encoder target combinations, pixel-identical Windows
 font rendering and physical-display acceptance still need separate evidence.
 
-The older whole-workflow Stack and Trigger scripts reach existing import
-failures on both the previous installed build and this change: the Stack script
-still assumes three retained dials from its original profile, while the Trigger
-fixture includes a profile labelled `GRETSCH` that the importer rejects. Their
-preceding generated-action workflows complete, but these full scripts are not
-claimed as passing. Those import/fixture compatibility gaps remain open.
+The complete Stack workflow now passes, including import/export of all four
+original stacks at dial columns 1–4 on the fixture's Plus XL model (`20GBX9901`).
+The old test incorrectly used a Plus host and expected only three stacks. The
+importer retains a supported foreign-model profile without changing the active
+profile; that behavior was correct and required no production change.
+
+The Trigger workflow still reaches an unsupported-model import: its original
+"Galleon Default Windows" profile identifies its device as `GRETSCH`. This is
+not an established alias for Plus. The preceding generated-action workflows
+complete, but the full Trigger script is not claimed as passing. Supporting that
+device and its original fixture remains open.

@@ -31,11 +31,12 @@ def require(condition, message):
 
 
 class RunningHost:
-    def __init__(self, binary, plugins, state, log):
+    def __init__(self, binary, plugins, state, log, *, model=None):
         self.log = log
         self.output = log.open("w")
         self.process = subprocess.Popen(
             [str(binary), "serve", "--simulate", "--port", "0", "--state", str(state),
+             *(["--model", model] if model else []),
              *[item for plugin in plugins for item in ("--plugin", str(plugin))]],
             stdout=self.output, stderr=subprocess.STDOUT, start_new_session=True,
         )

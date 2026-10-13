@@ -8,15 +8,20 @@ The official [7.6 release notes](https://help.elgato.com/hc/en-us/articles/51156
 
 ## Current work order
 
-The user currently prioritizes the audio mixer: automatic installed-app discovery,
-an All audio default with explicit exceptions, and a clearer Wave Link-style view.
-Live meters, immediate controls, linked levels, fades and per-output controls were
-published first. The current pass adds the compact matrix and separate routing setup,
-guided by screenshots and offline REA inspection of Wave Link 3.3.0.3125.
-Plugin compatibility resumes afterward; Studio LED and remaining device transports
-are deferred. Sharing and Smart Profiles come at the end. Effects and screensaver
-completion remain deferred. The user performs long-running reliability testing;
-short functional checks continue and GitHub CI stays manual-only.
+The audio mixer pass is delivered: installed-app discovery, an All audio default
+with explicit exceptions, live meters, linked levels, fades, per-output controls,
+a compact matrix and a movable patchbay with individual channel routing. The user
+confirmed audio routing works on their tested setup on 2026-10-13. Effects remain
+deferred; this is not universal physical acceptance of every routing combination.
+
+Plugin compatibility is next. The native Discord plugin now ships as a public
+package in the Linux distribution, with explicit installation from the Plugins
+panel. An isolated native install registered all 17 actions and preserved existing
+private state; the published archives were checked for local credential values.
+Studio LED and remaining device transports are deferred. Sharing and Smart
+Profiles come at the end. Screensaver completion remains deferred. The user
+performs long-running reliability testing; short functional checks continue and
+GitHub CI stays manual-only.
 
 ## Status and evidence rules
 

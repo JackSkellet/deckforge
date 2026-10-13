@@ -131,29 +131,38 @@ def main():
             before=current(restart)['raw']
             restart.post({'command':'stack_save','context':current(restart)['context'],'raw':{'Actions':[{'UUID':STACK}]}},expected=400)
             require(current(restart)['raw']==before,'Invalid nested stack modified data')
+
+        finally:restart.stop()
+        # The original is a Plus XL profile, not a Plus profile. Exercise it on
+        # its own model so a default Plus host cannot hide a truncated import.
+        fixture_state=root/'plus-xl-state'
+        fixture_host=Host(args.binary.resolve(),[],fixture_state,root/'plus-xl.log',model='plus-xl')
+        try:
+            fixture_host.ready()
+            require(fixture_host.state()['device_model']=='plus-xl','Original fixture needs its actual device model')
             original=evidence/'elgato-7.6/raw/flsLUxNAo3HxRBo8yay7EbNtFyJC9c'
             require(hashlib.sha256(original.read_bytes()).hexdigest()=='e4ce1ac8947e28266b852a0860c03c9437b7ed2a2e2bd5044e1b94a502a72675','Original stack fixture changed')
-            restart.post({'command':'import_profile','path':str(original)})
-            saved=json.loads((state/'session.json').read_text())
-            profile=next(p for p in saved['library']['profiles'] if p['id']==restart.state()['library']['active_profile'])
+            fixture_host.post({'command':'import_profile','path':str(original)})
+            saved=json.loads((fixture_state/'session.json').read_text())
+            profile=next(p for p in saved['library']['profiles'] if p['id']==fixture_host.state()['library']['active_profile'])
             page=next(p for p in profile['pages'] if any(s['uuid']==STACK for s in p['slots']))
-            restart.post({'command':'page_select','id':page['id']})
-            retained=[s for s in restart.state()['slots'] if s['uuid']==STACK]
+            fixture_host.post({'command':'page_select','id':page['id']})
+            retained=[s for s in fixture_host.state()['slots'] if s['uuid']==STACK]
             with zipfile.ZipFile(original) as archive:
                 original_stacks={a['ActionID']:a for name in archive.namelist() if name.endswith('manifest.json') for c in json.loads(archive.read(name)).get('Controllers',[]) for a in (c.get('Actions') or {}).values() if a.get('UUID')==STACK}
-            require(len(retained)==3,'Expected three stacks within Plus geometry; original fourth column remains raw')
+            require(len(retained)==4 and {s['index'] for s in retained}=={1,2,3,4},'Plus XL must retain all four original stacks at their original dial positions')
             for s in retained:
                 source=original_stacks[s['raw']['ActionID']]
                 require(len(s['stack_children'])==len(source['Actions']),'Original child count changed')
                 require(s['settings']==source['Settings'],'Original stack settings changed')
             require(all(not c['available'] for s in retained for c in s['stack_children']),'Unavailable WaveLink incorrectly claimed available')
-            untouched=root/'original-stack.streamDeckProfile';restart.post({'command':'export_profile','path':str(untouched)})
+            untouched=root/'original-stack.streamDeckProfile';fixture_host.post({'command':'export_profile','path':str(untouched)})
             with zipfile.ZipFile(untouched) as archive:
                 records=[a for name in archive.namelist() if name.endswith('manifest.json') for c in json.loads(archive.read(name)).get('Controllers',[]) for a in (c.get('Actions') or {}).values()]
             for identity,source in original_stacks.items():
                 match=next(a for a in records if a.get('ActionID')==identity)
                 require(match['Actions']==source['Actions'] and match['Settings']==source['Settings'],'Original WaveLink stack data changed on export')
 
-        finally:restart.stop()
-    print('PASS: selected-only SDK lifecycle, ordinary Encoder payloads, click/pressed turn/touch/fast navigation/cooldown, inactive replies, PI, unchanged Layouts PNGs, flat export and restart. No USB or OS actions executed.')
+        finally:fixture_host.stop()
+    print('PASS: selected-only SDK lifecycle, ordinary Encoder payloads, click/pressed turn/touch/fast navigation/cooldown, inactive replies, PI, unchanged Layouts PNGs, flat export/restart and all four original Plus XL stacks. No USB or OS actions executed.')
 if __name__=='__main__':main()
