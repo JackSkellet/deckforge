@@ -5,6 +5,7 @@ use super::*;
 #[derive(Clone, Copy)]
 pub(super) struct Display<'a> {
     pub hardware_plane: bool,
+    pub key_images: &'a key_images::Runtime,
     pub folder_progress: Option<&'a (String, u8)>,
     pub model: Model,
     pub renderer: &'a Renderer,
@@ -17,6 +18,9 @@ pub(super) struct Display<'a> {
     pub progress: &'a BTreeMap<String, u8>,
 }
 impl Display<'_> {
+    pub fn key_background<'b>(&'b self, slot: &'b Slot) -> Option<&'b DynamicImage> {
+        self.key_images.frame(&slot.context, self.hardware_plane).or(slot.background.as_ref())
+    }
     /// Child models have their own editor images even when they share a physical
     /// parent. Render these separately; do not forward child badges to that key.
     pub fn editor_children(&self, slot: &mut Slot, warnings: &mut Vec<String>) -> Result<()> {
@@ -36,6 +40,9 @@ impl Display<'_> {
     pub fn encoder_icon(&self, slot: &mut Slot) -> Result<String> {
         if !self.actions.iter().any(|action| action.uuid == slot.uuid) {
             return png(&appearance::unavailable_picture(self.renderer, (72, 72)));
+        }
+        if let Some(frame)=self.key_images.frame(&slot.context, false) {
+            return png(&frame.thumbnail(144,144));
         }
         if slot.uuid == crate::dial_stack::UUID {
             let index = slot.active_stack_index();
@@ -186,6 +193,7 @@ impl Display<'_> {
                     self.badges,
                     self.now,
                     self.progress,
+                    Some((self.key_images, self.hardware_plane)),
                 )?
             } else {
                 display::dial_image(self.renderer, target, root, self.actions)?
@@ -208,7 +216,7 @@ impl Display<'_> {
             };
             let mut picture = self.renderer.key_styled_size(
                 &slot.title,
-                slot.background.as_ref(),
+                self.key_background(slot),
                 &appearance::style(slot, self.actions),
                 size,
             );
@@ -278,6 +286,7 @@ mod tests {
                 hardware: Some(appearance::PluginAppearance {
                     title: Some(String::new()),
                     pixels: Some(solid([255, 0, 0])),
+                        animation_source: None,
                 }),
                 ..Default::default()
             },

@@ -1288,6 +1288,7 @@ dependencies = [
  "eframe",
  "fontdue",
  "futures-util",
+ "gif",
  "gtk",
  "hidapi",
  "hkdf",

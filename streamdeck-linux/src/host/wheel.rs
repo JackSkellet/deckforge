@@ -515,7 +515,7 @@ fn key_picture(
     {
         display
             .renderer
-            .key_styled_size(&child.title, child.background.as_ref(), &style, (72, 72))
+            .key_styled_size(&child.title, display.key_background(child), &style, (72, 72))
     } else {
         appearance::unavailable_picture(display.renderer, (72, 72))
     };
@@ -768,6 +768,7 @@ mod tests {
                         hardware: initially_split.then(|| appearance::PluginAppearance {
                             title: None,
                             pixels: Some(red.clone()),
+                        animation_source: None,
                         }),
                         ..Default::default()
                     },
@@ -806,6 +807,7 @@ mod tests {
                     (!initially_split).then(|| appearance::PluginAppearance {
                         title: None,
                         pixels: Some(red.clone()),
+                        animation_source: None,
                     });
             }
             host.render().unwrap();

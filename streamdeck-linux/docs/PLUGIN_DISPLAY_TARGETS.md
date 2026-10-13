@@ -34,10 +34,10 @@ and thumbnail tests cover alpha and dimension limits. These checks use simulated
 devices and do not establish physical WebP display acceptance.
 
 The [SDK key guide](https://docs.elgato.com/streamdeck/sdk/guides/keys/#images)
-explicitly excludes animation from `setImage`. This change supplies static WebP
-decoding, not animated playback. User-authored animated key artwork remains an
-open desktop feature; the existing first-frame fallback and screensaver policy
-are unchanged.
+explicitly excludes animation from `setImage`. Deckforge now deliberately extends
+that command with GIF animation at the user's request. It also animates saved
+user/imported key GIFs and encoder app icons. Static WebP support and the separate
+screensaver policy are unchanged. See [animated images](ANIMATED_IMAGES.md).
 
 ## Dial icons and touch displays
 

@@ -28,6 +28,7 @@ pub(super) fn picture(
     badges: &HashMap<String, feedback::Badge>,
     now: Duration,
     progress: &BTreeMap<String, u8>,
+    images: Option<(&key_images::Runtime, bool)>,
 ) -> Result<DynamicImage> {
     let mut canvas = DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
         200,
@@ -39,7 +40,7 @@ pub(super) fn picture(
             let mut key = if actions.iter().any(|action| action.uuid == child.uuid) {
                 renderer.key_styled(
                     &child.title,
-                    child.background.as_ref(),
+                    images.and_then(|(images, hardware)| images.frame(&child.context, hardware)).or(child.background.as_ref()),
                     &appearance::style(child, actions),
                 )
             } else {
@@ -452,6 +453,7 @@ mod tests {
             &HashMap::new(),
             Duration::ZERO,
             &BTreeMap::new(),
+            None,
         )
         .unwrap();
         let unchanged_preview = parent.children[1][0].preview.clone();
@@ -462,6 +464,7 @@ mod tests {
             &HashMap::new(),
             Duration::ZERO,
             &BTreeMap::new(),
+            None,
         )
         .unwrap();
         assert_ne!(before.to_rgba8(), after.to_rgba8());

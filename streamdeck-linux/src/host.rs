@@ -45,6 +45,7 @@ mod display_targets;
 mod export;
 mod feedback;
 mod folder_exit;
+mod key_images;
 mod inspectors;
 mod library;
 mod links;
@@ -456,6 +457,8 @@ struct Host {
     trigger_descriptions: HashMap<String, Value>,
     triggers: trigger::Runtime,
     wheels: wheel::Runtime,
+    key_image_cache: key_images::Cache,
+    key_images: key_images::Runtime,
     folder_exit: Option<folder_exit::Pending>,
     folder_back_holds: HashMap<String, folder_exit::BackPress>,
     virtual_suppressed: HashSet<String>,
@@ -669,6 +672,7 @@ impl Host {
         self.persist()
     }
     fn render(&mut self) -> Result<()> {
+        self.sync_key_images();
         self.wheels.sync(&self.slots);
         self.update_mixer_feedback();
         self.update_volume_feedback();
@@ -724,6 +728,7 @@ impl Host {
         let display = display_targets::Display {
             hardware_plane: false,
             folder_progress: folder_progress.as_ref(),
+            key_images: &self.key_images,
             wheels: &self.wheels,
             wheel_pressed: &wheel_pressed,
             progress: &progress,
@@ -1521,7 +1526,7 @@ fn safe_file(root: &Path, path: &str) -> Result<PathBuf> {
     }
     Ok(file)
 }
-fn load_image(root: &Path, source: &str) -> Result<DynamicImage> {
+fn image_bytes(root: &Path, source: &str) -> Result<Vec<u8>> {
     let data = if source.starts_with("data:image/") {
         let (header, content) = source.split_once(',').context("Invalid image URL")?;
         if content.len() > 12 * 1024 * 1024 {
@@ -1542,11 +1547,17 @@ fn load_image(root: &Path, source: &str) -> Result<DynamicImage> {
     if data.len() > 8 * 1024 * 1024 {
         bail!("Image exceeds 8 MiB");
     }
+    Ok(data)
+}
+fn decode_image_bytes(data: &[u8], source: &str) -> Result<DynamicImage> {
     let svg = source.starts_with("data:image/svg+xml")
         || source.ends_with(".svg")
         || std::str::from_utf8(&data[..data.len().min(512)])
             .is_ok_and(|text| text.contains("<svg"));
-    display::decode_image(&data, svg)
+    display::decode_image(data, svg)
+}
+fn load_image(root: &Path, source: &str) -> Result<DynamicImage> {
+    decode_image_bytes(&image_bytes(root, source)?, source)
 }
 
 fn state_image(root: &Path, states: &Value, state: u64) -> Option<DynamicImage> {
@@ -2715,6 +2726,8 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
         trigger_descriptions: HashMap::new(),
         triggers: trigger::Runtime::default(),
         wheels: wheel::Runtime::default(),
+        key_image_cache: Default::default(),
+        key_images: Default::default(),
         folder_exit: None,
         folder_back_holds: HashMap::new(),
         virtual_suppressed: HashSet::new(),
@@ -2979,6 +2992,7 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
                         host.poll_triggers();
                         host.poll_wheels();
                         host.poll_folder_exit();
+                        host.poll_key_images();
                         host.poll_feedback();
                         host.poll_brightness();
                         host.poll_saver();
@@ -2989,6 +3003,7 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
                             .chain(host.triggers.repeater.next_due())
                             .chain(host.wheels.next_due())
                             .chain(host.next_folder_exit())
+                            .chain(host.key_images.next_due())
                             .chain(host.next_feedback())
                             .chain(host.next_brightness())
                             .chain(host.next_saver())
@@ -3253,6 +3268,8 @@ mod tests {
             trigger_descriptions: HashMap::new(),
             triggers: trigger::Runtime::default(),
             wheels: wheel::Runtime::default(),
+            key_image_cache: Default::default(),
+            key_images: Default::default(),
             folder_exit: None,
             folder_back_holds: HashMap::new(),
             virtual_suppressed: HashSet::new(),

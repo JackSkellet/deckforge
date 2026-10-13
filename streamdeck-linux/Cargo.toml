@@ -15,6 +15,7 @@ csscolorparser = "0.7"
 eframe = { version = "0.36.2", default-features = false, features = ["default_fonts", "glow", "wayland", "x11", "accesskit"] }
 fontdue = "0.9"
 futures-util = "0.3"
+gif = "0.14"
 hidapi = "2.6"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "bmp", "webp"] }
 libc = "0.2"

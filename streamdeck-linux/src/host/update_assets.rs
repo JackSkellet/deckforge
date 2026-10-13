@@ -182,9 +182,12 @@ fn refresh_slot(slot: &mut Slot, old_actions: &[Action], new_actions: &[Action])
         });
         for appearance in slot.appearances.values_mut() {
             appearance.plugin_pixels = None;
+            appearance.plugin_animation_source = None;
             appearance.encoder_pixels = None;
+            appearance.encoder_animation_source = None;
             if let Some(hardware) = &mut appearance.hardware {
                 hardware.pixels = None;
+                hardware.animation_source = None;
             }
         }
         slot.image_changed = false;
@@ -283,6 +286,7 @@ mod tests {
                     hardware: Some(appearance::PluginAppearance {
                         title: Some("Hardware title retained".into()),
                         pixels: Some(image([4, 5, 6])),
+                        animation_source: None,
                     }),
                     encoder_pixels: Some(image([7, 8, 9])),
                     ..Default::default()

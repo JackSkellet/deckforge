@@ -352,7 +352,9 @@ impl Host {
                     paths.extend(
                         slot.appearances
                             .values()
-                            .filter_map(|a| a.user_image.as_deref()),
+                            .flat_map(|a| a.user_image.iter().chain(a.plugin_animation_source.iter()).chain(a.encoder_animation_source.iter())
+                                .chain(a.hardware.iter().filter_map(|h| h.animation_source.as_ref())))
+                            .map(PathBuf::as_path),
                     );
                     if let Some(origin) = &slot.asset_source {
                         paths.push(origin.source.as_path());
@@ -369,7 +371,9 @@ impl Host {
                 paths.extend(
                     slot.appearances
                         .values()
-                        .filter_map(|a| a.user_image.as_deref()),
+                        .flat_map(|a| a.user_image.iter().chain(a.plugin_animation_source.iter()).chain(a.encoder_animation_source.iter())
+                            .chain(a.hardware.iter().filter_map(|h| h.animation_source.as_ref())))
+                        .map(PathBuf::as_path),
                 );
                 if let Some(origin) = &slot.asset_source {
                     paths.push(origin.source.as_path());

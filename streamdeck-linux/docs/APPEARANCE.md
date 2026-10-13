@@ -55,8 +55,9 @@ override.
 - Key font sizing uses a documented Linux policy, not verified Windows pixel
   metrics. Complex text shaping, per-character font fallback and exact Windows
   visual equivalence remain open.
-- GIF bytes survive storage/export, but the renderer currently displays the first
-  frame. The SDK's `setImage` API itself does not support animated GIF input.
+- Saved GIF artwork now animates with bounded decoding and preserved original
+  bytes. Deckforge also supports animated SDK `setImage` as a requested extension.
+  See [animated images](ANIMATED_IMAGES.md) for timing, target ownership and limits.
 - Key SDK target 0 updates both displays, target 1 only hardware, and target 2
   only the editor. State-specific updates and independent resets are supported.
   Dial SDK images update the circular editor icon; feedback controls the LCD.

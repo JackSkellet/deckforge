@@ -17,6 +17,7 @@ mod dial_stack;
 mod external_url;
 mod feedback;
 mod folder_countdown;
+mod key_animation;
 mod hardware;
 mod host;
 mod instance;

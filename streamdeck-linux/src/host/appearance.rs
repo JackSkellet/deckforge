@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub(super) struct PluginAppearance {
+    pub animation_source: Option<PathBuf>,
     pub title: Option<String>,
     #[serde(default, with = "image_serde")]
     pub pixels: Option<DynamicImage>,
@@ -49,11 +50,13 @@ pub(super) struct StateAppearance {
     pub plugin_title: Option<String>,
     #[serde(default, with = "image_serde")]
     pub plugin_pixels: Option<DynamicImage>,
+    pub plugin_animation_source: Option<PathBuf>,
     /// None shares the software runtime values. Split before the first targeted write.
     pub hardware: Option<PluginAppearance>,
     /// The encoder's circular software canvas is separate from its LCD layout.
     #[serde(default, with = "image_serde")]
     pub encoder_pixels: Option<DynamicImage>,
+    pub encoder_animation_source: Option<PathBuf>,
 }
 impl StateAppearance {
     fn split_hardware(&mut self) {
@@ -61,6 +64,7 @@ impl StateAppearance {
             self.hardware = Some(PluginAppearance {
                 title: self.plugin_title.clone(),
                 pixels: self.plugin_pixels.clone(),
+                animation_source: self.plugin_animation_source.clone(),
             });
         }
     }
@@ -235,6 +239,7 @@ pub(super) fn migrate(slot: &mut Slot, actions: &[Action]) {
         for (state, entry) in &mut slot.appearances {
             if entry.encoder_pixels.is_none() && entry.plugin_pixels.is_some() {
                 entry.encoder_pixels = entry.plugin_pixels.take();
+                entry.encoder_animation_source = entry.plugin_animation_source.take();
                 if *state == slot.state {
                     slot.background = None;
                     slot.image_changed = false;
@@ -452,6 +457,7 @@ fn prepare(
             .extension()
             .is_some_and(|e| e.eq_ignore_ascii_case("svg"));
         let image = display::decode_image(&bytes, svg)?;
+        crate::key_animation::Clip::decode(&bytes)?;
         ensure!(
             u64::from(image.width()) * u64::from(image.height()) <= 16 * 1024 * 1024,
             "Action icon exceeds 16 megapixels"
@@ -706,8 +712,10 @@ impl Host {
             {
                 entry.plugin_title = hardware.title;
                 entry.plugin_pixels = hardware.pixels;
+                entry.plugin_animation_source = hardware.animation_source;
                 slot.title = title(slot, &host.actions);
-                slot.background = host.resolve_state_image(slot, slot.state);
+                slot.background = host.key_images.frame(&slot.context, true).cloned()
+                    .or_else(|| host.resolve_state_image(slot, slot.state));
             }
             for child in slot.children.iter_mut().flatten() {
                 project(host, child);
@@ -765,14 +773,10 @@ impl Host {
         } else {
             (0..count as u64).collect()
         };
-        let image = if event == "setImage" {
-            value
-                .filter(|v| !v.is_empty())
-                .map(|value| load_image(root, value))
-                .transpose()?
-        } else {
-            None
-        };
+        let bytes = if event == "setImage" {
+            value.filter(|v| !v.is_empty()).map(|value| image_bytes(root, value)).transpose()?
+        } else { None };
+        let image = bytes.as_ref().map(|bytes| decode_image_bytes(bytes, value.unwrap())).transpose()?;
         // Calculate the complete result before cloning pixels across states or
         // splitting a shared plane. Title-only writes can also require a split.
         let image_size = (event == "setImage").then(|| pixel_bytes(image.as_ref()));
@@ -798,11 +802,15 @@ impl Host {
             total <= 64 * 1024 * 1024,
             "Action image states exceed 64 MiB decoded pixels"
         );
+        let animation_source = if event == "setImage" {
+            bytes.as_deref().map(|bytes| self.store_plugin_animation(bytes)).transpose()?.flatten()
+        } else {None};
         let affects_current = states.contains(&slot.state);
         for state in states {
             let entry = slot.appearances.entry(state).or_default();
             if encoder_image {
                 entry.encoder_pixels = image.clone();
+                entry.encoder_animation_source = animation_source.clone();
                 continue;
             }
             if target != DisplayTarget::Both {
@@ -821,13 +829,18 @@ impl Host {
             } else {
                 if target != DisplayTarget::Hardware {
                     entry.plugin_pixels = image.clone();
+                    entry.plugin_animation_source = animation_source.clone();
                 }
                 if target != DisplayTarget::Software
                     && let Some(hardware) = &mut entry.hardware
                 {
                     hardware.pixels = image.clone();
+                    hardware.animation_source = animation_source.clone();
                 }
             }
+        }
+        if affects_current && event == "setImage" && !custom_image(slot) {
+            self.key_images.restart(&slot.context, target != DisplayTarget::Hardware, !encoder_image && target != DisplayTarget::Software);
         }
         if affects_current && target != DisplayTarget::Hardware {
             if event == "setTitle" {
