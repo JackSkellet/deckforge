@@ -103,8 +103,9 @@ are not deleted automatically.
 
 External/developer folders are not overwritten by package updates. Update those
 files yourself and use **Restart**, which reloads their metadata and derived
-assets. Marketplace account integration and automatic update discovery remain
-separate unfinished work.
+assets. [Marketplace sign-in and browser installs](MARKETPLACE.md) now download
+packages through the user's saved Elgato website session and use this same review
+mechanism for replacements. Automatic update discovery remains unfinished.
 
 ## Validation
 

@@ -7,6 +7,7 @@ import { PluginApplications } from "./PluginApplications";
 import { PluginLanguage } from "./PluginLanguage";
 import { ReferenceInstaller } from "./ReferenceInstaller";
 import { PluginUpdate } from "./PluginUpdate";
+import { Marketplace } from "./Marketplace";
 import { deviceName } from "./device";
 export type Run = (payload: RecordValue) => Promise<boolean>;
 type PluginRemoval = {
@@ -453,6 +454,7 @@ export function Preferences({
         {[
           "Device",
           "Startup & about",
+          ...(snapshot.marketplace ? ["Marketplace"] : []),
           ...(snapshot.device_capabilities?.sleep === false ||
           snapshot.screensaver?.supported === false
             ? []
@@ -467,6 +469,9 @@ export function Preferences({
           </button>
         ))}
       </div>
+      {tab === "Marketplace" && snapshot.marketplace && (
+        <Marketplace state={snapshot.marketplace} />
+      )}
       {tab === "Device" && (
         <section className="preference-section">
           <h3>{deviceName(snapshot)}</h3>

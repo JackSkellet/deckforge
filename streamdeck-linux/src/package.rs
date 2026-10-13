@@ -359,7 +359,7 @@ pub(crate) fn validate_central_directory(path: &Path, offset: u64) -> Result<()>
     Ok(())
 }
 
-fn rename_without_replacing(source: &Path, target: &Path) -> Result<()> {
+pub(crate) fn rename_without_replacing(source: &Path, target: &Path) -> Result<()> {
     let source = CString::new(source.as_os_str().as_bytes())?;
     let target = CString::new(target.as_os_str().as_bytes())?;
     // Linux renameat2 provides an atomic no-replace operation for directories.

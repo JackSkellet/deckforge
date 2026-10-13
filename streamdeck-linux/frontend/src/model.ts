@@ -107,6 +107,7 @@ export interface PluginLanguageState {
   options: { value: string; label: string }[];
 }
 export interface Snapshot {
+  marketplace?: MarketplaceState;
   plugin_language?: PluginLanguageState;
   application_monitor?: { enabled: boolean; error: string | null };
   devices?: DeviceRecord[];
@@ -144,6 +145,16 @@ export interface Snapshot {
   reference_app?: string;
   system_status?: string;
   [key: string]: any;
+}
+
+export interface MarketplaceState {
+  busy: boolean;
+  authenticated: boolean | null;
+  account: string | null;
+  message: string;
+  error: string | null;
+  pending: string | null;
+  review: import("./PluginUpdate").PluginUpdateReview | null;
 }
 export interface Draft {
   settings: RecordValue;

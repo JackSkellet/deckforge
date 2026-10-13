@@ -305,6 +305,15 @@ fn dispatch(
     match method {
         "snapshot" => Ok(shared.latest.lock().unwrap().snapshot.clone()),
         "fonts" => Ok(serde_json::to_value(crate::appearance::font_families()?)?),
+        "marketplace" => {
+            controller.marketplace_request(
+                payload["action"]
+                    .as_str()
+                    .context("Marketplace action missing")?,
+                None,
+            )?;
+            Ok(Value::Null)
+        }
         "appearance_preview" => controller.appearance_preview(payload),
         "mixer_control" => controller.mixer_control(payload),
         "command" => {

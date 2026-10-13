@@ -73,4 +73,4 @@ unchanged shipped tutorial checks also pass with scoped asset loading.
 - More protected-package/reference versions beyond the verified 7.6 contract.
 - Windows/macOS executable plugins and OS-specific native dependencies.
 - Broader runtime/version selection and updates. Portable generic scripts and unambiguous Windows/macOS script entries now work, including `.cjs`; Node paths are searched deterministically.
-- Marketplace update discovery and account handoff. Managed package replacement/rollback, persistent Enable/Disable and explicit removal/reinstall are implemented.
+- Automatic Marketplace update discovery. [Account sign-in and browser install handoff](MARKETPLACE.md) are implemented using the website session; saved-session reuse after restart and the real Twitch Creator Tools download/install/registration have been verified on this host. Managed package replacement/rollback, persistent Enable/Disable and explicit removal/reinstall are implemented.

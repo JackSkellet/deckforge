@@ -48,6 +48,7 @@ mod inspectors;
 mod library;
 mod links;
 mod localization;
+mod marketplace;
 mod mixer;
 mod mixer_actions;
 mod multiaction;
@@ -412,6 +413,7 @@ struct Host {
     application_delivered: HashMap<String, applications::Delivered>,
     application_error: Option<String>,
     pending_links: VecDeque<links::Pending>,
+    marketplace: crate::marketplace::State,
     registry_routes: HashMap<crate::device_registry::Key, String>,
     registry_commands: Option<std::sync::mpsc::Sender<crate::device_registry::Command>>,
     forgetting_devices: HashSet<crate::device_registry::Key>,
@@ -1567,7 +1569,7 @@ fn action_snapshot(host: &Host, action: &Action) -> Value {
 fn snapshot(host: &Host) -> Value {
     json!({"devices":host.devices_snapshot(),"page_navigation":host.page_navigation(),"device_model":host.model,"device_name":host.device_display_name(),"device_model_name":host.model.name(),"device_custom_name":host.device_name,"overflow_slots":host.overflow_slots(),"device_capabilities":host.model.capabilities(),"device_geometry":{"columns":host.model.columns(),"rows":host.model.rows(),"keys":host.model.key_count(),"dials":host.model.dial_count(),"key_width":host.model.key_width(),"key_height":host.model.key_height(),"strip_width":host.model.strip_width(),"strip_height":host.model.strip_height()},"clipboard":host.clipboard_snapshot(),"mixer":host.mixer_snapshot(),"screensaver":{"supported":host.model==Model::Plus,"active":host.saver.active,"reason":host.saver.reason,"generation":host.saver.generation,"preferences":host.saver_preferences(),"preview":host.saver.preview,"error":host.saver.error,"frames":host.saver.animation.as_ref().map(|animation|animation.len())},"system_resume":{"available":host.resume_available,"error":host.resume_error,"enabled":host.resume_monitor.is_some()},"session":host.session_state,"device_settings":{"desired":host.configured_controls(),"applied":host.controls_observed,"error":host.controls_error},"library":host.library.snapshot(),"running":host.running,"device":host.device,"firmware":host.firmware,"simulate":host.simulate,"connected":host.connected && !host.simulate,"device_online":host.connected,"connection_error":host.connection_error,
         "volume":host.volume_state,"volume_error":host.volume_error,"multi_runs":host.multi.snapshot(),"multi_pending":host.multi_pending.len(),"audio_outputs":host.audio_outputs,"audio_active":host.audio_active,"system_status":host.system_status,"slots":host.slots.iter().map(|s|slot_snapshot(host,s)).collect::<Vec<_>>(),
-        "plugin_language":host.language_snapshot(),"reference_app":host.reference_app,"inspectors":host.inspectors.values().map(|i|json!({"context":i.context,"plugin":host.plugins[i.plugin].id,"connected":i.sender.is_some()})).collect::<Vec<_>>(),
+        "marketplace":host.marketplace,"plugin_language":host.language_snapshot(),"reference_app":host.reference_app,"inspectors":host.inspectors.values().map(|i|json!({"context":i.context,"plugin":host.plugins[i.plugin].id,"connected":i.sender.is_some()})).collect::<Vec<_>>(),
         "actions":host.actions.iter().map(|action|action_snapshot(host,action)).collect::<Vec<_>>(),
         "logs":host.logs,"application_monitor":{"enabled":host.application_monitor.is_some(),"error":host.application_error},"plugins":host.plugins.iter().map(|p|host.plugin_snapshot(p)).collect::<Vec<_>>()})
 }
@@ -2588,6 +2590,7 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
         pending_updates: HashMap::new(),
         previous_plugins: HashMap::new(),
         pending_links: VecDeque::new(),
+        marketplace: crate::marketplace::State::default(),
         registry_routes: HashMap::new(),
         registry_commands: None,
         forgetting_devices: HashSet::new(),
@@ -3125,6 +3128,7 @@ mod tests {
             pending_updates: HashMap::new(),
             previous_plugins: HashMap::new(),
             pending_links: VecDeque::new(),
+            marketplace: crate::marketplace::State::default(),
             registry_routes: HashMap::new(),
             registry_commands: None,
             forgetting_devices: HashSet::new(),

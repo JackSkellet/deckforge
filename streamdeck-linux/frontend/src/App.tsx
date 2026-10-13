@@ -54,6 +54,8 @@ import {
   hasTextDrafts,
   exportFormDrafts,
   importFormDrafts,
+  getFormDraft,
+  setFormDraft,
 } from "./transient";
 import "./style.css";
 const iconCache = new Map<string, string | null>();
@@ -951,6 +953,29 @@ export default function App() {
           </button>
         </div>
       </header>
+      {snapshot.marketplace &&
+        (snapshot.marketplace.busy ||
+          snapshot.marketplace.pending ||
+          snapshot.marketplace.review ||
+          snapshot.marketplace.error) && (
+          <div
+            className={`banner ${snapshot.marketplace.error ? "error" : ""}`}
+            role="status"
+          >
+            <span>
+              {snapshot.marketplace.error || snapshot.marketplace.message}
+            </span>
+            <button
+              onClick={() => {
+                const key = `preferences:${snapshot.device}`;
+                setFormDraft(key, { ...getFormDraft(key), tab: "Marketplace" });
+                setPanel("preferences");
+              }}
+            >
+              Marketplace
+            </button>
+          </div>
+        )}
       {error && (
         <div className="banner error" role="alert">
           <span>{error}</span>

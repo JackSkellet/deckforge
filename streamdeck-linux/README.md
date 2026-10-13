@@ -104,6 +104,10 @@ reinstall, privately archives managed plugin folders and leaves external folders
 untouched. **Update from package** reviews the incoming version before replacing
 files; **Restore version** returns to a retained predecessor while keeping your
 current settings. See [plugin lifecycle](docs/PLUGIN_LIFECYCLE.md).
+**Preferences → Marketplace** signs in through Elgato's own page and remembers
+the session for browser install links. Downloads use the existing package
+verification and installation path; replacements require update review.
+See [Marketplace](docs/MARKETPLACE.md) for session behavior and validation limits.
 The left sidebar manages profiles and imports. Title editing, removal and input
 testing stay with the selected control. Closing or hiding the editor
 keeps the device and plugins running. Open Deckforge again from the launcher or

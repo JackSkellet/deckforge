@@ -5,6 +5,7 @@ pub const MAX_BYTES: usize = 8192;
 
 #[derive(Clone)] // Deliberately no Debug: callbacks can contain authorization codes.
 pub struct DeepLink {
+    pub install: Option<uuid::Uuid>,
     pub plugin: String,
     pub message: String,
     pub hidden: bool,
@@ -26,6 +27,19 @@ impl DeepLink {
             authority.eq_ignore_ascii_case("plugins"),
             "Unsupported plugin link destination"
         );
+        if let Some(id) = path.strip_prefix("install/") {
+            let id = uuid::Uuid::parse_str(id).context("Invalid Marketplace plugin identifier")?;
+            ensure!(
+                path == format!("install/{}", id.hyphenated()),
+                "Invalid Marketplace install route"
+            );
+            return Ok(Self {
+                install: Some(id),
+                plugin: String::new(),
+                message: String::new(),
+                hidden: false,
+            });
+        }
         let path = path
             .strip_prefix("message/")
             .context("Unsupported plugin link route")?;
@@ -47,6 +61,7 @@ impl DeepLink {
             .find(|(key, _)| key == "streamdeck")
             .is_some_and(|(_, value)| value.eq_ignore_ascii_case("hidden"));
         Ok(Self {
+            install: None,
             plugin: plugin.into(),
             message: path[end..].into(),
             hidden,
@@ -56,6 +71,26 @@ impl DeepLink {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn marketplace_install_is_distinct_from_plugin_callbacks() {
+        let id = "30bbf05a-ee28-45cd-b3a6-b072d3d56351";
+        let link = super::DeepLink::parse(&format!("streamdeck://plugins/install/{id}")).unwrap();
+        assert_eq!(link.install.unwrap().to_string(), id);
+        assert!(!link.hidden);
+        assert!(link.message.is_empty());
+        for suffix in [
+            "/extra",
+            "?url=https://evil.invalid",
+            "#fragment",
+            "?streamdeck=hidden",
+        ] {
+            assert!(
+                super::DeepLink::parse(&format!("streamdeck://plugins/install/{id}{suffix}"))
+                    .is_err()
+            );
+        }
+        assert!(super::DeepLink::parse("streamdeck://plugins/install/not-a-uuid").is_err());
+    }
     use super::*;
     #[test]
     fn suffix_is_preserved_separately_from_passive_query_policy() {

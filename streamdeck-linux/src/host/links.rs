@@ -15,6 +15,9 @@ pub(super) struct Pending {
 impl Controller {
     pub fn deliver_deep_link(&self, uri: &str) -> Result<()> {
         let link = DeepLink::parse(uri)?;
+        if let Some(variant) = link.install {
+            return self.marketplace_request("install", Some(variant));
+        }
         let mut host = self.shared.lock().unwrap();
         let result = host.receive_deep_link(link);
         if let Err(error) = &result {

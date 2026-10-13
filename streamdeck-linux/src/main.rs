@@ -18,6 +18,7 @@ mod hardware;
 mod host;
 mod instance;
 mod layout;
+mod marketplace;
 mod mixer;
 mod multi;
 mod multi_editor;
@@ -67,6 +68,16 @@ struct Args {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Isolated Marketplace session browser. Only the host starts this helper.
+    #[command(hide = true)]
+    MarketplaceBrowser {
+        #[arg(long)]
+        profile: PathBuf,
+        #[arg(long, value_parser = ["login", "check", "install"])]
+        operation: String,
+        #[arg(long)]
+        variant: Option<uuid::Uuid>,
+    },
     /// Internal native HTML runtime. Launched and supervised by the host.
     #[command(hide = true)]
     Webview {
@@ -224,6 +235,13 @@ fn main() -> Result<()> {
         (Some(_), Some(_)) => anyhow::bail!("Use a standalone plugin URI or desktop --uri"),
     };
     match command {
+        Command::MarketplaceBrowser {
+            profile,
+            operation,
+            variant,
+        } => {
+            marketplace::browser::run(profile, operation, variant)?;
+        }
         Command::Webview {
             path,
             root,
