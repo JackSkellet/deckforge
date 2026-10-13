@@ -200,6 +200,52 @@ mod tests {
     use super::*;
     use crate::feedback::Kind;
     #[test]
+    fn multi_child_feedback_renders_in_editor_without_changing_parent_frames() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut host = super::super::tests::fixture(temp.path());
+        host.actions.extend(multiaction::definitions());
+        host.assign("Keypad", 0, multiaction::ROUTINE).unwrap();
+        let context = host.slots[0].context.clone();
+        host.save_multi(
+            &context,
+            json!({"Actions":[{"Actions":[
+            {"UUID":"test.action","ActionID":"first","States":[{"Title":"First"}]},
+            {"UUID":"test.action","ActionID":"second","States":[{"Title":"Second"}]}
+        ]},{"Actions":[]}]}),
+        )
+        .unwrap();
+        assert!(
+            !host.slots[0].children[0][0].preview.is_empty(),
+            "Saving a sequence must prepare child previews immediately"
+        );
+        let (sender, receiver) = std::sync::mpsc::channel();
+        host.hardware = Some(sender);
+        let frame = |receiver: &std::sync::mpsc::Receiver<Draw>| {
+            receiver
+                .try_iter()
+                .find_map(|draw| match draw {
+                    Draw::Key(0, image) => Some(image.to_rgba8()),
+                    _ => None,
+                })
+                .unwrap()
+        };
+        host.render().unwrap();
+        let parent = host.slots[0].preview.clone();
+        let physical = frame(&receiver);
+        let first = host.slots[0].children[0][0].clone();
+        let second = host.slots[0].children[0][1].preview.clone();
+        assert!(!first.preview.is_empty());
+        host.show_feedback(&first, Kind::Alert).unwrap();
+        assert_ne!(host.slots[0].children[0][0].preview, first.preview);
+        assert_eq!(host.slots[0].children[0][1].preview, second);
+        assert_eq!(host.slots[0].preview, parent);
+        assert_eq!(frame(&receiver), physical);
+        let expiry = host.badges[&first.context].expires;
+        host.poll_feedback_at(expiry);
+        assert_eq!(host.slots[0].children[0][0].preview, first.preview);
+        assert_eq!(frame(&receiver), physical);
+    }
+    #[test]
     fn descriptors_replace_sparse_map_reset_and_keep_manifest_untouched() {
         let temp = tempfile::tempdir().unwrap();
         let mut host = super::super::tests::fixture(temp.path());

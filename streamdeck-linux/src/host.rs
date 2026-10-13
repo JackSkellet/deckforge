@@ -706,6 +706,7 @@ impl Host {
         let mut warnings = Vec::new();
         for (slot, projection) in self.slots.iter_mut().zip(&mut projections) {
             appearance::apply_user_titles(slot, &self.actions);
+            display.editor_children(slot, &mut warnings)?;
             if slot.controller == "Encoder" {
                 slot.software_icon = display.encoder_icon(slot)?;
             }

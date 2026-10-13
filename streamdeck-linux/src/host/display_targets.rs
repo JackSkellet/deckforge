@@ -11,6 +11,22 @@ pub(super) struct Display<'a> {
     pub now: Duration,
 }
 impl Display<'_> {
+    /// Child models have their own editor images even when they share a physical
+    /// parent. Render these separately; do not forward child badges to that key.
+    pub fn editor_children(&self, slot: &mut Slot, warnings: &mut Vec<String>) -> Result<()> {
+        let active = slot.active_stack_index();
+        let stacked = slot.uuid == crate::dial_stack::UUID;
+        for (index, child) in slot.children.iter_mut().flatten().enumerate() {
+            if stacked && index != active {
+                continue;
+            }
+            self.editor_children(child, warnings)?;
+            if child.controller == "Keypad" {
+                child.preview = png(&self.picture(child, warnings)?)?;
+            }
+        }
+        Ok(())
+    }
     pub fn encoder_icon(&self, slot: &mut Slot) -> Result<String> {
         if !self.actions.iter().any(|action| action.uuid == slot.uuid) {
             return png(&appearance::unavailable_picture(self.renderer, (72, 72)));

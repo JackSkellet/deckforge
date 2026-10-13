@@ -67,14 +67,14 @@ export function Sequence({
         ? runtime.stack_children
         : (runtime.multi_children[branch] ?? [])
     : [];
-  const liveChild = selectedEntry
-    ? runtimeEntries.find(
-        (child) =>
-          child &&
-          child.uuid === selectedEntry.UUID &&
-          child.raw?.ActionID === selectedEntry.ActionID,
-      )
-    : undefined;
+  const runtimeChild = (entry: RecordValue) =>
+    runtimeEntries.find(
+      (child) =>
+        child &&
+        child.uuid === entry.UUID &&
+        child.raw?.ActionID === entry.ActionID,
+    );
+  const liveChild = selectedEntry ? runtimeChild(selectedEntry) : undefined;
   function childLabel(entry: RecordValue, fallback = "Unassigned") {
     const action = actions.find((candidate) => candidate.uuid === entry.UUID);
     if (entry.Name && entry.Name !== action?.source_name) return entry.Name;
@@ -173,6 +173,14 @@ export function Sequence({
               <span className="step-number">
                 {trigger ? ["↶", "↓", "↷"][index] : index + 1}
               </span>
+              {runtimeChild(entry)?.preview && (
+                <img
+                  className="sequence-preview"
+                  src={`data:image/png;base64,${runtimeChild(entry)!.preview}`}
+                  alt=""
+                  aria-hidden="true"
+                />
+              )}
               <span>
                 <strong>{childLabel(entry)}</strong>
                 {trigger && (

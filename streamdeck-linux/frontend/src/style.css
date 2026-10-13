@@ -1031,6 +1031,14 @@ dd {
   font-size: 12px;
   font-weight: 500;
 }
+.sequence-preview {
+  width: 40px;
+  height: 40px;
+  object-fit: contain;
+  flex-shrink: 0;
+  border-radius: 4px;
+  background: #10171c;
+}
 .sequence-select small {
   display: block;
   margin-top: 4px;

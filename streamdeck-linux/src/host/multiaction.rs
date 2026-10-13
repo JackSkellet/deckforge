@@ -349,7 +349,7 @@ impl Host {
                 self.notify_inspectors(&child.context, self.settings_event(child, None), None);
             }
         }
-        Ok(())
+        self.render()
     }
 }
 fn ensure_multi_allowed(action: &Action) -> Result<()> {

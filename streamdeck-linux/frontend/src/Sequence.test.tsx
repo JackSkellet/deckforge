@@ -215,3 +215,60 @@ it("forwards folder page choices into nested action editors", async () => {
     { ProfileUUID: "target" },
   );
 });
+
+it("keeps live previews attached to child identities when a draft reorders or replaces actions", () => {
+  const uuid = "com.elgato.streamdeck.multiactions.routine";
+  const entries = ["first", "second"].map((id) => ({
+    UUID: "example",
+    ActionID: id,
+    Name: id,
+    Settings: {},
+  }));
+  const runtime = {
+    uuid,
+    multi_children: [
+      entries.map((raw) => ({
+        uuid: raw.UUID,
+        raw,
+        name: raw.Name,
+        preview: `${raw.ActionID}-png`,
+      })),
+    ],
+  } as unknown as Slot;
+  const props = {
+    uuid,
+    runtime,
+    actions: [],
+    outputs: [] as [string, string][],
+    onError: vi.fn(),
+    onChange: vi.fn(),
+  };
+  const view = render(
+    <Sequence {...props} raw={{ Actions: [{ Actions: entries }] }} />,
+  );
+  const sources = () =>
+    [...view.container.querySelectorAll("img.sequence-preview")].map((image) =>
+      image.getAttribute("src"),
+    );
+  expect(sources()).toEqual([
+    "data:image/png;base64,first-png",
+    "data:image/png;base64,second-png",
+  ]);
+  view.rerender(
+    <Sequence
+      {...props}
+      raw={{ Actions: [{ Actions: [entries[1], entries[0]] }] }}
+    />,
+  );
+  expect(sources()).toEqual([
+    "data:image/png;base64,second-png",
+    "data:image/png;base64,first-png",
+  ]);
+  view.rerender(
+    <Sequence
+      {...props}
+      raw={{ Actions: [{ Actions: [{ ...entries[0], UUID: "replacement" }] }] }}
+    />,
+  );
+  expect(sources()).toEqual([]);
+});

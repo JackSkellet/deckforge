@@ -370,6 +370,11 @@ native workflow/hardware acceptance remain separate checks. A sequence dispatche
 asynchronous actions in order; it cannot infer when an external application or
 network operation has finished.
 
+Sequence rows include live child images and temporary plugin warning/success
+badges. These stay attached to each child when draft steps are reordered. See
+[Multi Action feedback](docs/MULTI_ACTION_FEEDBACK.md) for the separate parent
+completion/progress behavior still to be implemented.
+
 ## Dial Stacks
 
 Assign **Dial Stack** to a dial, then add and order compatible dial actions in the
