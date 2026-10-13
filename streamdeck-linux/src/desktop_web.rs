@@ -304,6 +304,7 @@ fn dispatch(
 ) -> Result<Value> {
     match method {
         "snapshot" => Ok(shared.latest.lock().unwrap().snapshot.clone()),
+        "bundled_plugins" => Ok(serde_json::to_value(crate::bundled_plugins::list()?)?),
         "fonts" => Ok(serde_json::to_value(crate::appearance::font_families()?)?),
         "marketplace" => {
             controller.marketplace_request(

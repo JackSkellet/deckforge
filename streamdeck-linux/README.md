@@ -40,8 +40,10 @@ for ownership, persistence and validation boundaries.
 [Discord for Deckforge](plugins/discord/README.md) is a from-scratch Rust plugin
 with the original 17 Discord action identities. It runs as a Linux executable,
 with its own settings panel and artwork. No Wine is used. Notifications, server
-statistics and volume graphics have mock integration coverage. Live authorization
-and real Discord control behavior remain unverified.
+statistics and volume graphics have mock integration coverage. Live authorization and connection were confirmed by the user; feature-specific
+Discord control acceptance remains incomplete. Native distributions include the
+plugin without credentials or tokens. Install it from **Plugins → Included with
+Deckforge**, then connect your own account in its settings.
 
 ## Appearance editor
 
@@ -58,7 +60,8 @@ groups, application assignments and output devices. Routing is disabled by defau
 changes require **Apply routes**. **Mixer channel** and **Mixer output mix** actions
 provide key/dial controls with configurable steps and live control feedback.
 See [Audio mixer](docs/AUDIO_MIXER.md) for setup, recovery behavior and the remaining
-Wave Link compatibility work. Effects, meters and Wave-device DSP are unfinished.
+Wave Link compatibility work. Live meters and the advanced audio patchbay are
+implemented; effects and Wave-device DSP remain deferred.
 
 ## Run the native application
 
@@ -169,6 +172,20 @@ npm --prefix frontend run build
 cargo build --release --locked
 python scripts/install-desktop.py
 ```
+
+To build a distributable archive containing the native app and Discord plugin:
+
+```sh
+python3 scripts/build-distribution.py
+```
+
+The archive is written to `target/release/deckforge-linux-<architecture>.tar.gz`.
+Extract it and run its `deckforge` executable, or run its
+`scripts/install-desktop.py` installer. The bundled plugin is offered in Plugins;
+existing installations and private credentials are not overwritten. No user state,
+Marketplace cookies, Discord credentials or connection tokens enter the archive.
+Use `--skip-build` only when the host and plugin release binaries are already
+built from the desired sources. See [Discord setup](plugins/discord/README.md).
 
 Node.js 20.19+ is needed to build the editor. The generated bundle is embedded in
 the Rust executable, with no server needed at runtime. Rebuild the frontend before

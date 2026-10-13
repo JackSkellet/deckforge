@@ -7,6 +7,7 @@ import { PluginApplications } from "./PluginApplications";
 import { PluginLanguage } from "./PluginLanguage";
 import { ReferenceInstaller } from "./ReferenceInstaller";
 import { PluginUpdate } from "./PluginUpdate";
+import { BundledPlugins } from "./BundledPlugins";
 import { Marketplace } from "./Marketplace";
 import { deviceName } from "./device";
 export type Run = (payload: RecordValue) => Promise<boolean>;
@@ -179,6 +180,10 @@ export function Plugins({
           Application monitoring: {snapshot.application_monitor.error}
         </p>
       )}
+      <BundledPlugins
+        installed={snapshot.plugins.map((plugin) => plugin.id)}
+        run={run}
+      />
       <div className="plugin-install">
         <Field label="Plugin package or folder">
           <input

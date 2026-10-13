@@ -19,6 +19,37 @@ def validate_inspector_schema(source):
         raise ValueError('Inspector schema is stale. Run node plugins/discord/tests/generate-fields.cjs before packaging.')
 
 
+def package_files(source, binary):
+    """Only public runtime assets are eligible; never walk state or private data."""
+    validate_inspector_schema(source)
+    manifest = json.loads((source / 'manifest.json').read_text())
+    if manifest.get('UUID') != 'com.elgato.discord' or manifest.get('CodePath') != 'bin/deckforge-discord':
+        raise ValueError('Unexpected Discord plugin identity or executable')
+    names = {'manifest.json', 'ui/index.html', 'ui/app.js', 'ui/fields.json', 'ui/fields.js'}
+    def images(value):
+        if isinstance(value, dict):
+            for key, entry in value.items():
+                if key in ('Icon', 'Image', 'CategoryIcon') and isinstance(entry, str) and entry:
+                    path = Path(entry)
+                    if path.is_absolute() or '..' in path.parts or path.parts[0] != 'images':
+                        raise ValueError('Image must be a public image asset')
+                    names.add(str(path if path.suffix == '.svg' else Path(str(path) + '.svg')))
+                else:
+                    images(entry)
+        elif isinstance(value, list):
+            for entry in value:
+                images(entry)
+    images(manifest)
+    files = [(source / name, name) for name in sorted(names)] + [(binary, manifest['CodePath'])]
+    for path, _ in files:
+        if not path.is_file() or path.is_symlink():
+            raise ValueError('Package asset must be a regular file')
+        relative = path.relative_to(source)
+        if any((source.joinpath(*relative.parts[:n])).is_symlink() for n in range(1, len(relative.parts))):
+            raise ValueError('Package asset contains a symlink directory')
+    return manifest['UUID'], files
+
+
 def main():
     project = Path(__file__).resolve().parents[1]
     source = project/'plugins/discord'
@@ -32,17 +63,7 @@ def main():
     binary = source/'target/release/deckforge-discord'
     if binary.read_bytes()[:4] != b'\x7fELF':
         raise ValueError('Build did not produce a native Linux ELF executable')
-    manifest = json.loads((source/'manifest.json').read_text())
-    identifier = manifest['UUID']
-    if identifier != 'com.elgato.discord':
-        raise ValueError('Unexpected compatibility identity')
-    files = [(source/'manifest.json', 'manifest.json'), (binary, manifest['CodePath'])]
-    for directory in ('images','ui'):
-        for path in sorted((source/directory).rglob('*')):
-            if path.is_symlink():
-                raise ValueError('Package source contains a symlink')
-            if path.is_file():
-                files.append((path,str(path.relative_to(source))))
+    identifier, files = package_files(source, binary)
     args.output.parent.mkdir(parents=True,exist_ok=True)
     with tempfile.NamedTemporaryFile(dir=args.output.parent,suffix='.zip',delete=False) as pending:
         temporary = Path(pending.name)

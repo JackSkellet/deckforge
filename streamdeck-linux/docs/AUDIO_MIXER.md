@@ -283,9 +283,9 @@ keyboard movement/disconnect and saved node positions/port expansion across a
 full process restart. Native UI tests keep routing disabled. Physical drag/cable
 acceptance and physical headphone audio still need user acceptance.
 
-The earlier physical silent-output report is not claimed fixed by these tests.
-Read-only inspection found a voice playback stream attached to a muted, removed
-Deckforge channel without a retained original-stream move record. That proves its
-current silent destination, not the cause of the earlier failure. The canvas
-reports that condition and disconnected/muted/unavailable paths. The user will
-retry the failing setup with this view. Effects remain deferred.
+On 13 October 2026 the user confirmed that audio routing now works in their
+tested setup. This closes the reported silent-output case at the user-acceptance
+level; it does not establish every channel mapping or device combination.
+Previously, read-only inspection found a voice playback stream on a muted,
+removed channel without an original-stream move record. That observation alone
+did not establish the original failure's cause. Effects remain deferred.

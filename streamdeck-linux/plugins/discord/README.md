@@ -14,7 +14,12 @@ state readback retain neutral artwork rather than claiming that a command worked
 
 ## Build and install
 
-From the Deckforge application directory:
+Native Deckforge distributions include this plugin. Open **Plugins → Included
+with Deckforge → Install Discord for Deckforge**. Already-installed plugins are
+preserved; updates continue through the normal reviewed package-update flow.
+The included package has no account configuration, client secret or token.
+
+To build the plugin separately, from the Deckforge application directory:
 
 ```sh
 python scripts/build-discord-plugin.py

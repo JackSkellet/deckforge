@@ -5,6 +5,7 @@ mod appearance;
 mod application_monitor;
 mod audio_output;
 mod brightness;
+mod bundled_plugins;
 mod deep_link;
 mod desktop;
 mod desktop_web;

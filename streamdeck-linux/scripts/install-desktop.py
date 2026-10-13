@@ -63,7 +63,9 @@ def register_uri_handler():
 def main():
     root = Path(__file__).resolve().parents[1]
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--binary", type=Path, default=root / "target/release/deckforge")
+    default_binary = root / "deckforge" if (root / "deckforge").is_file() else root / "target/release/deckforge"
+    parser.add_argument("--binary", type=Path, default=default_binary)
+    parser.add_argument("--without-bundled-plugins", action="store_true")
     args = parser.parse_args()
     source = args.binary.resolve(strict=True)
     subprocess.run([str(source), "--version"], check=True)
@@ -72,6 +74,13 @@ def main():
     executable = home / ".local/bin/deckforge"
     icon = data / "icons/hicolor/scalable/apps/deckforge.svg"
     entry = data / "applications/deckforge.desktop"
+    if not args.without_bundled_plugins:
+        package_name = "discord-for-deckforge.streamDeckPlugin"
+        candidates = [source.parent / "bundled-plugins" / package_name, source.parent / package_name]
+        package = next((p for p in candidates if p.is_file()), None)
+        if package:
+            atomic_copy(package, data / "deckforge/bundled-plugins" / package_name, 0o644)
+            print("Included Discord package installed; existing plugins and private credentials preserved.")
     atomic_copy(source, executable, 0o755)
     atomic_copy(root / "assets/deckforge.svg", icon, 0o644)
     entry.parent.mkdir(parents=True, exist_ok=True)

@@ -463,6 +463,7 @@ export function installFixture(modelId?: string) {
     },
     async request<T>(method: string, payload: any): Promise<T> {
       if (method === "snapshot") return structuredClone(snapshot) as T;
+      if (method === "bundled_plugins") return [] as any;
       if (method === "ui_state_get") return uiState as T;
       if (method === "ui_state_set") {
         uiState = payload.state;
