@@ -263,6 +263,7 @@ impl Phase {
 struct Run {
     steps: Vec<Entry>,
     index: usize,
+    completed: usize,
     phase: Phase,
 }
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
@@ -308,6 +309,7 @@ impl Scheduler {
             Run {
                 steps,
                 index: 0,
+                completed: 0,
                 phase: Phase::Waiting(now),
             },
         );
@@ -339,6 +341,9 @@ impl Scheduler {
                         break;
                     }
                     Phase::Waiting(at) => {
+                        // A native step completes after its final gap, including
+                        // an explicit Delay. Releasing the key is not completion.
+                        run.completed = run.index;
                         let Some(entry) = run.steps.get(run.index) else {
                             finished.push(parent.clone());
                             events.push(Event::Finished {
@@ -396,6 +401,18 @@ impl Scheduler {
     pub fn running(&self, parent: &str) -> bool {
         self.runs.contains_key(parent)
     }
+    pub fn progress(&self) -> BTreeMap<String, u8> {
+        self.runs
+            .iter()
+            .filter(|(_, run)| !run.steps.is_empty())
+            .map(|(parent, run)| {
+                (
+                    parent.clone(),
+                    (run.completed * 100).div_ceil(run.steps.len()).min(100) as u8,
+                )
+            })
+            .collect()
+    }
     pub fn next_due(&self) -> Option<Duration> {
         self.runs.values().map(|run| run.phase.deadline()).min()
     }
@@ -439,6 +456,48 @@ mod tests {
             gap_ms: 100,
             delay_ms: Some(length),
         }
+    }
+    #[test]
+    fn progress_counts_complete_steps_after_gaps_and_explicit_delays() {
+        let mut scheduler = Scheduler::new();
+        scheduler
+            .start(
+                "a",
+                vec![
+                    action("one", 10, 30),
+                    delay("wait", 100),
+                    action("two", 10, 20),
+                ],
+                ms(0),
+            )
+            .unwrap();
+        assert_eq!(scheduler.progress()["a"], 0);
+        scheduler.due(ms(0));
+        scheduler.due(ms(10));
+        scheduler.due(ms(39));
+        assert_eq!(
+            scheduler.progress()["a"],
+            0,
+            "Release is not the end of the gap"
+        );
+        scheduler.due(ms(40));
+        assert_eq!(scheduler.progress()["a"], 34);
+        scheduler.due(ms(139));
+        assert_eq!(
+            scheduler.progress()["a"],
+            34,
+            "Delay is not complete at its start"
+        );
+        scheduler.due(ms(140));
+        assert_eq!(scheduler.progress()["a"], 67);
+        scheduler.due(ms(150));
+        scheduler.due(ms(169));
+        assert_eq!(scheduler.progress()["a"], 67);
+        assert_eq!(
+            scheduler.due(ms(170)),
+            vec![Event::Finished { parent: "a".into() }]
+        );
+        assert!(!scheduler.progress().contains_key("a"));
     }
     #[test]
     fn parse_preserves_unknown_fields_override_state_and_group_scoped_ids() {

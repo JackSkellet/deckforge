@@ -139,6 +139,28 @@ afterEach(() => {
   delete window.deckforge;
 });
 describe("desktop interactions", () => {
+  it("offers the global Multi Action feedback preference with stale-write protection", async () => {
+    snapshot.multi_action_feedback = true;
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(
+      await screen.findByRole("button", { name: "Preferences" }),
+    );
+    await user.click(screen.getByRole("button", { name: "Startup & about" }));
+    const toggle = screen.getByRole("checkbox", {
+      name: "Show Multi Action progress and completion check marks",
+    }) as HTMLInputElement;
+    expect(toggle.checked).toBe(true);
+    await user.click(toggle);
+    expect(request).toHaveBeenCalledWith(
+      "command",
+      expect.objectContaining({
+        command: "multi_action_feedback",
+        enabled: false,
+        baseline: true,
+      }),
+    );
+  });
   it("preserves multiline titles, inserts Enter without submitting, and saves explicit title intent", async () => {
     snapshot.slots[0].title = "Imported\nTitle";
     const user = userEvent.setup();

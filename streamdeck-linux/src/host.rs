@@ -362,6 +362,8 @@ mod image_serde {
 #[derive(Serialize, Deserialize, Default)]
 struct Saved {
     #[serde(default)]
+    suppress_multi_feedback: bool,
+    #[serde(default)]
     plugin_asset_ids: HashMap<PathBuf, (u64, u64)>,
     #[serde(default)]
     disabled_plugins: BTreeSet<PathBuf>,
@@ -401,6 +403,7 @@ enum HeldControl {
     Dial(u8),
 }
 struct Host {
+    suppress_multi_feedback: bool,
     plugin_asset_ids: HashMap<PathBuf, (u64, u64)>,
     pending_updates: HashMap<String, updates::Pending>,
     previous_plugins: HashMap<PathBuf, updates::Previous>,
@@ -554,6 +557,7 @@ impl Host {
             globals: &'a HashMap<String, Value>,
             application_mappings: &'a applications::Mappings,
             plugin_language: &'a str,
+            suppress_multi_feedback: bool,
             disabled_plugins: Vec<&'a Path>,
         }
         let data = serde_json::to_vec_pretty(&View {
@@ -579,6 +583,7 @@ impl Host {
             globals: &self.globals,
             application_mappings: &self.application_mappings,
             plugin_language: &self.plugin_language,
+            suppress_multi_feedback: self.suppress_multi_feedback,
             disabled_plugins: self
                 .disabled_plugins
                 .iter()
@@ -690,7 +695,13 @@ impl Host {
             .into_iter()
             .map(|slot| slot.map(|slot| self.hardware_projection(slot)))
             .collect::<Vec<_>>();
+        let progress = if self.suppress_multi_feedback {
+            BTreeMap::new()
+        } else {
+            self.multi.progress()
+        };
         let display = display_targets::Display {
+            progress: &progress,
             model: self.model,
             renderer: &self.renderer,
             actions: &self.actions,
@@ -1568,7 +1579,7 @@ fn action_snapshot(host: &Host, action: &Action) -> Value {
 fn snapshot(host: &Host) -> Value {
     json!({"devices":host.devices_snapshot(),"page_navigation":host.page_navigation(),"device_model":host.model,"device_name":host.device_display_name(),"device_model_name":host.model.name(),"device_custom_name":host.device_name,"overflow_slots":host.overflow_slots(),"device_capabilities":host.model.capabilities(),"device_geometry":{"columns":host.model.columns(),"rows":host.model.rows(),"keys":host.model.key_count(),"dials":host.model.dial_count(),"key_width":host.model.key_width(),"key_height":host.model.key_height(),"strip_width":host.model.strip_width(),"strip_height":host.model.strip_height()},"clipboard":host.clipboard_snapshot(),"mixer":host.mixer_snapshot(),"screensaver":{"supported":host.model==Model::Plus,"active":host.saver.active,"reason":host.saver.reason,"generation":host.saver.generation,"preferences":host.saver_preferences(),"preview":host.saver.preview,"error":host.saver.error,"frames":host.saver.animation.as_ref().map(|animation|animation.len())},"system_resume":{"available":host.resume_available,"error":host.resume_error,"enabled":host.resume_monitor.is_some()},"session":host.session_state,"device_settings":{"desired":host.configured_controls(),"applied":host.controls_observed,"error":host.controls_error},"library":host.library.snapshot(),"running":host.running,"device":host.device,"firmware":host.firmware,"simulate":host.simulate,"connected":host.connected && !host.simulate,"device_online":host.connected,"connection_error":host.connection_error,
         "volume":host.volume_state,"volume_error":host.volume_error,"multi_runs":host.multi.snapshot(),"multi_pending":host.multi_pending.len(),"audio_outputs":host.audio_outputs,"audio_active":host.audio_active,"system_status":host.system_status,"slots":host.slots.iter().map(|s|slot_snapshot(host,s)).collect::<Vec<_>>(),
-        "marketplace":host.marketplace,"plugin_language":host.language_snapshot(),"reference_app":host.reference_app,"inspectors":host.inspectors.values().map(|i|json!({"context":i.context,"plugin":host.plugins[i.plugin].id,"connected":i.sender.is_some()})).collect::<Vec<_>>(),
+        "multi_action_feedback":!host.suppress_multi_feedback,"marketplace":host.marketplace,"plugin_language":host.language_snapshot(),"reference_app":host.reference_app,"inspectors":host.inspectors.values().map(|i|json!({"context":i.context,"plugin":host.plugins[i.plugin].id,"connected":i.sender.is_some()})).collect::<Vec<_>>(),
         "actions":host.actions.iter().map(|action|action_snapshot(host,action)).collect::<Vec<_>>(),
         "logs":host.logs,"application_monitor":{"enabled":host.application_monitor.is_some(),"error":host.application_error},"plugins":host.plugins.iter().map(|p|host.plugin_snapshot(p)).collect::<Vec<_>>()})
 }
@@ -1659,6 +1670,7 @@ fn apply_control(host: &mut Host, r: Value) -> Result<()> {
             | "system_wake"
             | "plugin_applications"
             | "plugin_language"
+            | "multi_action_feedback"
             | "plugin_enabled"
             | "uninstall_plugin"
             | "plugin_update_apply"
@@ -1823,6 +1835,7 @@ fn apply_control_local(host: &mut Host, r: Value) -> Result<()> {
         "restart_plugin" => host.restart_plugin(r["id"].as_str().context("Plugin id missing")?),
         "plugin_applications" => host.save_application_mappings(&r),
         "plugin_language" => host.save_plugin_language(&r),
+        "multi_action_feedback" => host.save_multi_feedback(&r),
         "plugin_enabled" => host.set_plugin_enabled(&r),
         "uninstall_plugin" => host.uninstall_plugin(&r),
         "plugin_update_apply" => host.apply_plugin_update(&r),
@@ -2665,6 +2678,7 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
         globals: saved.globals,
         application_mappings: saved.application_mappings,
         disabled_plugins: saved.disabled_plugins,
+        suppress_multi_feedback: saved.suppress_multi_feedback,
         plugin_language,
         language,
         localizations: HashMap::new(),
@@ -3240,6 +3254,7 @@ mod tests {
             globals: HashMap::new(),
             application_mappings: HashMap::new(),
             disabled_plugins: BTreeSet::new(),
+            suppress_multi_feedback: false,
             plugin_language: "system".into(),
             language: "en",
             localizations: HashMap::new(),

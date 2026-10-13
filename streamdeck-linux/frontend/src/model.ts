@@ -109,6 +109,7 @@ export interface PluginLanguageState {
 export interface Snapshot {
   marketplace?: MarketplaceState;
   plugin_language?: PluginLanguageState;
+  multi_action_feedback?: boolean;
   application_monitor?: { enabled: boolean; error: string | null };
   devices?: DeviceRecord[];
   page_navigation?: { previous: boolean; next: boolean };

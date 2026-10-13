@@ -16,6 +16,23 @@ pub(super) fn definitions() -> Vec<Action> {
     }).collect()
 }
 impl Host {
+    pub(super) fn save_multi_feedback(&mut self, request: &Value) -> Result<()> {
+        let enabled = request["enabled"]
+            .as_bool()
+            .context("Feedback preference must be a boolean")?;
+        if request["baseline"].as_bool() != Some(!self.suppress_multi_feedback) {
+            bail!("Multi Action feedback preference changed; reload before saving");
+        }
+        let previous = std::mem::replace(&mut self.suppress_multi_feedback, !enabled);
+        if let Err(error) = self.persist() {
+            self.suppress_multi_feedback = previous;
+            return Err(error);
+        }
+        for device in self.device_ids() {
+            self.with_device(&device, |host| host.render())?;
+        }
+        Ok(())
+    }
     fn sequence(&self, parent: &Slot) -> Result<Sequence> {
         let mut sequence = Sequence::parse(&parent.uuid, &parent.raw)?;
         for entry in sequence.groups.iter_mut().flatten() {
@@ -63,6 +80,10 @@ impl Host {
                 }
             };
             steps = vec![steps.remove(index)];
+        }
+        if steps.is_empty() {
+            self.system_status = "Multi Action has no steps".into();
+            return Ok(());
         }
         let needs_keyboard = steps.iter().any(|e| {
             matches!(
@@ -156,9 +177,13 @@ impl Host {
                         slot.background = self.resolve_state_image(&slot, slot.state);
                         slot.title_changed = false;
                         slot.image_changed = false;
-                        self.store_slot(slot);
-                        self.render()?;
+                        self.store_slot(slot.clone());
                         self.persist()?;
+                    }
+                    if !self.suppress_multi_feedback {
+                        self.show_feedback(&slot, crate::feedback::Kind::Ok)?;
+                    } else if slot.uuid == SWITCH {
+                        self.render()?;
                     }
                     self.system_status = "Multi Action finished".into();
                 }
@@ -167,6 +192,7 @@ impl Host {
         Ok(())
     }
     pub(super) fn poll_multi(&mut self) {
+        let previous = self.multi.progress();
         let events = self.multi.due(self.multi_clock.elapsed());
         for event in events {
             let parent = match &event {
@@ -180,8 +206,19 @@ impl Host {
                 self.log(self.system_status.clone());
             }
         }
+        if !self.suppress_multi_feedback
+            && self.multi.progress() != previous
+            && let Err(error) = self.render()
+        {
+            self.log(format!("Multi Action progress redraw: {error:#}"));
+        }
     }
     pub(super) fn cancel_multi(&mut self, parent: &str) {
+        let had_progress = self
+            .multi
+            .progress()
+            .get(parent)
+            .is_some_and(|percent| *percent > 0);
         self.multi_pending.remove(parent);
         self.multi_owned.remove(parent);
         let _ = self.multi.cancel(parent);
@@ -199,6 +236,12 @@ impl Host {
             self.log(format!("Multi Action release: {error:#}"));
         }
         self.multi_notify.notify_one();
+        if had_progress
+            && !self.suppress_multi_feedback
+            && let Err(error) = self.render()
+        {
+            self.log(format!("Multi Action cancellation redraw: {error:#}"));
+        }
     }
     pub(super) fn cancel_departing_multi(&mut self, visible: &HashSet<String>) {
         let parents: Vec<_> = self
@@ -360,4 +403,146 @@ fn ensure_multi_allowed(action: &Action) -> Result<()> {
         bail!("{} does not support Multi Actions", action.name);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod feedback_tests {
+    use super::*;
+    fn setup(root: &Path, uuid: &str) -> (Host, Slot, mpsc::UnboundedReceiver<Value>) {
+        let mut host = super::super::tests::fixture(root);
+        let (sender, receiver) = mpsc::unbounded_channel();
+        host.plugins[0].sender = Some(sender);
+        host.actions.extend(definitions());
+        host.assign("Keypad", 0, uuid).unwrap();
+        let context = host.slots[0].context.clone();
+        host.save_multi(&context, json!({"Actions":[{"Actions":[{"UUID":"test.action","ActionID":"one","States":[{}]}]},{"Actions":[{"UUID":"test.action","ActionID":"two","States":[{}]}]}]})).unwrap();
+        let parent = host.slots[0].clone();
+        (host, parent, receiver)
+    }
+    fn finish(host: &mut Host) {
+        for millis in [1000, 1100, 1200] {
+            for event in host.multi.due(Duration::from_millis(millis)) {
+                host.dispatch_multi(event, false).unwrap();
+            }
+        }
+    }
+    #[test]
+    fn successful_dispatch_shows_parent_check_and_switches_only_after_completion() {
+        for uuid in [ROUTINE, SWITCH, RANDOM] {
+            let root = tempfile::tempdir().unwrap();
+            let (mut host, parent, _receiver) = setup(root.path(), uuid);
+            host.start_multi(&parent).unwrap();
+            assert!(!host.badges.contains_key(&parent.context));
+            assert_eq!(host.slots[0].state, 0);
+            finish(&mut host);
+            assert!(!host.multi_running(&parent.context));
+            assert!(host.badges.contains_key(&parent.context));
+            assert_eq!(host.slots[0].state, u64::from(uuid == SWITCH));
+        }
+    }
+    #[test]
+    fn suppressed_and_cancelled_runs_never_add_completion_feedback() {
+        let root = tempfile::tempdir().unwrap();
+        let (mut host, parent, _receiver) = setup(root.path(), SWITCH);
+        host.suppress_multi_feedback = true;
+        host.start_multi(&parent).unwrap();
+        finish(&mut host);
+        assert!(host.badges.is_empty());
+        assert_eq!(host.slots[0].state, 1);
+        host.suppress_multi_feedback = false;
+        let parent = host.slots[0].clone();
+        host.start_multi(&parent).unwrap();
+        host.cancel_multi(&parent.context);
+        finish(&mut host);
+        assert!(host.badges.is_empty());
+        assert_eq!(host.slots[0].state, 1);
+    }
+    #[test]
+    fn preference_is_global_persistent_and_rejects_stale_or_invalid_updates() {
+        let root = tempfile::tempdir().unwrap();
+        let (mut host, _, _receiver) = setup(root.path(), ROUTINE);
+        assert!(!host.suppress_multi_feedback);
+        host.save_multi_feedback(&json!({"enabled":false,"baseline":true}))
+            .unwrap();
+        let saved: Saved = serde_json::from_slice(&fs::read(&host.state_path).unwrap()).unwrap();
+        assert!(saved.suppress_multi_feedback);
+        assert!(
+            host.save_multi_feedback(&json!({"enabled":true,"baseline":true}))
+                .is_err()
+        );
+        assert!(
+            host.save_multi_feedback(&json!({"enabled":"yes","baseline":false}))
+                .is_err()
+        );
+        assert!(host.suppress_multi_feedback);
+        host.save_multi_feedback(&json!({"enabled":true,"baseline":false}))
+            .unwrap();
+        assert!(!host.suppress_multi_feedback);
+        host.state_path = root.path().join("not-a-state-file");
+        fs::create_dir(&host.state_path).unwrap();
+        assert!(
+            host.save_multi_feedback(&json!({"enabled":false,"baseline":true}))
+                .is_err()
+        );
+        assert!(
+            !host.suppress_multi_feedback,
+            "Failed persistence must not change the active preference"
+        );
+    }
+    #[test]
+    fn empty_switch_branch_does_not_advance_or_report_completion() {
+        let root = tempfile::tempdir().unwrap();
+        let (mut host, parent, _receiver) = setup(root.path(), SWITCH);
+        host.save_multi(
+            &parent.context,
+            json!({"Actions":[{"Actions":[]},{"Actions":[]}]}),
+        )
+        .unwrap();
+        let parent = host.slots[0].clone();
+        host.start_multi(&parent).unwrap();
+        finish(&mut host);
+        assert!(!host.multi_running(&parent.context));
+        assert!(host.badges.is_empty());
+        assert_eq!(host.slots[0].state, 0);
+    }
+    #[test]
+    fn progress_is_in_hardware_frames_and_cancellation_restores_the_original() {
+        let root = tempfile::tempdir().unwrap();
+        let (mut host, parent, _receiver) = setup(root.path(), ROUTINE);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        host.hardware = Some(sender);
+        let frame = |receiver: &std::sync::mpsc::Receiver<Draw>| {
+            receiver
+                .try_iter()
+                .find_map(|draw| match draw {
+                    Draw::Key(0, image) => Some(image.to_rgba8()),
+                    _ => None,
+                })
+                .unwrap()
+        };
+        host.render().unwrap();
+        let original = frame(&receiver);
+        let mut steps = host.sequence(&parent).unwrap().groups[0].clone();
+        let mut second = steps[0].clone();
+        second.id = "second".into();
+        steps.push(second);
+        host.multi
+            .start(&parent.context, steps, Duration::ZERO)
+            .unwrap();
+        host.multi.due(Duration::ZERO);
+        host.multi.due(Duration::from_millis(100));
+        host.multi.due(Duration::from_millis(200));
+        assert_eq!(host.multi.progress()[&parent.context], 50);
+        host.render().unwrap();
+        let partial = frame(&receiver);
+        assert_ne!(partial, original);
+        for y in 0..original.height() {
+            for x in 0..original.width() / 2 {
+                assert_eq!(partial.get_pixel(x, y), original.get_pixel(x, y));
+            }
+        }
+        host.cancel_multi(&parent.context);
+        assert_eq!(frame(&receiver), original);
+        assert!(host.badges.is_empty());
+    }
 }

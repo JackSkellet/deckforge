@@ -27,6 +27,7 @@ pub(super) fn picture(
     slot: &mut Slot,
     badges: &HashMap<String, feedback::Badge>,
     now: Duration,
+    progress: &BTreeMap<String, u8>,
 ) -> Result<DynamicImage> {
     let mut canvas = DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
         200,
@@ -44,7 +45,13 @@ pub(super) fn picture(
             } else {
                 appearance::unavailable_picture(renderer, (120, 120))
             };
-            feedback::paint_key(badges, &mut key, child, now);
+            feedback::paint_key(
+                badges,
+                &mut key,
+                child,
+                now,
+                progress.get(&child.context).copied(),
+            );
             let mut png = Cursor::new(Vec::new());
             key.write_to(&mut png, image::ImageFormat::Png)?;
             child.preview = STANDARD.encode(png.into_inner());
@@ -383,6 +390,7 @@ mod tests {
             &mut parent,
             &HashMap::new(),
             Duration::ZERO,
+            &BTreeMap::new(),
         )
         .unwrap();
         let unchanged_preview = parent.children[1][0].preview.clone();
@@ -392,6 +400,7 @@ mod tests {
             &mut parent,
             &HashMap::new(),
             Duration::ZERO,
+            &BTreeMap::new(),
         )
         .unwrap();
         assert_ne!(before.to_rgba8(), after.to_rgba8());

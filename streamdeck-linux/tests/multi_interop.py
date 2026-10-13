@@ -140,26 +140,34 @@ def main():
                 prior=slot(restarted.state(),RANDOM)['raw']
                 restarted.post({'command':'multi_save','context':slot(restarted.state(),RANDOM)['context'],'raw':{'Actions':[{'Actions':[child(ROUTINE)]}]}},expected=400)
                 require(slot(restarted.state(),RANDOM)['raw']==prior,'Rejected save changed sequence')
+
+            finally:restarted.stop()
+            # The shipped routine belongs to Stream Deck XL (20GAT9902).
+            # Importing it on Plus preserves it but does not activate it.
+            original_state=root/'original-xl-state'
+            original_host=Host(args.binary.resolve(),[],original_state,root/'original-xl.log',model='xl')
+            try:
+                original_host.ready()
                 # Read-only acceptance of the unchanged shipped Windows routine.
                 archive=evidence/'elgato-7.6/raw/flsFWZ6Vo1szVxzaQW28UVc39Qlk1w'
                 require(hashlib.sha256(archive.read_bytes()).hexdigest()=='f1f4ba26000ae5f39a25cb2524e273295e5930e9373477c838389abf3f5a1294','Original routine fixture changed')
-                restarted.post({'command':'import_profile','path':str(archive)})
-                loaded=json.loads((state/'session.json').read_text())
-                profile=next(p for p in loaded['library']['profiles'] if p['id']==restarted.state()['library']['active_profile'])
+                original_host.post({'command':'import_profile','path':str(archive)})
+                loaded=json.loads((original_state/'session.json').read_text())
+                profile=next(p for p in loaded['library']['profiles'] if p['id']==original_host.state()['library']['active_profile'])
                 page=next(p for p in profile['pages'] if any(s['uuid']==ROUTINE for s in p['slots']))
-                restarted.post({'command':'page_select','id':page['id']})
-                routine=slot(restarted.state(),ROUTINE)
+                original_host.post({'command':'page_select','id':page['id']})
+                routine=slot(original_host.state(),ROUTINE)
                 require(len(routine['multi_children'][0])==5 and not routine['multi_children'][1],'Original child groups lost')
                 require([c['settings']['delay'] for c in routine['multi_children'][0] if c['uuid']==DELAY]==[3000,1500],'Original delay values changed')
-                require(not restarted.state()['multi_runs'],'Import must never execute original hotkeys')
+                require(not original_host.state()['multi_runs'],'Import must never execute original hotkeys')
                 original_export=root/'original-multi.streamDeckProfile'
-                restarted.post({'command':'export_profile','path':str(original_export)})
+                original_host.post({'command':'export_profile','path':str(original_export)})
                 with zipfile.ZipFile(original_export) as archive:
                     rows=[a for name in archive.namelist() if name.endswith('manifest.json') for c in json.loads(archive.read(name)).get('Controllers',[]) for a in (c.get('Actions') or {}).values()]
                 exported_routine=next(a for a in rows if a.get('UUID')==ROUTINE)
                 require(exported_routine['Actions']==routine['raw']['Actions'],'Original nested settings/fields changed on export')
 
-            finally:restarted.stop()
+            finally:original_host.stop()
         print('PASS: child SDK lifecycle/settings/PI, configured+manifest timings, delays, cancellation, success-only switch, random single-step selection, unchanged HelloWorld, builtin HTTP order, export and restart identities. No USB or keyboard injection.')
     finally:server.shutdown();server.server_close()
 if __name__=='__main__':main()

@@ -20,6 +20,18 @@ pub fn paint(image: &mut DynamicImage, kind: Kind) {
 }
 
 pub fn paint_with_opacity(image: &mut DynamicImage, kind: Kind, opacity: f64) {
+    paint_sweep(image, kind, opacity, 1.0);
+}
+
+/// Reveal the success artwork clockwise from twelve o'clock, as in the native
+/// Multi Action progress image. Completion uses the ordinary timed full badge.
+pub fn paint_progress(image: &mut DynamicImage, percent: u8) {
+    if percent > 0 {
+        paint_sweep(image, Kind::Ok, 1.0, f64::from(percent.min(100)) / 100.0);
+    }
+}
+
+fn paint_sweep(image: &mut DynamicImage, kind: Kind, opacity: f64, sweep: f64) {
     if !opacity.is_finite() || opacity <= 0.0 {
         return;
     }
@@ -39,6 +51,12 @@ pub fn paint_with_opacity(image: &mut DynamicImage, kind: Kind, opacity: f64) {
                 for sx in 0..4 {
                     let px = (f64::from(x) + (f64::from(sx) + 0.5) / 4.0 - left) / size;
                     let py = (f64::from(y) + (f64::from(sy) + 0.5) / 4.0 - top) / size;
+                    if sweep < 1.0
+                        && (px - 0.5).atan2(0.5 - py).rem_euclid(std::f64::consts::TAU)
+                            > sweep * std::f64::consts::TAU
+                    {
+                        continue;
+                    }
                     if let Some(color) = sample(kind, px, py) {
                         for (total, channel) in sum.iter_mut().zip(color) {
                             *total += u32::from(channel);
@@ -97,6 +115,36 @@ fn segment_distance(x: f64, y: f64, start: [f64; 2], end: [f64; 2]) -> f64 {
 mod tests {
     use super::*;
     use image::{Rgb, RgbImage, RgbaImage};
+
+    #[test]
+    fn progress_reveals_clockwise_sector_and_full_image_matches_success() {
+        let base =
+            DynamicImage::ImageRgba8(RgbaImage::from_pixel(120, 120, Rgba([12, 20, 35, 150])));
+        let mut empty = base.clone();
+        paint_progress(&mut empty, 0);
+        assert_eq!(empty.to_rgba8(), base.to_rgba8());
+        for (percent, limit_y) in [(25, 60), (50, 120)] {
+            let mut progress = base.clone();
+            paint_progress(&mut progress, percent);
+            let mut changed = 0;
+            for y in 0..120 {
+                for x in 0..120 {
+                    if x < 60 || y >= limit_y {
+                        assert_eq!(progress.get_pixel(x, y), base.get_pixel(x, y));
+                    }
+                    if progress.get_pixel(x, y) != base.get_pixel(x, y) {
+                        changed += 1;
+                    }
+                }
+            }
+            assert!(changed > 100);
+        }
+        let mut full = base.clone();
+        let mut success = base;
+        paint_progress(&mut full, 100);
+        paint(&mut success, Kind::Ok);
+        assert_eq!(full.to_rgba8(), success.to_rgba8());
+    }
 
     #[test]
     fn requested_sizes_keep_dimensions_and_outside_pixels_exact() {

@@ -9,6 +9,7 @@ pub(super) struct Display<'a> {
     pub plugins: &'a [Plugin],
     pub badges: &'a HashMap<String, feedback::Badge>,
     pub now: Duration,
+    pub progress: &'a BTreeMap<String, u8>,
 }
 impl Display<'_> {
     /// Child models have their own editor images even when they share a physical
@@ -163,7 +164,14 @@ impl Display<'_> {
                 placeholder.background = None;
                 display::dial_image(self.renderer, &mut placeholder, None, self.actions)?
             } else if target.uuid == crate::action_trigger::UUID {
-                trigger::picture(self.renderer, self.actions, target, self.badges, self.now)?
+                trigger::picture(
+                    self.renderer,
+                    self.actions,
+                    target,
+                    self.badges,
+                    self.now,
+                    self.progress,
+                )?
             } else {
                 display::dial_image(self.renderer, target, root, self.actions)?
             };
@@ -189,7 +197,13 @@ impl Display<'_> {
                 &appearance::style(slot, self.actions),
                 size,
             );
-            feedback::paint_key(self.badges, &mut picture, slot, self.now);
+            feedback::paint_key(
+                self.badges,
+                &mut picture,
+                slot,
+                self.now,
+                self.progress.get(&slot.context).copied(),
+            );
             picture
         };
         if slot.controller == "Encoder" {

@@ -372,8 +372,7 @@ network operation has finished.
 
 Sequence rows include live child images and temporary plugin warning/success
 badges. These stay attached to each child when draft steps are reordered. See
-[Multi Action feedback](docs/MULTI_ACTION_FEEDBACK.md) for the separate parent
-completion/progress behavior still to be implemented.
+[Multi Action feedback](docs/MULTI_ACTION_FEEDBACK.md) for parent progress, completion checks and their global preference.
 
 ## Dial Stacks
 

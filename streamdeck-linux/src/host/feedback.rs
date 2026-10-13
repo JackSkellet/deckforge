@@ -160,12 +160,15 @@ pub(super) fn paint_key(
     image: &mut DynamicImage,
     slot: &Slot,
     now: Duration,
+    progress: Option<u8>,
 ) {
     if let Some(badge) = badges
         .get(&slot.context)
         .filter(|badge| badge.started <= now && now < badge.expires)
     {
         crate::feedback::paint(image, badge.kind);
+    } else if let Some(percent) = progress {
+        crate::feedback::paint_progress(image, percent);
     }
 }
 

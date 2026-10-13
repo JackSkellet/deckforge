@@ -553,6 +553,20 @@ export function Preferences({
           ) : (
             <p>Reading startup preference…</p>
           )}
+          <hr />
+          <h3>Action feedback</h3>
+          <Check
+            label="Show Multi Action progress and completion check marks"
+            checked={snapshot.multi_action_feedback ?? true}
+            onChange={(enabled) =>
+              run({
+                command: "multi_action_feedback",
+                enabled,
+                baseline: snapshot.multi_action_feedback ?? true,
+              })
+            }
+          />
+          <p className="hint">Applies to Multi Actions on all devices.</p>
           {snapshot.plugin_language && (
             <>
               <hr />
