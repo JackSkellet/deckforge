@@ -270,6 +270,13 @@ impl Host {
         pressed: bool,
         cancelled: bool,
     ) -> Result<()> {
+        if slot.uuid == library::BACK_FOLDER {
+            if cancelled {
+                self.folder_back_holds.remove(&slot.context);
+                return Ok(());
+            }
+            return self.folder_back_button(&slot.context, pressed, !pressed);
+        }
         if container(&slot.uuid) {
             if cancelled {
                 self.cancel_multi(&slot.context);
@@ -318,7 +325,6 @@ impl Host {
                         true,
                     );
                 }
-                library::BACK_FOLDER => return self.folder_back(),
                 "com.elgato.streamdeck.page.goto" => return self.goto_page(&slot.settings),
                 "com.elgato.streamdeck.page.next" => return self.step_page(1),
                 "com.elgato.streamdeck.page.previous" => return self.step_page(-1),

@@ -6,7 +6,10 @@ choose their own whole-second delay from 0 to 60. Save applies the draft.
 
 A key release starts the delay. Another press cancels it; releasing that action
 can start a new delay. Zero returns immediately after dispatching the action's
-release. Nested folders return to their immediate parent. Navigation actions
+release. Nested folders return to their immediate parent on a short Back press. Holding
+Back for more than 500 ms returns to the root of the current folder path on
+release. This also works when Back is assigned through an Action Trigger or
+Action Wheel. Navigation actions
 are excluded, so opening another folder does not start the old folder's timer.
 Timers belong to the device that received the input. Selecting another device in
 the editor does not move a running countdown. Leaving the page, removing its Back action, disconnecting the device
@@ -79,7 +82,17 @@ remain unverified. Nested child-action override semantics, timing relative to lo
 Multi Actions, and original dial/touch dispatch need further reference comparison.
 Top-level dial/touch actions use the same device-owned deadline.
 
-A separate navigation gap was recovered at `0x140389230`: holding Back for more
-than 500 ms resolves the root page, while a short release returns one level. That
-long-press behavior is not implemented yet. Current Back input returns one level.
-The retained follow-up evidence is in `evidence/folder-exit/finish-rea-bundle.json`.
+The Back long-press contract comes from `0x140389230`: strictly more than 500 ms
+resolves the root page; a short release returns one level. Press ownership and
+start time are retained per device and action. Repeated down packets do not reset
+the clock. Page/profile/path changes, hidden actions and device disconnection
+retire the gesture. A release with no matching press does not navigate, including
+when the root slot now contains an Open folder action.
+
+Tests cover the exact threshold, nested return to a non-first root page, pinned
+Back actions across path changes, device isolation/disconnection and held Back
+through Action Trigger. The native workflow checks short and long key presses,
+duplicate release rejection and the adapted dial gesture. The original Windows
+Plus whole-profile navigation/export/reimport process check also passes. Physical
+long-press acceptance and the Windows execution path remain unverified.
+The retained reference is `evidence/folder-exit/finish-rea-bundle.json`.

@@ -457,6 +457,7 @@ struct Host {
     triggers: trigger::Runtime,
     wheels: wheel::Runtime,
     folder_exit: Option<folder_exit::Pending>,
+    folder_back_holds: HashMap<String, folder_exit::BackPress>,
     virtual_suppressed: HashSet<String>,
     volume: Option<crate::volume::Worker>,
     volume_state: Option<crate::volume::State>,
@@ -975,6 +976,7 @@ impl Host {
             .collect();
         for (control, context) in departing {
             self.brightness_repeats.remove(&context);
+            self.folder_back_holds.remove(&context);
             if let Some(slot) = self.slots.iter().find(|slot| slot.context == context)
                 && slot.uuid == crate::system_actions::HOTKEY
                 && let Some(worker) = &self.system_actions
@@ -1041,7 +1043,7 @@ impl Host {
         if matches!(control, HeldControl::Key(_)) {
             match slot.uuid.as_str() {
                 library::OPEN_FOLDER => {
-                    if !pressed {
+                    if owned_release {
                         self.select_page(
                             slot.settings["ProfileUUID"]
                                 .as_str()
@@ -1052,25 +1054,22 @@ impl Host {
                     return Ok(());
                 }
                 library::BACK_FOLDER => {
-                    if !pressed {
-                        self.folder_back()?;
-                    }
-                    return Ok(());
+                    return self.folder_back_button(&slot.context, pressed, owned_release);
                 }
                 "com.elgato.streamdeck.page.next" => {
-                    if !pressed {
+                    if owned_release {
                         self.step_page(1)?;
                     }
                     return Ok(());
                 }
                 "com.elgato.streamdeck.page.previous" => {
-                    if !pressed {
+                    if owned_release {
                         self.step_page(-1)?;
                     }
                     return Ok(());
                 }
                 "com.elgato.streamdeck.page.goto" => {
-                    if !pressed {
+                    if owned_release {
                         self.goto_page(&slot.settings)?;
                     }
                     return Ok(());
@@ -2717,6 +2716,7 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
         triggers: trigger::Runtime::default(),
         wheels: wheel::Runtime::default(),
         folder_exit: None,
+        folder_back_holds: HashMap::new(),
         virtual_suppressed: HashSet::new(),
         stack_gestures: HashMap::new(),
         stack_cooldown: HashMap::new(),
@@ -3254,6 +3254,7 @@ mod tests {
             triggers: trigger::Runtime::default(),
             wheels: wheel::Runtime::default(),
             folder_exit: None,
+            folder_back_holds: HashMap::new(),
             virtual_suppressed: HashSet::new(),
             stack_gestures: HashMap::new(),
             stack_cooldown: HashMap::new(),

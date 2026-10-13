@@ -57,8 +57,27 @@ button('Reset action overrides (1)').click();(await until(()=>button('Reset over
 await until(async()=>(await counter()).raw.AutoExit==null,'reset to inheritance');
 if((await back()).raw.AutoExit.Delay!==0)throw Error('Reset changed the folder default');
 await tap(1);await depth(0);
+const rootPage=(await snapshot()).library.active_page;
+await tap(0);await depth(1);
+await command({command:'folder_create',name:'Inner',index:2});await tap(2);await depth(2);
+const innerPage=(await snapshot()).library.active_page;
+await command({command:'folder_create',name:'Deepest',index:2});await tap(2);await depth(3);
+await tap(0);await depth(2);
+if((await snapshot()).library.active_page!==innerPage)throw Error('Short Back missed the parent');
+await key(0,false);if((await snapshot()).library.folder_depth!==2)throw Error('Duplicate release navigated');
+await key(0,true);await pause(650);if((await snapshot()).library.folder_depth!==2)throw Error('Back navigated before release');
+await key(0,false);await depth(0);
+if((await snapshot()).library.active_page!==rootPage)throw Error('Long Back missed the root');
+await key(0,false);if((await snapshot()).library.folder_depth!==0)throw Error('Stray release opened root folder');
+await tap(0);await tap(2);await tap(2);await depth(3);
+await command({command:'assign',controller:'Encoder',index:0,uuid:'com.elgato.streamdeck.keys.adaptor'});
+const trigger=(await snapshot()).slots.find(s=>s.uuid==='com.elgato.streamdeck.keys.adaptor');
+await command({command:'trigger_save',context:trigger.context,raw:{Actions:[{},{UUID:'com.elgato.streamdeck.profile.backtoparent',ActionID:'back',Settings:{},States:[{}]},{}]}});
+await command({command:'input',event:'dialDown',index:0});await pause(650);
+await command({command:'input',event:'dialUp',index:0});await depth(0);
+if((await snapshot()).library.active_page!==rootPage)throw Error('Adapted Back missed the root');
 await command({command:'export_profile',path:__EXPORT__});
-return {countdown_png:moving,native_settings:true,countdown_visible:true,countdown_restored:true,reset_confirmed:true,reset_cancelled:true,immediate_exit:true,disabled_override:true,held_cancellation:true,delay_ms:elapsed,usb_access:false};
+return {back_short_one_level:true,back_hold_root:true,trigger_back_hold_root:true,unowned_release_ignored:true,countdown_png:moving,native_settings:true,countdown_visible:true,countdown_restored:true,reset_confirmed:true,reset_cancelled:true,immediate_exit:true,disabled_override:true,held_cancellation:true,delay_ms:elapsed,usb_access:false};
 '''
 
 def main():

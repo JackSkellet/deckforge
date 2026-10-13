@@ -1,6 +1,23 @@
 //! Original action-level AutoExit settings and device-owned folder deadlines.
 use super::*;
 
+pub(super) struct BackPress {
+    started: Duration,
+    profile: String,
+    page: String,
+    folders: Vec<String>,
+}
+impl BackPress {
+    fn held_long(&self, now: Duration) -> bool {
+        now.saturating_sub(self.started) > Duration::from_millis(500)
+    }
+    fn belongs_to(&self, library: &Library) -> bool {
+        self.profile == library.active_profile
+            && self.page == library.active_page
+            && self.folders == library.folders
+    }
+}
+
 #[derive(Clone)]
 pub(super) struct Pending {
     profile: String,
@@ -51,6 +68,35 @@ fn delay(raw: &Value, parent: &Value) -> Option<Duration> {
 }
 
 impl Host {
+    pub(super) fn folder_back_button(
+        &mut self,
+        context: &str,
+        pressed: bool,
+        owned_release: bool,
+    ) -> Result<()> {
+        if pressed {
+            self.folder_back_holds
+                .entry(context.into())
+                .or_insert_with(|| BackPress {
+                    started: self.multi_clock.elapsed(),
+                    profile: self.library.active_profile.clone(),
+                    page: self.library.active_page.clone(),
+                    folders: self.library.folders.clone(),
+                });
+        } else if let Some(hold) = self.folder_back_holds.remove(context)
+            && owned_release
+            && hold.belongs_to(&self.library)
+        {
+            if hold.held_long(self.multi_clock.elapsed()) {
+                if let Some(root) = self.library.folders.first().cloned() {
+                    self.select_page(&root, false)?;
+                }
+            } else {
+                self.folder_back()?;
+            }
+        }
+        Ok(())
+    }
     pub(super) fn reset_folder_exits(&mut self, request: &Value) -> Result<()> {
         self.editable()?;
         let context = request["context"].as_str().context("Back action missing")?;
@@ -162,6 +208,14 @@ impl Host {
                 .any(|s| s.context == pending.back && s.uuid == library::BACK_FOLDER)
     }
     pub(super) fn retain_folder_exit(&mut self) {
+        self.folder_back_holds.retain(|context, hold| {
+            hold.belongs_to(&self.library)
+                && self
+                    .slots
+                    .iter()
+                    .flat_map(Slot::visible_flatten)
+                    .any(|s| s.context == *context && s.uuid == library::BACK_FOLDER)
+        });
         if self
             .folder_exit
             .as_ref()
@@ -622,6 +676,208 @@ mod tests {
             .unwrap();
         assert_eq!(frame(&receiver), original);
         assert!(host.next_folder_exit().is_none());
+    }
+    fn enter_child(host: &mut Host) {
+        host.library_command(&json!({"command":"folder_create","name":"Inner","index":2}))
+            .unwrap();
+        host.input(InputEvent::Key {
+            index: 2,
+            pressed: true,
+        })
+        .unwrap();
+        host.input(InputEvent::Key {
+            index: 2,
+            pressed: false,
+        })
+        .unwrap();
+    }
+    #[test]
+    fn back_threshold_is_strict_and_repeated_down_keeps_the_original_start() {
+        let root = tempfile::tempdir().unwrap();
+        let mut host = fixture(root.path());
+        host.input(InputEvent::Key {
+            index: 0,
+            pressed: true,
+        })
+        .unwrap();
+        let id = host
+            .slots
+            .iter()
+            .find(|s| s.uuid == library::BACK_FOLDER)
+            .unwrap()
+            .context
+            .clone();
+        let started = host.folder_back_holds[&id].started;
+        assert!(!host.folder_back_holds[&id].held_long(started + Duration::from_millis(500)));
+        assert!(host.folder_back_holds[&id].held_long(started + Duration::from_nanos(500_000_001)));
+        host.input(InputEvent::Key {
+            index: 0,
+            pressed: true,
+        })
+        .unwrap();
+        assert_eq!(host.folder_back_holds[&id].started, started);
+    }
+    #[test]
+    fn short_back_returns_one_level_and_long_back_returns_the_actual_root_page() {
+        let root = tempfile::tempdir().unwrap();
+        let mut host = fixture(root.path());
+        let outer = host.library.active_page.clone();
+        host.library_command(&json!({"command":"page_create","name":"Second top page"}))
+            .unwrap();
+        let actual_root = host.library.active_page.clone();
+        assert_ne!(actual_root, host.library.current().unwrap().page_order[0]);
+        host.select_page(&outer, true).unwrap();
+        enter_child(&mut host);
+        let inner = host.library.active_page.clone();
+        enter_child(&mut host);
+        host.input(InputEvent::Key {
+            index: 0,
+            pressed: true,
+        })
+        .unwrap();
+        host.input(InputEvent::Key {
+            index: 0,
+            pressed: false,
+        })
+        .unwrap();
+        assert_eq!(host.library.active_page, inner);
+        assert_eq!(host.library.folders.len(), 2);
+        host.input(InputEvent::Key {
+            index: 0,
+            pressed: false,
+        })
+        .unwrap();
+        assert_eq!(
+            host.library.active_page, inner,
+            "Late duplicate release must do nothing"
+        );
+        host.input(InputEvent::Key {
+            index: 0,
+            pressed: true,
+        })
+        .unwrap();
+        let started = host.folder_back_holds.values().next().unwrap().started;
+        host.multi_clock = std::time::Instant::now() - (started + Duration::from_millis(600));
+        assert_eq!(
+            host.library.active_page, inner,
+            "Holding alone must not navigate"
+        );
+        host.input(InputEvent::Key {
+            index: 0,
+            pressed: false,
+        })
+        .unwrap();
+        assert_eq!(host.library.active_page, actual_root);
+        assert!(host.library.folders.is_empty());
+        assert!(host.folder_back_holds.is_empty());
+    }
+    #[test]
+    fn back_holds_do_not_cross_navigation_paths_devices_or_disconnects() {
+        let root = tempfile::tempdir().unwrap();
+        let mut host = fixture(root.path());
+        let device = host.device.clone();
+        let folder = host.library.active_page.clone();
+        let back = host
+            .slots
+            .iter()
+            .find(|s| s.uuid == library::BACK_FOLDER)
+            .unwrap()
+            .context
+            .clone();
+        host.library_command(&json!({"command":"slot_pin","context":back,"pinned":true}))
+            .unwrap();
+        host.input(InputEvent::Key {
+            index: 0,
+            pressed: true,
+        })
+        .unwrap();
+        host.select_page(&folder, true).unwrap();
+        assert!(
+            host.folder_back_holds.is_empty(),
+            "Even a retained pinned key loses a hold when its folder path changes"
+        );
+        host.input(InputEvent::Key {
+            index: 0,
+            pressed: false,
+        })
+        .unwrap();
+        assert_eq!(host.library.folders.len(), 2);
+        host.input(InputEvent::Key {
+            index: 0,
+            pressed: true,
+        })
+        .unwrap();
+        host.add_simulated_device("other", Model::Plus).unwrap();
+        host.with_device("other", |h| {
+            assert!(h.folder_back_holds.is_empty());
+            h.release_device_holds();
+            Ok(())
+        })
+        .unwrap();
+        host.with_device(&device, |h| {
+            assert_eq!(h.folder_back_holds.len(), 1);
+            h.release_device_holds();
+            assert!(h.folder_back_holds.is_empty());
+            h.input(InputEvent::Key {
+                index: 0,
+                pressed: false,
+            })?;
+            assert_eq!(h.library.folders.len(), 2);
+            Ok(())
+        })
+        .unwrap();
+    }
+    #[test]
+    fn action_trigger_back_uses_the_same_hold_and_cancel_contract() {
+        let root = tempfile::tempdir().unwrap();
+        let mut host = fixture(root.path());
+        let target = host.library.folders[0].clone();
+        enter_child(&mut host);
+        host.actions.push(trigger::action());
+        host.assign("Encoder", 0, crate::action_trigger::UUID)
+            .unwrap();
+        let id = host
+            .slots
+            .iter()
+            .find(|s| s.uuid == crate::action_trigger::UUID)
+            .unwrap()
+            .context
+            .clone();
+        host.save_trigger(&id,json!({"Actions":[{}, {"UUID":library::BACK_FOLDER,"ActionID":"back","Settings":{},"States":[{}]}, {}]})).unwrap();
+        host.input(InputEvent::DialPress {
+            index: 0,
+            pressed: true,
+        })
+        .unwrap();
+        host.poll_folder_exit();
+        assert_eq!(
+            host.folder_back_holds.len(),
+            1,
+            "Visible nested Back must keep its ownership"
+        );
+        host.release_device_holds();
+        assert!(host.folder_back_holds.is_empty());
+        host.input(InputEvent::DialPress {
+            index: 0,
+            pressed: false,
+        })
+        .unwrap();
+        assert_eq!(host.library.folders.len(), 2);
+        host.input(InputEvent::DialPress {
+            index: 0,
+            pressed: true,
+        })
+        .unwrap();
+        let started = host.folder_back_holds.values().next().unwrap().started;
+        host.multi_clock = std::time::Instant::now() - (started + Duration::from_millis(600));
+        host.input(InputEvent::DialPress {
+            index: 0,
+            pressed: false,
+        })
+        .unwrap();
+        assert_eq!(host.library.active_page, target);
+        assert!(host.folder_back_holds.is_empty());
+        assert!(host.library.folders.is_empty());
     }
     #[test]
     fn original_record_inheritance_and_disabled_overrides() {
