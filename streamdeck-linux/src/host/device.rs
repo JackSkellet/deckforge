@@ -169,6 +169,7 @@ impl Host {
         // Only physical ownership is lost when the USB transport disappears.
         self.disconnect_trigger_buttons();
         self.wheels.stop_turns();
+        self.folder_exit = None;
         self.cancel_departing_inputs(&HashSet::new());
         self.cancel_departing_stacks(&HashSet::new());
         self.dial_pressed.fill(false);

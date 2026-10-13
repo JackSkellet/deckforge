@@ -478,6 +478,23 @@ export function saveRequests(
           },
     );
   }
+  if (draft.rawEdited) {
+    let base = slot.raw.AutoExit;
+    try {
+      base = JSON.parse(draft.source)[2]?.AutoExit;
+    } catch {
+      /* Legacy draft. */
+    }
+    if (
+      JSON.stringify(base ?? null) !==
+      JSON.stringify(draft.raw.AutoExit ?? null)
+    )
+      requests.push({
+        command: "folder_exit",
+        context: slot.context,
+        auto_exit: draft.raw.AutoExit ?? null,
+      });
+  }
   return requests;
 }
 export function filteredActions(

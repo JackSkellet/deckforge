@@ -632,6 +632,7 @@ impl Host {
             }
         }
         self.slots = next;
+        self.retain_folder_exit();
         for index in 0..self.slots.len() {
             if self.slots[index].background.is_none() {
                 let slot = self.slots[index].clone();

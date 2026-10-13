@@ -842,7 +842,7 @@ export function SettingsFields({
     "com.elgato.streamdeck.page.indicator":
       "Displays the current page number. No action-specific settings.",
     "com.elgato.streamdeck.profile.backtoparent":
-      "Returns from the current folder. No action-specific settings.",
+      "Returns from the current folder. Configure the folder default under Folder auto-exit.",
   };
   if (noOptions[uuid]) special = <p className="hint">{noOptions[uuid]}</p>;
   if (uuid.endsWith(".page.goto"))

@@ -44,6 +44,7 @@ mod display;
 mod display_targets;
 mod export;
 mod feedback;
+mod folder_exit;
 mod inspectors;
 mod library;
 mod links;
@@ -455,6 +456,7 @@ struct Host {
     trigger_descriptions: HashMap<String, Value>,
     triggers: trigger::Runtime,
     wheels: wheel::Runtime,
+    folder_exit: Option<folder_exit::Pending>,
     virtual_suppressed: HashSet<String>,
     volume: Option<crate::volume::Worker>,
     volume_state: Option<crate::volume::State>,
@@ -1218,6 +1220,14 @@ impl Host {
         if self.saver_input(&event)? {
             return Ok(());
         }
+        let pending = self.folder_exit_input(&event);
+        let result = self.dispatch_input(event);
+        if result.is_ok() {
+            self.arm_folder_exit(pending);
+        }
+        result
+    }
+    fn dispatch_input(&mut self, event: InputEvent) -> Result<()> {
         self.log(format!("{event:?}"));
         let (index, name, extra) = match event {
             InputEvent::Sensor { index, pressed } => {
@@ -2035,6 +2045,7 @@ fn apply_control_local(host: &mut Host, r: Value) -> Result<()> {
             };
             host.input(event)
         }
+        "folder_exit" => host.save_folder_exit(&r),
         "wheel_save" => host.save_wheel_draft(
             r["context"].as_str().context("Context missing")?,
             r["raw"].clone(),
@@ -2698,6 +2709,7 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
         trigger_descriptions: HashMap::new(),
         triggers: trigger::Runtime::default(),
         wheels: wheel::Runtime::default(),
+        folder_exit: None,
         virtual_suppressed: HashSet::new(),
         stack_gestures: HashMap::new(),
         stack_cooldown: HashMap::new(),
@@ -2959,6 +2971,7 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
                         host.poll_multi();
                         host.poll_triggers();
                         host.poll_wheels();
+                        host.poll_folder_exit();
                         host.poll_feedback();
                         host.poll_brightness();
                         host.poll_saver();
@@ -2968,6 +2981,7 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
                             .into_iter()
                             .chain(host.triggers.repeater.next_due())
                             .chain(host.wheels.next_due())
+                            .chain(host.folder_exit.as_ref().map(|p| p.due))
                             .chain(host.next_feedback())
                             .chain(host.next_brightness())
                             .chain(host.next_saver())
@@ -3232,6 +3246,7 @@ mod tests {
             trigger_descriptions: HashMap::new(),
             triggers: trigger::Runtime::default(),
             wheels: wheel::Runtime::default(),
+            folder_exit: None,
             virtual_suppressed: HashSet::new(),
             stack_gestures: HashMap::new(),
             stack_cooldown: HashMap::new(),

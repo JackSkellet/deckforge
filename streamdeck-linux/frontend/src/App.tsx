@@ -21,6 +21,7 @@ import {
   type Snapshot,
 } from "./model";
 import { Field, Check, SettingsFields } from "./Fields";
+import { FolderExit } from "./FolderExit";
 import { Sequence } from "./Sequence";
 import { AudioMixer } from "./Mixer";
 import { ActionEdit, isEditingTarget } from "./ActionEdit";
@@ -1481,6 +1482,30 @@ export default function App() {
                         Your draft is kept; saving applies your changes.
                       </p>
                     )}
+                    {snapshot.library.folder_depth > 0 &&
+                      ![
+                        "com.elgato.streamdeck.profile.openchild",
+                        "com.elgato.streamdeck.page.next",
+                        "com.elgato.streamdeck.page.previous",
+                        "com.elgato.streamdeck.page.goto",
+                        "com.elgato.streamdeck.page.indicator",
+                      ].includes(slot.uuid) && (
+                        <FolderExit
+                          raw={draft.raw}
+                          parent={
+                            snapshot.slots.find(
+                              (s) =>
+                                s.uuid ===
+                                "com.elgato.streamdeck.profile.backtoparent",
+                            )?.raw
+                          }
+                          back={
+                            slot.uuid ===
+                            "com.elgato.streamdeck.profile.backtoparent"
+                          }
+                          onChange={(raw) => change({ raw })}
+                        />
+                      )}
                     {isContainer(slot.uuid) ? (
                       <Sequence
                         folderPages={folderPages}
