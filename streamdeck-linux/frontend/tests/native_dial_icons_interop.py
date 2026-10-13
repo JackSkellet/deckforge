@@ -11,6 +11,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+from PIL import Image
 
 PROJECT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT / 'tests'))
@@ -32,12 +33,15 @@ await until(()=>icon()?.complete&&icon().naturalWidth>0,'native static icon deco
 const lcd=()=>dial()?.querySelector(':scope > img');
 if(model==='studio'&&lcd())throw Error('Screenless dial has fake LCD');
 if(model==='plus'&&!lcd())throw Error('Plus LCD missing');
+const checkPixel=(image,expected)=>{const canvas=document.createElement('canvas');canvas.width=image.naturalWidth;canvas.height=image.naturalHeight;const ctx=canvas.getContext('2d');ctx.drawImage(image,0,0);const pixel=ctx.getImageData(Math.floor(canvas.width/2),Math.floor(canvas.height/2),1,1).data;if(expected.some((value,i)=>Math.abs(pixel[i]-value)>1))throw Error('Native artwork pixels differ: '+Array.from(pixel));};
+checkPixel(icon(),[8,16,36,255]);
 const initialLcd=initial.preview, initialLcdSrc=lcd()?.getAttribute('src')??null;
 let seq=0;
 const send=async commands=>{const current=await slot();await command({command:'settings',context:current.context,settings:{...current.settings,feedbackProbe:{nonce:'native-dial-'+(++seq),commands}}});};
-await send([{event:'setImage',payload:{image:'replacement.png'}}]);
+await send([{event:'setImage',payload:{image:__REPLACEMENT__}}]);
 const updated=await until(async()=>{const current=await slot();return current.software_icon!==initial.software_icon&&current},'software-only setImage');
 await until(()=>icon()?.getAttribute('src')==='data:image/png;base64,'+updated.software_icon&&icon().complete&&icon().naturalWidth>0,'changed native software icon');
+checkPixel(icon(),[185,22,180,255]);
 if(updated.preview!==initialLcd||(lcd()?.getAttribute('src')??null)!==initialLcdSrc)throw Error('setImage altered encoder LCD');
 let feedbackIndependent=false;
 if(model==='plus'){
@@ -48,7 +52,7 @@ if(model==='plus'){
 }
 const rect=icon().getBoundingClientRect(), knob=dial().querySelector('.dial-knob').getBoundingClientRect();
 if(rect.width<10||rect.height<10||rect.left<knob.left||rect.right>knob.right+1||rect.top<knob.top||rect.bottom>knob.bottom+1)throw Error('Software icon outside knob');
-return{model,manifest_fallback_decoded:true,setImage_software_only:true,setFeedback_lcd_only:feedbackIndependent,screenless:model==='studio',icon_dimensions:[icon().naturalWidth,icon().naturalHeight],knob_bounds:{width:knob.width,height:knob.height},usb_access:false};
+return{model,manifest_fallback_decoded:true,artwork_pixels_verified:true,setImage_software_only:true,setFeedback_lcd_only:feedbackIndependent,screenless:model==='studio',icon_dimensions:[icon().naturalWidth,icon().naturalHeight],knob_bounds:{width:knob.width,height:knob.height},usb_access:false};
 '''
 
 
@@ -56,10 +60,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--binary', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--image-format', choices=('png', 'webp'), default='png')
     args = parser.parse_args()
     binary, output = args.binary.resolve(strict=True), args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
-    report = {'ok': False, 'binary_sha256': hashlib.sha256(binary.read_bytes()).hexdigest(), 'models': []}
+    report = {'ok': False, 'binary_sha256': hashlib.sha256(binary.read_bytes()).hexdigest(), 'image_format': args.image_format, 'models': []}
     with tempfile.TemporaryDirectory(prefix='deckforge-native-dial-icons-') as temporary:
         root = Path(temporary)
         for model in ('plus', 'studio'):
@@ -67,10 +72,15 @@ def main():
             area.mkdir()
             plugin, _ = make_plugin(area / (PRIMARY + '.sdPlugin'), PRIMARY, PROJECT.parent / 'evidence/official-samples/counter/package.json')
             manifest = json.loads((plugin / 'manifest.json').read_text())
-            manifest['Actions'][1]['Encoder']['Icon'] = 'base.png'
+            if args.image_format == 'webp':
+                for name in ('base', 'replacement'):
+                    Image.open(plugin / (name + '.png')).save(plugin / (name + '.webp'), lossless=True)
+                # Explicit WebP paths must resolve their high-resolution variant too.
+                (plugin / 'base.webp').rename(plugin / 'base@2x.webp')
+            manifest['Actions'][1]['Encoder']['Icon'] = 'base.' + args.image_format
             (plugin / 'manifest.json').write_text(json.dumps(manifest))
             script, proof = area / 'fixture.js', area / 'proof.json'
-            script.write_text(SCRIPT.replace('__MODEL__', json.dumps(model)).replace('__PLUGIN__', json.dumps(PRIMARY)).replace('__ACTION__', json.dumps(PRIMARY + '.dial')))
+            script.write_text(SCRIPT.replace('__MODEL__', json.dumps(model)).replace('__PLUGIN__', json.dumps(PRIMARY)).replace('__ACTION__', json.dumps(PRIMARY + '.dial')).replace('__REPLACEMENT__', json.dumps('replacement.' + args.image_format)))
             env = environment(area)
             env.update(DECKFORGE_CAPTURE=str(output / (model + '.png')), DECKFORGE_WEBVIEW_TEST_SCRIPT=str(script), DECKFORGE_WEBVIEW_TEST_RESULT=str(proof))
             log_path = output / (model + '.log')

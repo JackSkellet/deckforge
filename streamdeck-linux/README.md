@@ -540,8 +540,9 @@ completion criterion replaces the desktop parity goal.
 
 1. Broader HTML/property-inspector workflows, local file controls and real-world
    plugin compatibility beyond the tested samples and SDK fixtures.
-2. Separate hardware/editor targets, inactive-state image/title updates, general
-   image animation, and native-reference visual validation of layout font/bar details.
+2. User-authored image animation and native-reference visual validation of layout
+   font/bar details. Separate hardware/editor targets and inactive-state updates
+   are implemented; static WebP now joins SVG, PNG and JPEG in the shared decoder.
 3. Windows acceptance of exported profiles, folder auto-exit, physical acceptance
    of Action Trigger, text/hotkey-switch actions, application activation, and automatic profile selection.
 4. Native Windows/macOS plugin binaries and platform-specific dependencies.

@@ -61,7 +61,10 @@ impl Display<'_> {
                 let image = plugin.and_then(|p| {
                     let path = Path::new(source);
                     let high_resolution = if path.extension().is_some_and(|ext| {
-                        matches!(ext.to_str(), Some("png" | "jpg" | "jpeg" | "svg"))
+                        matches!(
+                            ext.to_str(),
+                            Some("png" | "jpg" | "jpeg" | "svg" | "gif" | "webp")
+                        )
                     }) {
                         path.with_file_name(format!(
                             "{}@2x.{}",

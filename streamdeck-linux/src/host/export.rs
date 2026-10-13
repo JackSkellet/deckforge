@@ -913,7 +913,7 @@ fn embed_audio_resource(
 }
 
 fn original_image(root: &Path, source: &str) -> Result<Option<(Vec<u8>, String)>> {
-    for suffix in ["", ".png", ".jpg", ".svg", ".gif"] {
+    for suffix in display::IMAGE_SUFFIXES {
         let Ok(path) = safe_file(root, &format!("{source}{suffix}")) else {
             continue;
         };

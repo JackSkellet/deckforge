@@ -16,7 +16,7 @@ pub fn load(root: &Path, icon: &str) -> Result<egui::ColorImage> {
     ensure!(!icon.is_empty(), "No icon declared");
     let root = root.canonicalize()?;
     let mut last = None;
-    for suffix in ["", ".svg", ".png", ".jpg", ".jpeg"] {
+    for suffix in ["", ".svg", ".png", ".jpg", ".jpeg", ".webp"] {
         let path = root.join(format!("{icon}{suffix}"));
         if !path.exists() {
             continue;
@@ -130,6 +130,17 @@ mod tests {
         assert_eq!(icon.pixels[0].a(), 0);
         assert_eq!(icon.pixels[32 * 64 + 32], egui::Color32::RED);
     }
+    #[test]
+    fn webp_library_thumbnail_preserves_transparency() {
+        let root = tempfile::tempdir().unwrap();
+        image::RgbaImage::from_pixel(16, 8, image::Rgba([220, 30, 50, 128]))
+            .save(root.path().join("action.icon.webp"))
+            .unwrap();
+        let icon = load(root.path(), "action.icon").unwrap();
+        assert_eq!(icon.size, [64, 32]);
+        assert_eq!(icon.pixels[0].a(), 128);
+    }
+
     #[test]
     fn icon_paths_cannot_read_outside_the_plugin_or_special_files() {
         let root = tempfile::tempdir().unwrap();

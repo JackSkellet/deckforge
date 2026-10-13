@@ -1490,11 +1490,9 @@ fn load_image(root: &Path, source: &str) -> Result<DynamicImage> {
 
 fn state_image(root: &Path, states: &Value, state: u64) -> Option<DynamicImage> {
     let image = states.get(state as usize)?.get("Image")?.as_str()?;
-    load_image(root, image)
-        .or_else(|_| load_image(root, &format!("{image}.png")))
-        .or_else(|_| load_image(root, &format!("{image}.jpg")))
-        .or_else(|_| load_image(root, &format!("{image}.svg")))
-        .ok()
+    display::IMAGE_SUFFIXES
+        .iter()
+        .find_map(|suffix| load_image(root, &format!("{image}{suffix}")).ok())
 }
 
 async fn root(

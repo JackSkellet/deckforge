@@ -1,6 +1,10 @@
 //! Resolve plugin-owned layout/image resources once at the display boundary.
 use super::*;
 
+// Keep manifest lookup and profile export aligned, preserving the established
+// PNG/JPEG/SVG precedence for ambiguous extensionless asset names.
+pub(super) const IMAGE_SUFFIXES: &[&str] = &["", ".png", ".jpg", ".svg", ".gif", ".jpeg", ".webp"];
+
 pub(super) fn load_layout(root: Option<&Path>, name: &str) -> Result<Value> {
     let layout = if name.starts_with('$') {
         crate::layout::builtin(name)?
@@ -187,6 +191,26 @@ mod tests {
         assert_eq!(value["range"], json!({"min":-50,"max":100}));
         assert_eq!(value["value"], 12);
     }
+    #[test]
+    fn webp_preserves_alpha_and_enforces_image_limits() {
+        fn webp(width: u32, height: u32) -> Vec<u8> {
+            let pixels =
+                image::RgbaImage::from_pixel(width, height, image::Rgba([220, 30, 50, 128]));
+            let mut bytes = Vec::new();
+            image::codecs::webp::WebPEncoder::new_lossless(&mut bytes)
+                .encode(&pixels, width, height, image::ExtendedColorType::Rgba8)
+                .unwrap();
+            bytes
+        }
+        let bytes = webp(4, 3);
+        let decoded = decode_image(&bytes, false).unwrap().to_rgba8();
+        assert_eq!(decoded.dimensions(), (4, 3));
+        assert_eq!(decoded.get_pixel(2, 1).0, [220, 30, 50, 128]);
+        assert!(decode_image(&bytes[..bytes.len() / 2], false).is_err());
+        // Small compressed input must not bypass the shared allocation/dimension guard.
+        assert!(decode_image(&webp(8193, 1), false).is_err());
+    }
+
     #[test]
     fn svg_alpha_is_unpremultiplied_and_data_urls_decode() {
         let image=decode_image(br#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="8"><rect width="10" height="8" fill="red" opacity="0.5"/></svg>"#,true).unwrap().to_rgba8();

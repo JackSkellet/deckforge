@@ -14,6 +14,31 @@ JSON-null reset policies; exact original native behavior for those inputs has
 not been established. Invalid target, state and field types are rejected before
 publishing the replacement action.
 
+## Image formats
+
+The shared action decoder supports the documented SVG, PNG, JPEG and WebP
+formats for SDK file paths and data URLs. WebP lossless, lossy and alpha-bearing
+images use the existing input-size, dimension and allocation limits. Invalid
+SDK images are rejected before replacing the current display. Static WebP is
+also supported for action-library thumbnails, encoder software icons (including
+`@2x` variants), layout pixmaps and user-selected/imported artwork. Extensionless
+manifest lookup and export use the same suffix list, so WebP/JPEG artwork is
+preserved as its original bytes rather than silently flattened or omitted.
+
+`tests/image_formats_interop.py` calls the unchanged SDK 2.0.4 through a generated
+plugin. It verifies actual preview pixels, malformed-image rejection, dial
+feedback, and exported artwork after deleting the original file and restarting.
+`frontend/tests/native_dial_icons_interop.py --image-format webp` checks decoded
+pixels in native Plus/Studio windows and independence from the Plus LCD. Decoder
+and thumbnail tests cover alpha and dimension limits. These checks use simulated
+devices and do not establish physical WebP display acceptance.
+
+The [SDK key guide](https://docs.elgato.com/streamdeck/sdk/guides/keys/#images)
+explicitly excludes animation from `setImage`. This change supplies static WebP
+decoding, not animated playback. User-authored animated key artwork remains an
+open desktop feature; the existing first-frame fallback and screensaver policy
+are unchanged.
+
 ## Dial icons and touch displays
 
 The SDK's `DialAction.setImage` changes the action's circular icon in the editor.
