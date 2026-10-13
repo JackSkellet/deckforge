@@ -9,7 +9,7 @@ native WebKit windows. A separate headless diagnostic mode retains
 the earlier local web editor. No existing Stream Deck host, driver implementation,
 or application template is used.
 Generic USB, image, font, HTTP, WebSocket, archive and native browser libraries
-are dependencies. Linux HTML support uses system GTK3 and WebKitGTK4.1 libraries.
+are dependencies. Linux HTML support uses system GTK3 and WebKitGTK4.1 (2.40+) libraries.
 
 This is a working early compatibility build, **not a complete port of Elgato's
 application**. Its first targets are the unchanged official Counter and Layouts
@@ -626,6 +626,11 @@ Artifacts are in `../evidence/native/`. This proves the named native workflow,
 not full desktop parity or every control/OS integration.
 
 ## HTML and layout verification
+
+Native inspector file inputs now return the selected file's full Linux path,
+including unchanged `sdpi-file` controls. Multiple selection, File reading,
+cancel/reset and special-character filenames have native WebKit test coverage.
+See [file controls and remaining limits](docs/PLUGIN_FILE_CONTROLS.md).
 
 The native WebKit helper runs HTML backends hidden and opens property inspectors
 as native windows. Inspector identities are bound to one action. Settings/global

@@ -48,6 +48,7 @@ mod trigger_editor;
 mod volume;
 mod webview;
 mod webview_assets;
+mod webview_files;
 mod window;
 
 use anyhow::Result;

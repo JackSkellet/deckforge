@@ -74,6 +74,14 @@ pub fn run(options: WebviewOptions) -> Result<()> {
     let load_proxy = event_loop.create_proxy();
     let expected_url = url.clone();
     let builder = WebViewBuilder::new()
+        .with_initialization_script_for_main_only(
+            if options.visible {
+                crate::webview_files::script(&url[..url::Position::BeforePath])
+            } else {
+                String::new()
+            },
+            false,
+        )
         .with_custom_protocol(crate::webview_assets::SCHEME.into(), move |_, request| {
             assets.respond(request)
         })
@@ -126,6 +134,14 @@ pub fn run(options: WebviewOptions) -> Result<()> {
             .and_then(|context| context.security_manager())
             .context("Plugin browser security manager unavailable")?
             .register_uri_scheme_as_cors_enabled(crate::webview_assets::SCHEME);
+    }
+    #[cfg(target_os = "linux")]
+    if options.visible {
+        use wry::WebViewExtUnix;
+        crate::webview_files::install(
+            &webview.webview(),
+            url[..url::Position::BeforePath].to_owned(),
+        );
     }
     webview.load_url(url.as_str()).context("Load plugin HTML")?;
 
