@@ -139,6 +139,54 @@ afterEach(() => {
   delete window.deckforge;
 });
 describe("desktop interactions", () => {
+  it("merges a container checkbox against a snapshot arriving before its click handler runs", async () => {
+    const wheel = "com.elgato.streamdeck.keys.stack";
+    snapshot.slots = [
+      {
+        ...slot,
+        uuid: wheel,
+        name: "Action Wheel",
+        controller: "Encoder",
+        settings: { CurrentIdx: 1, InvertRotation: false },
+        raw: {
+          Settings: { CurrentIdx: 1, InvertRotation: false },
+          Actions: [],
+        },
+      } as Slot,
+    ];
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(
+      await screen.findByRole("button", { name: "Dial 1: Action Wheel" }),
+    );
+    await user.click(screen.getByText("Wheel options"));
+    const toggle = screen.getByRole("checkbox", { name: "Reverse rotation" });
+    act(() => {
+      snapshot.slots[0] = {
+        ...snapshot.slots[0],
+        settings: { CurrentIdx: 0, InvertRotation: false },
+        raw: {
+          Settings: { CurrentIdx: 0, InvertRotation: false },
+          Actions: [],
+        },
+      };
+      emit(structuredClone(snapshot));
+      fireEvent.click(toggle);
+    });
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() =>
+      expect(request).toHaveBeenCalledWith(
+        "command",
+        expect.objectContaining({
+          command: "wheel_save",
+          raw: {
+            Settings: { CurrentIdx: 0, InvertRotation: true },
+            Actions: [],
+          },
+        }),
+      ),
+    );
+  });
   it("offers the global Multi Action feedback preference with stale-write protection", async () => {
     snapshot.multi_action_feedback = true;
     const user = userEvent.setup();

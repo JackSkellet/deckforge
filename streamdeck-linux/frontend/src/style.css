@@ -3041,3 +3041,10 @@ dialog.mixer-dialog {
   object-fit: contain;
   pointer-events: none;
 }
+
+.wheel-options {
+  padding: 10px 0;
+}
+.wheel-options .stack-options {
+  margin-top: 10px;
+}

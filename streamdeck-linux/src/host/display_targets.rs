@@ -9,6 +9,8 @@ pub(super) struct Display<'a> {
     pub plugins: &'a [Plugin],
     pub badges: &'a HashMap<String, feedback::Badge>,
     pub now: Duration,
+    pub wheels: &'a wheel::Runtime,
+    pub wheel_pressed: &'a HashSet<String>,
     pub progress: &'a BTreeMap<String, u8>,
 }
 impl Display<'_> {
@@ -56,6 +58,14 @@ impl Display<'_> {
             return png(&image.thumbnail(144, 144));
         }
         let action = self.actions.iter().find(|a| a.uuid == slot.uuid);
+        if slot.uuid == crate::action_wheel::UUID {
+            return Ok(slot
+                .children
+                .first()
+                .and_then(|g| g.get(wheel::current(slot)))
+                .map(|child| child.preview.clone())
+                .unwrap_or_default());
+        }
         let source = action
             .and_then(|a| a.raw["Encoder"]["Icon"].as_str())
             .filter(|s| !s.is_empty());
@@ -163,6 +173,8 @@ impl Display<'_> {
                 placeholder.feedback = json!({"title":"Unavailable"});
                 placeholder.background = None;
                 display::dial_image(self.renderer, &mut placeholder, None, self.actions)?
+            } else if target.uuid == crate::action_wheel::UUID {
+                wheel::picture(self, target)?
             } else if target.uuid == crate::action_trigger::UUID {
                 trigger::picture(
                     self.renderer,

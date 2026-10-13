@@ -168,7 +168,35 @@ impl Phase {
         }
     }
 }
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum PulseKind {
+    Trigger,
+    Wheel,
+}
+impl PulseKind {
+    fn hold(self) -> Duration {
+        if self == Self::Wheel {
+            crate::action_wheel::TAP_HOLD
+        } else {
+            HOLD
+        }
+    }
+    fn gap(self) -> Duration {
+        if self == Self::Wheel {
+            crate::action_wheel::TAP_GAP
+        } else {
+            GAP
+        }
+    }
+    fn pending(self) -> u8 {
+        if self == Self::Wheel { 1 } else { MAX_PENDING }
+    }
+    fn indices(self) -> usize {
+        if self == Self::Wheel { 512 } else { 3 }
+    }
+}
 struct Run {
+    kind: PulseKind,
     index: usize,
     pending: u8,
     phase: Phase,
@@ -188,29 +216,41 @@ impl Repeater {
     /// invalid indices/contexts and excess new contexts are no-ops; existing runs
     /// are never evicted to make room. Caller validates child presence before use.
     pub fn request(&mut self, parent: &str, index: usize, count: u8, now: Duration) -> Vec<Event> {
-        if parent.is_empty() || parent.len() > 4096 || index >= 3 || count == 0 {
+        self.request_kind(parent, index, count, now, PulseKind::Trigger)
+    }
+    pub fn request_kind(
+        &mut self,
+        parent: &str,
+        index: usize,
+        count: u8,
+        now: Duration,
+        kind: PulseKind,
+    ) -> Vec<Event> {
+        if parent.is_empty() || parent.len() > 4096 || index >= kind.indices() || count == 0 {
             return Vec::new();
         }
         let now = now.max(self.last_now);
         self.last_now = now;
         if let Some(run) = self.runs.get_mut(parent)
             && run.index == index
+            && run.kind == kind
         {
-            run.pending = run.pending.saturating_add(count).min(MAX_PENDING);
+            run.pending = run.pending.saturating_add(count).min(kind.pending());
             return Vec::new();
         }
         if !self.runs.contains_key(parent) && self.runs.len() >= MAX_CONTEXTS {
             return Vec::new();
         }
         let mut events = self.cancel(parent);
-        let Some(deadline) = now.checked_add(HOLD) else {
+        let Some(deadline) = now.checked_add(kind.hold()) else {
             return events;
         };
         self.runs.insert(
             parent.into(),
             Run {
                 index,
-                pending: count.min(MAX_PENDING) - 1,
+                kind,
+                pending: count.min(kind.pending()) - 1,
                 phase: Phase::Held(deadline),
             },
         );
@@ -238,7 +278,7 @@ impl Repeater {
                         index: run.index,
                     });
                     if run.pending > 0
-                        && let Some(deadline) = now.checked_add(GAP)
+                        && let Some(deadline) = now.checked_add(run.kind.gap())
                     {
                         run.phase = Phase::Gap(deadline);
                     } else {
@@ -247,7 +287,7 @@ impl Repeater {
                 }
                 Phase::Gap(_) => {
                     if run.pending > 0
-                        && let Some(deadline) = now.checked_add(HOLD)
+                        && let Some(deadline) = now.checked_add(run.kind.hold())
                     {
                         run.pending -= 1;
                         run.phase = Phase::Held(deadline);
@@ -310,6 +350,26 @@ mod tests {
             parent: parent.into(),
             index,
         }
+    }
+    #[test]
+    fn wheel_pulses_accept_later_children_and_use_their_own_timing() {
+        let mut pulses = Repeater::new();
+        assert!(pulses.request("wheel", 8, 1, Duration::ZERO).is_empty());
+        assert_eq!(
+            pulses.request_kind("wheel", 8, 1, Duration::ZERO, PulseKind::Wheel),
+            vec![Event::Press {
+                parent: "wheel".into(),
+                index: 8
+            }]
+        );
+        assert!(pulses.due(Duration::from_millis(99)).is_empty());
+        assert_eq!(
+            pulses.due(Duration::from_millis(100)),
+            vec![Event::Release {
+                parent: "wheel".into(),
+                index: 8
+            }]
+        );
     }
     #[test]
     fn original_fixture_fields_and_positional_children_survive_unchanged() {

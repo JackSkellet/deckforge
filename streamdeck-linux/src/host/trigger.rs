@@ -71,10 +71,44 @@ pub(super) fn picture(
 impl Host {
     fn trigger_child(&self, parent: &str, index: usize) -> Option<Slot> {
         self.visible_slot(parent)
-            .filter(|s| s.uuid == action_trigger::UUID)
-            .and_then(|s| s.children.get(index))
-            .and_then(|g| g.first())
+            .and_then(|slot| {
+                if slot.uuid == crate::action_wheel::UUID {
+                    slot.children.first()?.get(index)
+                } else if slot.uuid == action_trigger::UUID {
+                    slot.children.get(index)?.first()
+                } else {
+                    None
+                }
+            })
             .cloned()
+    }
+    pub(super) fn wheel_key_button(
+        &mut self,
+        slot: &Slot,
+        index: usize,
+        pressed: bool,
+    ) -> Result<()> {
+        if pressed {
+            self.trigger_edge(&slot.context, index, DIRECT, true, false)?;
+        } else {
+            let held: Vec<_> = self
+                .triggers
+                .held
+                .keys()
+                .filter(|(parent, _)| parent == &slot.context)
+                .map(|(_, index)| *index)
+                .collect();
+            for index in held {
+                self.trigger_edge(&slot.context, index, DIRECT, false, false)?;
+            }
+        }
+        self.render()
+    }
+    pub(super) fn key_pulse_active(&self, context: &str) -> bool {
+        self.triggers
+            .held
+            .keys()
+            .any(|(parent, _)| parent == context)
     }
     fn trigger_edge(
         &mut self,
@@ -136,6 +170,9 @@ impl Host {
             };
             (index, 1)
         };
+        self.adapter_pulse(slot, index, count)
+    }
+    pub(super) fn adapter_pulse(&mut self, slot: &Slot, index: usize, count: u8) -> Result<()> {
         let Some(child) = self.trigger_child(&slot.context, index) else {
             return Ok(());
         };
@@ -167,11 +204,24 @@ impl Host {
     }
     fn trigger_request(&mut self, parent: &str, index: usize, count: u8) -> Result<()> {
         self.triggers.targets.insert(parent.into(), index);
-        let events =
+        let kind = if self
+            .visible_slot(parent)
+            .is_some_and(|s| s.uuid == crate::action_wheel::UUID)
+        {
+            action_trigger::PulseKind::Wheel
+        } else {
+            action_trigger::PulseKind::Trigger
+        };
+        let now = self.multi_clock.elapsed();
+        let events = if kind == action_trigger::PulseKind::Wheel {
             self.triggers
                 .repeater
-                .request(parent, index, count, self.multi_clock.elapsed());
+                .request_kind(parent, index, count, now, kind)
+        } else {
+            self.triggers.repeater.request(parent, index, count, now)
+        };
         self.dispatch_triggers(events)?;
+        self.render()?;
         self.multi_notify.notify_one();
         Ok(())
     }
@@ -212,8 +262,12 @@ impl Host {
     }
     pub(super) fn poll_triggers(&mut self) {
         let events = self.triggers.repeater.due(self.multi_clock.elapsed());
+        let changed = !events.is_empty();
         if let Err(error) = self.dispatch_triggers(events) {
             self.log(format!("Action Trigger: {error:#}"));
+        }
+        if changed && let Err(error) = self.render() {
+            self.log(format!("Key pulse redraw: {error:#}"));
         }
     }
     pub(super) fn disconnect_trigger_buttons(&mut self) {
@@ -272,12 +326,18 @@ impl Host {
             .slots
             .iter()
             .flat_map(Slot::visible_flatten)
-            .filter(|s| s.uuid == action_trigger::UUID)
+            .filter(|s| s.uuid == action_trigger::UUID || s.uuid == crate::action_wheel::UUID)
             .filter(|old| {
                 next.iter()
                     .flat_map(Slot::visible_flatten)
                     .find(|s| s.context == old.context)
-                    .is_some_and(|new| new.raw != old.raw)
+                    .is_some_and(|new| {
+                        if old.uuid == crate::action_wheel::UUID {
+                            new.raw["Actions"] != old.raw["Actions"]
+                        } else {
+                            new.raw != old.raw
+                        }
+                    })
             })
             .map(|s| s.context.clone())
             .collect();

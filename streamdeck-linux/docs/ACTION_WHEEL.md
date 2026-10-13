@@ -1,9 +1,24 @@
 # Action Wheel contract and implementation plan
 
-The Action Wheel Rust model is implemented and tested in `src/action_wheel.rs`.
-It is not yet connected to the host or native editor, so Action Wheel remains
-unavailable in the installed application. Key Logic is a separate action and
-has not been implemented by this work.
+Action Wheel is connected to the Rust host and native editor. Add **Action Wheel**
+to a dial, then drop key actions onto its editor or use the action selector.
+**Show** selects a saved child for preview; **Wheel options** contains reverse
+rotation and the selected-title overlay. Child plugin inspectors remain available.
+Key Logic is a separate action and has not been implemented by this work.
+
+Rotation uses the recovered paced selection model. Dial presses send ordinary
+keyDown/keyUp; centre taps use owned 100 ms pulses. Every wheel child stays live,
+including those not among the currently drawn cards. The wheel can also be used
+inside a Dial Stack. User artwork on its software dial icon retains precedence.
+
+Option saves preserve live selection and child settings. Flat child edits merge
+by ActionID/UUID against their captured baseline, so a plugin count update is not
+replaced merely because a row moved or another setting changed. Native editor
+raw-record edits also merge against the latest draft if a snapshot arrives before
+the click callback runs. Structural/action-setting edits release held inputs;
+changing only wheel options preserves an owned press. If selection changes during
+a press, Linux releases the original child, preventing a stuck key. This ownership
+rule is not a claim that every overlapping Windows gesture follows the same path.
 
 Elgato's [Action Wheel guide](https://help.elgato.com/hc/en-us/articles/28742375481997-Elgato-Stream-Deck-Action-Wheel)
 and [usage overview](https://www.elgato.com/us/en/explorer/products/stream-deck/what-is-an-action-wheel-for-stream-deck/)
@@ -48,8 +63,10 @@ controller compatibility and recursion rules.
 | Press visual, `0x1402c6c20` | Front-card scale is 0.8 on down and 1.0 on up. Touch requests the named `press` animation. |
 
 Ignoring a new held turn does not cancel a rotation batch queued before the
-press. Exact overlapping push/touch ownership still needs a host-level policy
-and verification that keys are released on page change, removal and disconnect.
+press. The shared key-adapter ownership tracks physical and pulse inputs independently.
+Page changes and structural replacements cancel obsolete owners; disconnect
+releases physical ownership and stops queued rotation. Physical USB acceptance
+remains unverified.
 
 ## Rendering and indicators
 
@@ -76,7 +93,7 @@ press-animation details still need implementation and further trace.
 (`0x4b` becomes `0x64b`) and enables a separate selected-title item over
 `[16,10,168,72]`, using the child's font size, title alignment and colour at
 weight 600. The layered title fallback branches have been retained as evidence;
-they must not be replaced by an unrelated fixed label during integration.
+the implementation uses the selected child title and style, not the parent action name.
 
 `ControlOffset` belongs to the position-indicator viewport. Its model has a
 nine-item capacity, current index, offset and up to two small markers on each
@@ -114,11 +131,26 @@ Selected REA Evidence IDs:
 normalization, capped/replaced rotation batches, timer rearming, two-item hit
 priority and indicator visibility across all 512 supported child counts.
 The explicitly gated original-profile test also passes with `--include-ignored`:
-all six Clocks records survive parsing unchanged. These tests prove the model,
-not native editor, plugin lifecycle or hardware behavior.
+all six Clocks records survive parsing unchanged.
 
-Next integration work: register the builtin; hydrate/export/copy its flat child
-tree; connect paced rotation and 100 ms owned key pulses; render its card/title/
-indicator layout; add native sequence/settings controls; then verify with the
-unchanged Counter plugin, saved/reimported profiles and actual native windows.
-Keep the existing backend's page-change and disconnect input-release guarantees.
+Host tests check empty/two-card rendering, selected-card layering, owned releases,
+option updates during a press, per-device state and merging live child settings.
+`tests/action_wheel_interop.py` verifies six live key contexts, capped selection,
+inversion, 100 ms tap timing, page-hide release, nested Dial Stack pulse isolation,
+unchanged Counter execution, restart and generated/original profile round trips.
+`tests/native_action_wheel_interop.py` exercises actual WebKit card decoding,
+library drag/drop, Show, option saves and Counter updates across restart. A
+controlled repeated run checks the snapshot/edit race found by that fixture.
+All of these use simulated devices and temporary state; no physical acceptance
+is inferred.
+
+The existing Dial Stack workflow passes. The Action Trigger script completes its
+generated workflows but still stops at the separately known unsupported GRETSCH
+profile import. That entire script is not reported as passing.
+
+Remaining work includes smooth carousel interpolation, native blur/press-animation
+fidelity, the full native title-fallback matrix, rounded hit-test edge comparison,
+manual hardware acceptance, and broader nested-action/editor parity. The current
+renderer shows the recovered static layouts and a pressed-card scale; it does
+not claim pixel-identical Windows animation. Existing configured-slot drag/drop
+into the wheel and child appearance editing need further native UX coverage.

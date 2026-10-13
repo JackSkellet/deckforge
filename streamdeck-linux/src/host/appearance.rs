@@ -180,6 +180,7 @@ fn builtin_title_owner(uuid: &str) -> bool {
             crate::brightness::UUID
                 | crate::dial_stack::UUID
                 | crate::action_trigger::UUID
+                | crate::action_wheel::UUID
                 | screensaver::UUID
                 | library::OPEN_FOLDER
                 | library::BACK_FOLDER

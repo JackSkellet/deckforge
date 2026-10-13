@@ -90,6 +90,7 @@ pub(super) fn parse(path: &Path, reference: Option<&Path>) -> Result<(Plugin, Ve
             || uuid == multiaction::DELAY
             || uuid == crate::dial_stack::UUID
             || uuid == crate::action_trigger::UUID
+            || uuid == crate::action_wheel::UUID
         {
             bail!("Plugin action UUID is already owned by a built-in action: {uuid}");
         }

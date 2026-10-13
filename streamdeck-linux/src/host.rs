@@ -66,6 +66,7 @@ mod trigger;
 mod update_assets;
 mod updates;
 mod volume;
+mod wheel;
 use crate::device_model::Model;
 use inspectors::Inspector;
 use library::Library;
@@ -453,6 +454,7 @@ struct Host {
     badges: HashMap<String, feedback::Badge>,
     trigger_descriptions: HashMap<String, Value>,
     triggers: trigger::Runtime,
+    wheels: wheel::Runtime,
     virtual_suppressed: HashSet<String>,
     volume: Option<crate::volume::Worker>,
     volume_state: Option<crate::volume::State>,
@@ -664,6 +666,7 @@ impl Host {
         self.persist()
     }
     fn render(&mut self) -> Result<()> {
+        self.wheels.sync(&self.slots);
         self.update_mixer_feedback();
         self.update_volume_feedback();
         self.update_brightness_feedback();
@@ -700,7 +703,20 @@ impl Host {
         } else {
             self.multi.progress()
         };
+        let wheel_pressed: HashSet<_> = self
+            .slots
+            .iter()
+            .flat_map(Slot::visible_flatten)
+            .filter(|s| {
+                s.uuid == crate::action_wheel::UUID
+                    && (self.key_pulse_active(&s.context)
+                        || self.held.get(&HeldControl::Dial(s.index)) == Some(&s.context))
+            })
+            .map(|s| s.context.clone())
+            .collect();
         let display = display_targets::Display {
+            wheels: &self.wheels,
+            wheel_pressed: &wheel_pressed,
             progress: &progress,
             model: self.model,
             renderer: &self.renderer,
@@ -872,6 +888,8 @@ impl Host {
             } else {
                 if uuid == "com.elgato.streamdeck.page.goto" {
                     json!({"PageIndex":1})
+                } else if uuid == crate::action_wheel::UUID {
+                    wheel::defaults()
                 } else if uuid == crate::dial_stack::UUID {
                     stack::defaults()
                 } else {
@@ -909,7 +927,7 @@ impl Host {
         if multiaction::container(uuid) {
             slot.raw = json!({"Actions":[{"Actions":[]},{"Actions":[]}]});
         }
-        if uuid == crate::dial_stack::UUID {
+        if uuid == crate::dial_stack::UUID || uuid == crate::action_wheel::UUID {
             slot.raw = json!({"Actions":[],"Settings":slot.settings});
         }
         if uuid == crate::action_trigger::UUID {
@@ -1052,6 +1070,12 @@ impl Host {
         if slot.uuid == crate::dial_stack::UUID {
             if pressed || owned_release {
                 self.stack_button(&slot, pressed)?;
+            }
+            return Ok(());
+        }
+        if slot.uuid == crate::action_wheel::UUID {
+            if pressed || owned_release {
+                self.wheel_button(&slot, pressed)?;
             }
             return Ok(());
         }
@@ -1260,6 +1284,8 @@ impl Host {
         {
             if slot.uuid == crate::dial_stack::UUID {
                 self.stack_input(&slot, name, extra)?;
+            } else if slot.uuid == crate::action_wheel::UUID {
+                self.wheel_input(&slot, name, extra)?;
             } else if slot.uuid == crate::action_trigger::UUID {
                 self.trigger_input(&slot, name, extra)?;
             } else if mixer_actions::supported(&slot.uuid)
@@ -1555,6 +1581,8 @@ fn action_snapshot(host: &Host, action: &Action) -> Value {
     };
     let defaults = if action.uuid == "com.elgato.streamdeck.page.goto" {
         json!({"PageIndex":1})
+    } else if action.uuid == crate::action_wheel::UUID {
+        wheel::defaults()
     } else if action.uuid == multiaction::DELAY {
         json!({"delay":1000})
     } else {
@@ -1999,6 +2027,16 @@ fn apply_control_local(host: &mut Host, r: Value) -> Result<()> {
             };
             host.input(event)
         }
+        "wheel_save" => host.save_wheel_draft(
+            r["context"].as_str().context("Context missing")?,
+            r["raw"].clone(),
+            r.get("base"),
+        ),
+        "wheel_select" => host.select_wheel(
+            r["context"].as_str().context("Context missing")?,
+            usize::try_from(r["index"].as_u64().context("Index missing")?)?,
+            true,
+        ),
         "trigger_save" => host.save_trigger(
             r["context"].as_str().context("Missing context")?,
             r["raw"].clone(),
@@ -2458,6 +2496,7 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
     actions.extend(mixer_actions::definitions());
     actions.push(stack::action());
     actions.push(trigger::action());
+    actions.push(wheel::action());
     for (uuid, name, _) in crate::system_actions::definitions()
         .into_iter()
         .chain(crate::audio_output::definitions())
@@ -2650,6 +2689,7 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
         badges: HashMap::new(),
         trigger_descriptions: HashMap::new(),
         triggers: trigger::Runtime::default(),
+        wheels: wheel::Runtime::default(),
         virtual_suppressed: HashSet::new(),
         stack_gestures: HashMap::new(),
         stack_cooldown: HashMap::new(),
@@ -2910,6 +2950,7 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
                     let due = host.with_device(&device, |host| {
                         host.poll_multi();
                         host.poll_triggers();
+                        host.poll_wheels();
                         host.poll_feedback();
                         host.poll_brightness();
                         host.poll_saver();
@@ -2918,6 +2959,7 @@ async fn run(options: HostOptions, embedded: Option<EmbeddedChannels>) -> Result
                             .next_due()
                             .into_iter()
                             .chain(host.triggers.repeater.next_due())
+                            .chain(host.wheels.next_due())
                             .chain(host.next_feedback())
                             .chain(host.next_brightness())
                             .chain(host.next_saver())
@@ -3181,6 +3223,7 @@ mod tests {
             badges: HashMap::new(),
             trigger_descriptions: HashMap::new(),
             triggers: trigger::Runtime::default(),
+            wheels: wheel::Runtime::default(),
             virtual_suppressed: HashSet::new(),
             stack_gestures: HashMap::new(),
             stack_cooldown: HashMap::new(),

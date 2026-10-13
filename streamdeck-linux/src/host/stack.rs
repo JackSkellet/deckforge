@@ -84,6 +84,9 @@ impl Host {
         if !action.controllers.iter().any(|c| c == "Encoder") {
             bail!("Selected action does not support dials");
         }
+        if child.uuid == crate::action_wheel::UUID {
+            return self.wheel_input(&child, name, payload);
+        }
         if child.uuid == crate::action_trigger::UUID {
             return self.trigger_input(&child, name, payload);
         }

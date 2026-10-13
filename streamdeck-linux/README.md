@@ -396,6 +396,18 @@ implementing the container does not make the Windows Wave Link plugin work.
 The unchanged Layouts plugin is tested with multiple independent stack instances
 and actual PNG comparisons. Physical dial-stack acceptance remains pending.
 
+## Action Wheel
+
+Add **Action Wheel** to a dial to select and trigger key actions. Turn the dial
+or tap a side card to move; press or tap the centre to activate the selected key.
+Drop actions from the library into the wheel editor or add them from its selector.
+**Wheel options** provides reverse rotation and a selected-title overlay.
+
+Child settings and inspectors stay independent, selection persists, and imported
+flat wheel records round-trip. Native tests use the unchanged Counter plugin and
+an original Plus XL wheel. Smooth carousel animation and physical acceptance
+remain open; see [Action Wheel contracts and coverage](docs/ACTION_WHEEL.md).
+
 ## Action Triggers
 
 Assign **Action Trigger** to a dial to run key actions from counterclockwise turns,

@@ -168,6 +168,7 @@ impl Host {
         // Completed clicks and their asynchronous actions remain active offline.
         // Only physical ownership is lost when the USB transport disappears.
         self.disconnect_trigger_buttons();
+        self.wheels.stop_turns();
         self.cancel_departing_inputs(&HashSet::new());
         self.cancel_departing_stacks(&HashSet::new());
         self.dial_pressed.fill(false);

@@ -642,10 +642,12 @@ fn export_action_at(
             }
         }
         raw["Actions"] = json!(records);
-    } else if slot.uuid == crate::dial_stack::UUID && !slot.children.is_empty() {
+    } else if (slot.uuid == crate::dial_stack::UUID || slot.uuid == crate::action_wheel::UUID)
+        && !slot.children.is_empty()
+    {
         ensure!(
             slot.children.len() == 1,
-            "Dial Stack runtime must have one child group"
+            "Flat action container must have one child group"
         );
         raw["Actions"] = json!(
             slot.children[0]

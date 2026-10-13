@@ -329,11 +329,12 @@ export function finishSave(current: Draft, saved: Draft): Draft {
 }
 export const MULTI = "com.elgato.streamdeck.multiactions.";
 export const STACK = "com.elgato.streamdeck.dial.stack";
+export const WHEEL = "com.elgato.streamdeck.keys.stack";
 export const TRIGGER = "com.elgato.streamdeck.keys.adaptor";
 export const isMulti = (id: string) =>
   [MULTI + "routine", MULTI + "routine2", MULTI + "random"].includes(id);
 export const isContainer = (id: string) =>
-  isMulti(id) || id === STACK || id === TRIGGER;
+  isMulti(id) || id === STACK || id === TRIGGER || id === WHEEL;
 export function allowed(action: Action, controller: Controller) {
   return (
     action.visible !== false &&
@@ -346,10 +347,11 @@ export function childAllowed(action: Action, parent: string) {
   if (action.enabled === false) return false;
   if (parent === STACK)
     return action.controllers.includes("Encoder") && action.uuid !== STACK;
-  if (parent === TRIGGER)
+  if (parent === WHEEL && action.multi_only) return false;
+  if (parent === TRIGGER || parent === WHEEL)
     return (
       action.controllers.includes("Keypad") &&
-      ![STACK, TRIGGER].includes(action.uuid)
+      ![STACK, TRIGGER, WHEEL].includes(action.uuid)
     );
   return (
     action.controllers.includes("Keypad") &&
@@ -371,6 +373,7 @@ export function newChild(action: Action): RecordValue {
     ),
   };
   if (isMulti(action.uuid)) raw.Actions = [{ Actions: [] }, { Actions: [] }];
+  if (action.uuid === WHEEL) raw.Actions = [];
   if (action.uuid === TRIGGER)
     raw.Actions = [{ Actions: [] }, { Actions: [] }, { Actions: [] }];
   return raw;
@@ -424,18 +427,29 @@ export function saveRequests(
         ...patch,
       });
   }
-  if (isContainer(slot.uuid) && draft.rawEdited)
+  if (isContainer(slot.uuid) && draft.rawEdited) {
+    let wheelBase: RecordValue | undefined;
+    if (slot.uuid === WHEEL) {
+      try {
+        wheelBase = JSON.parse(draft.source)[2];
+      } catch {
+        /* Legacy draft has no merge baseline. */
+      }
+    }
     requests.push({
       command:
         slot.uuid === STACK
           ? "stack_save"
-          : slot.uuid === TRIGGER
-            ? "trigger_save"
-            : "multi_save",
+          : slot.uuid === WHEEL
+            ? "wheel_save"
+            : slot.uuid === TRIGGER
+              ? "trigger_save"
+              : "multi_save",
       context: slot.context,
       raw: draft.raw,
+      ...(wheelBase ? { base: wheelBase } : {}),
     });
-  else if (!isContainer(slot.uuid) && draft.settingsEdited) {
+  } else if (!isContainer(slot.uuid) && draft.settingsEdited) {
     let base: RecordValue | undefined;
     try {
       const source = JSON.parse(draft.source);

@@ -9,6 +9,7 @@ import {
   editAppearance,
   filteredActions,
   STACK,
+  WHEEL,
   MULTI,
   TRIGGER,
   type Slot,
@@ -33,6 +34,28 @@ const slot = {
   multi_children: [],
 } as Slot;
 describe("action drafts", () => {
+  it("sends a wheel-specific save with the captured baseline", () => {
+    const wheel = {
+      ...slot,
+      uuid: WHEEL,
+      controller: "Encoder" as const,
+      raw: { Settings: { CurrentIdx: 1, InvertRotation: false }, Actions: [] },
+    };
+    const draft = editDraft(reconcileDraft(undefined, wheel), {
+      raw: {
+        ...wheel.raw,
+        Settings: { ...wheel.raw.Settings, InvertRotation: true },
+      },
+    });
+    expect(saveRequests(wheel, draft)).toEqual([
+      {
+        command: "wheel_save",
+        context: wheel.context,
+        raw: draft.raw,
+        base: wheel.raw,
+      },
+    ]);
+  });
   it("falls back to legacy replacement only without a usable captured settings baseline", () => {
     const edited = editDraft(reconcileDraft(undefined, slot), {
       settings: { count: 99 },

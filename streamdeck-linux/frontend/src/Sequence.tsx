@@ -8,6 +8,7 @@ import {
   isMulti,
   isContainer,
   STACK,
+  WHEEL,
   TRIGGER,
   clone,
   type RecordValue,
@@ -59,6 +60,7 @@ export function Sequence({
   const entries = children(raw, uuid, branch);
   const trigger = uuid === TRIGGER;
   const stack = uuid === STACK;
+  const wheel = uuid === WHEEL;
   const selectedEntry = selected === null ? null : entries[selected];
   const runtimeEntries = runtime
     ? runtime.uuid === TRIGGER
@@ -113,8 +115,44 @@ export function Sequence({
   return (
     <section
       className="sequence"
+      onDragOver={(event) => {
+        if (
+          wheel &&
+          event.dataTransfer.types.includes("application/x-deckforge-action")
+        ) {
+          event.preventDefault();
+          event.stopPropagation();
+          event.dataTransfer.dropEffect = "copy";
+        }
+      }}
+      onDrop={(event) => {
+        if (
+          !wheel ||
+          !event.dataTransfer.types.includes("application/x-deckforge-action")
+        )
+          return;
+        event.preventDefault();
+        event.stopPropagation();
+        const action = compatible.find(
+          (candidate) =>
+            candidate.uuid ===
+            event.dataTransfer.getData("application/x-deckforge-action"),
+        );
+        if (!action) {
+          onError(new Error("Action Wheel accepts key actions."));
+          return;
+        }
+        update([...entries, newChild(action)]);
+        setSelected(entries.length);
+      }}
       aria-label={
-        stack ? "Dial stack" : trigger ? "Action trigger" : "Action sequence"
+        stack
+          ? "Dial stack"
+          : wheel
+            ? "Action wheel"
+            : trigger
+              ? "Action trigger"
+              : "Action sequence"
       }
     >
       {uuid.endsWith(".routine2") && (
@@ -156,6 +194,9 @@ export function Sequence({
             ))}
         </div>
       )}
+      {wheel && entries.length === 0 && (
+        <p className="hint">Drop key actions here, or choose one below.</p>
+      )}
       <div className="sequence-list">
         {(trigger
           ? Array.from({ length: 3 }, (_, i) => entries[i] ?? { Actions: [] })
@@ -191,6 +232,25 @@ export function Sequence({
               </span>
             </button>
             <div className="row compact">
+              {wheel && runtime && run && runtimeChild(entry) && (
+                <button
+                  type="button"
+                  aria-label={`Show action ${index + 1} on dial`}
+                  onClick={() =>
+                    run({
+                      command: "wheel_select",
+                      context: runtime.context,
+                      index: runtimeEntries.findIndex(
+                        (child) =>
+                          child?.context === runtimeChild(entry)?.context,
+                      ),
+                    })
+                  }
+                >
+                  Show
+                </button>
+              )}
+
               {!trigger && (
                 <>
                   <button
@@ -270,6 +330,40 @@ export function Sequence({
           {trigger ? "Assign" : "Add"}
         </button>
       </div>
+      {wheel && (
+        <details className="wheel-options">
+          <summary>Wheel options</summary>
+          <div className="stack-options">
+            <Check
+              label="Reverse rotation"
+              checked={raw.Settings?.InvertRotation ?? false}
+              onChange={(value) =>
+                onChange({
+                  ...raw,
+                  Settings: { ...raw.Settings, InvertRotation: value },
+                })
+              }
+            />
+            {encoderDisplay && (
+              <Check
+                label="Show selected title across the dial display"
+                checked={raw.Settings?.ExtTitles ?? false}
+                onChange={(value) =>
+                  onChange({
+                    ...raw,
+                    Settings: { ...raw.Settings, ExtTitles: value },
+                  })
+                }
+              />
+            )}
+            <p className="hint">
+              Turn to choose an action. Press the dial or tap its centre to run
+              it.
+            </p>
+            <p className="hint">Drop key actions here, or choose one below.</p>
+          </div>
+        </details>
+      )}
       {trigger && selected === null && (
         <p className="hint">Select a gesture, then choose its action.</p>
       )}

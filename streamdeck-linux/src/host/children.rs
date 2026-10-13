@@ -58,8 +58,9 @@ impl Slot {
         }
         let multi = multiaction::container(&self.uuid);
         let stack = self.uuid == crate::dial_stack::UUID;
+        let wheel = self.uuid == crate::action_wheel::UUID;
         let trigger = self.uuid == crate::action_trigger::UUID;
-        if !multi && !stack && !trigger {
+        if !multi && !stack && !trigger && !wheel {
             return;
         }
         for (branch, children) in self.children.iter_mut().enumerate() {
@@ -85,7 +86,7 @@ impl Slot {
                 }
                 let record = if trigger {
                     self.raw.get_mut("Actions").and_then(|v| v.get_mut(branch))
-                } else if stack {
+                } else if stack || wheel {
                     self.raw.get_mut("Actions").and_then(|v| v.get_mut(index))
                 } else {
                     self.raw
@@ -107,8 +108,9 @@ impl Slot {
         anyhow::ensure!(depth <= 8, "Container nesting exceeds eight levels");
         let multi = multiaction::container(&self.uuid);
         let stack = self.uuid == crate::dial_stack::UUID;
+        let wheel = self.uuid == crate::action_wheel::UUID;
         let trigger = self.uuid == crate::action_trigger::UUID;
-        if !multi && !stack && !trigger {
+        if !multi && !stack && !trigger && !wheel {
             // Unknown containers keep their raw Actions. They do not activate a
             // stale private runtime child tree from another action type.
             self.children.clear();
@@ -143,6 +145,16 @@ impl Slot {
                 .into_iter()
                 .map(|entry| entry.into_iter().map(|e| (e.id, e.uuid, e.raw)).collect())
                 .collect()
+        } else if wheel {
+            let mut model = parent_raw.clone();
+            model["Settings"] = self.settings.clone();
+            vec![
+                crate::action_wheel::parse(&model)?
+                    .children
+                    .into_iter()
+                    .map(|e| (e.id, e.uuid, e.raw))
+                    .collect(),
+            ]
         } else {
             let mut model = parent_raw.clone();
             model["Settings"] = self.settings.clone();
@@ -154,7 +166,7 @@ impl Slot {
                     .collect(),
             ]
         };
-        let keypad = multi || trigger;
+        let keypad = multi || trigger || wheel;
         // Build a complete candidate before assigning it. Any invalid descendant
         // leaves the previous tree, contexts and raw record intact.
         let mut hydrated = Vec::with_capacity(groups.len());

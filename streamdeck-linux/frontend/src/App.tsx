@@ -383,7 +383,12 @@ export default function App() {
               latest.settings,
             ),
           }
-        : patch;
+        : Object.hasOwn(patch, "raw")
+          ? {
+              ...patch,
+              raw: mergeSettingsEdit(rendered.raw, patch.raw, latest.raw),
+            }
+          : patch;
       return { ...prev, [slot.context]: editDraft(latest, edit) };
     });
   }
