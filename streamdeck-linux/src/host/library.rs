@@ -140,11 +140,28 @@ fn page_label(profile: &Profile, page: &Page) -> String {
     }
     "Folder".into()
 }
+// Keep this host-only option in action metadata so profile export/import preserves it.
+pub(super) fn pin_exclusions(slot: &Slot) -> Value {
+    slot.raw
+        .get("DeckforgePinExclusions")
+        .filter(|v| v.is_array())
+        .cloned()
+        .unwrap_or_else(|| json!([]))
+}
+
 pub(super) fn remap_page_references(value: &mut Value, mapping: &HashMap<String, String>) {
     match value {
         Value::Object(fields) => {
             for (key, value) in fields {
-                if key == "ProfileUUID"
+                if key == "DeckforgePinExclusions" {
+                    if let Some(ids) = value.as_array() {
+                        *value = json!(
+                            ids.iter()
+                                .filter_map(|id| id.as_str().and_then(|id| mapping.get(id)))
+                                .collect::<Vec<_>>()
+                        );
+                    }
+                } else if key == "ProfileUUID"
                     && let Some(target) = value
                         .as_str()
                         .and_then(|v| mapping.get(&profile::canonical_page_id(v)))
@@ -458,6 +475,16 @@ impl Library {
                 .find(|p| &p.id == page_id)
                 .context("Page missing")?;
             for slot in &page.slots {
+                if page_id == &profile.pin_page
+                    && self.active_page != profile.pin_page
+                    && pin_exclusions(slot)
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|id| id.as_str() == Some(&self.active_page))
+                {
+                    continue;
+                }
                 let mut slot = slot.clone();
                 slot.pinned = page_id == &profile.pin_page;
                 slots.insert((slot.controller.clone(), slot.index), slot);
@@ -1124,6 +1151,15 @@ impl Host {
                 profile.pages.retain(|p| p.id != id);
                 profile.page_order.retain(|p| p != id);
                 for page in &mut profile.pages {
+                    for slot in &mut page.slots {
+                        if let Some(ids) = slot
+                            .raw
+                            .get_mut("DeckforgePinExclusions")
+                            .and_then(Value::as_array_mut)
+                        {
+                            ids.retain(|v| v.as_str() != Some(id));
+                        }
+                    }
                     page.slots.retain(|s| {
                         !(s.uuid == OPEN_FOLDER
                             && s.settings["ProfileUUID"]
@@ -1153,6 +1189,45 @@ impl Host {
                         .signum())
                 .clamp(0, order.len() as i64 - 1) as usize;
                 order.swap(index, next);
+                return self.refresh_page();
+            }
+            "slot_pin_exclusions" => {
+                self.editable()?;
+                let context = r["context"].as_str().context("Context missing")?;
+                let exclusions: Vec<String> =
+                    serde_json::from_value(r["excluded_pages"].clone())
+                        .context("Excluded pages must be a list of page IDs")?;
+                let profile = self.library.current_mut()?;
+                anyhow::ensure!(
+                    exclusions.len() <= profile.pages.len(),
+                    "Too many excluded pages"
+                );
+                let mut unique = HashSet::new();
+                for id in &exclusions {
+                    anyhow::ensure!(
+                        id != &profile.pin_page
+                            && profile.pages.iter().any(|p| &p.id == id)
+                            && unique.insert(id),
+                        "Choose distinct pages in the active profile"
+                    );
+                }
+                let slot = profile
+                    .pages
+                    .iter_mut()
+                    .find(|p| p.id == profile.pin_page)
+                    .context("Pinned page missing")?
+                    .slots
+                    .iter_mut()
+                    .find(|s| s.context == context)
+                    .context("Pin the action before choosing excluded pages")?;
+                anyhow::ensure!(
+                    r["expected"] == pin_exclusions(slot),
+                    "Page exclusions changed; refresh before saving"
+                );
+                slot.raw
+                    .as_object_mut()
+                    .context("Invalid action metadata")?
+                    .insert("DeckforgePinExclusions".into(), json!(exclusions));
                 return self.refresh_page();
             }
             "slot_pin" => {

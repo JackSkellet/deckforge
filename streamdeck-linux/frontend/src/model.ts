@@ -58,6 +58,7 @@ export interface Slot {
   settings: RecordValue;
   title: string;
   pinned: boolean;
+  pin_excluded_pages?: string[];
   available: boolean;
   preview?: string;
   software_icon?: string;

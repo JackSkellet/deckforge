@@ -1097,6 +1097,32 @@ impl Desktop {
                     json!({"command":"slot_pin","context":slot["context"],"pinned":pinned}),
                 );
             }
+            if pinned {
+                let pages = self.snapshot["library"]["profiles"]
+                    .as_array()
+                    .and_then(|profiles| {
+                        profiles
+                            .iter()
+                            .find(|p| p["id"] == self.snapshot["library"]["active_profile"])
+                    })
+                    .and_then(|p| p["pages"].as_array())
+                    .cloned()
+                    .unwrap_or_default();
+                let excluded = slot["pin_excluded_pages"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default();
+                ui.collapsing("Exclude pages", |ui| {
+                    for page in pages {
+                        let mut checked = excluded.contains(&page["id"]);
+                        if ui.checkbox(&mut checked, string(&page,"name")).changed() {
+                            let mut next = excluded.clone();
+                            if checked {next.push(page["id"].clone());} else {next.retain(|id| id != &page["id"]);}
+                            self.command(json!({"command":"slot_pin_exclusions","context":slot["context"],"expected":excluded,"excluded_pages":next}));
+                        }
+                    }
+                });
+            }
         }
         if let Some(plugin) = slot.as_ref().and_then(|slot| {
             let action = self.snapshot["actions"]
