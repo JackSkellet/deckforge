@@ -226,7 +226,8 @@ fn read_files(path: &Path) -> Result<BTreeMap<String, Vec<u8>>> {
     } else {
         let file =
             fs::File::open(path).with_context(|| format!("Open profile {}", path.display()))?;
-        let mut archive = zip::ZipArchive::new(file).context("Read .streamDeckProfile ZIP")?;
+        let mut archive =
+            zip::ZipArchive::new(file).context("Not a readable Stream Deck archive")?;
         crate::package::validate_central_directory(path, archive.central_directory_start())?;
         ensure!(
             archive.len() <= MAX_FILES,

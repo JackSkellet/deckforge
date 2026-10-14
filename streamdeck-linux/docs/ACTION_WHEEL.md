@@ -147,9 +147,9 @@ controlled repeated run checks the snapshot/edit race found by that fixture.
 All of these use simulated devices and temporary state; no physical acceptance
 is inferred.
 
-The existing Dial Stack workflow passes. The Action Trigger script completes its
-generated workflows but still stops at the separately known unsupported GRETSCH
-profile import. That entire script is not reported as passing.
+The existing Dial Stack workflow passes. The complete Action Trigger script now
+passes after adding the distinct Galleon profile model and testing each original
+fixture on its declared device.
 
 Remaining work includes native backdrop-blur and touch press-animation
 fidelity, the full native title-fallback matrix, rounded hit-test edge comparison,
@@ -157,3 +157,7 @@ manual hardware acceptance, and broader nested-action/editor parity. The current
 renderer shows the recovered carousel transitions, static layouts and physical
 pressed-card scale; it does not claim pixel-identical Windows rendering. Existing configured-slot drag/drop
 into the wheel and child appearance editing need further native UX coverage.
+
+Verification update, 14 October 2026: the Galleon profile/model gap is resolved.
+The complete Action Trigger and soundboard suites now pass on their fixtures'
+declared device models. See [Galleon support and remaining USB work](GALLEON.md).

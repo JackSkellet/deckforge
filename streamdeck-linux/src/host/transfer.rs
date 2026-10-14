@@ -3,6 +3,8 @@
 use super::*;
 use anyhow::ensure;
 use std::collections::HashSet;
+mod nested;
+mod sharing;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub(super) struct AssetSource {
@@ -10,8 +12,17 @@ pub(super) struct AssetSource {
     pub manifest: String,
     pub profile: String,
 }
+#[derive(Clone, PartialEq, Eq)]
+struct ChildAnchor {
+    parent: String,
+    branch: usize,
+    index: usize,
+}
 #[derive(Clone)]
 struct Anchor {
+    root: String,
+    child: Option<ChildAnchor>,
+    legacy_record: Option<Value>,
     device: String,
     profile: String,
     page: String,
@@ -22,6 +33,7 @@ struct Anchor {
 }
 #[derive(Clone)]
 pub(super) struct Clipboard {
+    temporary_source: Option<PathBuf>,
     anchor: Anchor,
     slot: Slot,
     pages: Vec<library::Page>,
@@ -36,11 +48,11 @@ fn locate(library: &Library, context: &str) -> Result<(usize, usize, usize)> {
             profile.pages.iter().enumerate().find_map(|(g, page)| {
                 page.slots
                     .iter()
-                    .position(|s| s.context == context)
+                    .position(|s| s.find(context).is_some())
                     .map(|s| (p, g, s))
             })
         })
-        .context("Action source is missing or is a nested action; select its device control")
+        .context("Action source is missing")
 }
 fn stamp(slot: &mut Slot, origin: Option<&AssetSource>) {
     if slot.asset_source.is_none() {
@@ -76,10 +88,19 @@ fn capture(library: &Library, context: &str, cut: bool) -> Result<Clipboard> {
         !cut || !profile.readonly,
         "Cannot move an action from a read-only profile"
     );
-    let mut slot = page.slots[s].clone();
+    let mut slot = page.slots[s]
+        .find(context)
+        .context("Action source missing")?
+        .clone();
     slot.sync_children_raw();
     stamp(&mut slot, page_origin(profile, page).as_ref());
     let anchor = Anchor {
+        root: page.slots[s].context.clone(),
+        child: nested::address(&page.slots[s], context),
+        // Legacy positional records have no stable vendor identity. Refuse to
+        // move a changed occupant instead of guessing that it is still the cut.
+        legacy_record: (page.slots[s].context != context && slot.raw.get("ActionID").is_none())
+            .then(|| slot.raw.clone()),
         device: profile.device.clone(),
         profile: profile.id.clone(),
         page: page.id.clone(),
@@ -114,6 +135,7 @@ fn capture(library: &Library, context: &str, cut: bool) -> Result<Clipboard> {
         pages.push(page);
     }
     Ok(Clipboard {
+        temporary_source: None,
         anchor,
         slot,
         pages,
@@ -137,6 +159,9 @@ fn position(slot: &mut Slot, controller: &str, index: u8) {
     slot.controller = controller.into();
     slot.index = index;
     slot.pinned = false;
+    slot.in_multi_action = false;
+    slot.event_coordinates = None;
+    slot.child_id.clear();
     fn children(slot: &mut Slot, index: u8) {
         for child in slot.children.iter_mut().flatten() {
             child.index = index;
@@ -182,7 +207,10 @@ fn materialize(
     Ok((slot, pages))
 }
 fn stale(original: &Anchor, current: &Anchor) -> bool {
-    original.profile != current.profile
+    original.root != current.root
+        || original.child != current.child
+        || original.legacy_record != current.legacy_record
+        || original.profile != current.profile
         || original.page != current.page
         || original.context != current.context
         || original.controller != current.controller
@@ -226,6 +254,10 @@ fn transferred(
     } else {
         clipboard.clone()
     };
+    ensure!(
+        source.slot.uuid != multiaction::DELAY,
+        "Delay can only run inside a Multi Action"
+    );
     compatible(&source.slot, controller, actions)?;
     ensure!(
         source.pages.is_empty() || source.slot.model.profile_compatible(current.model),
@@ -252,6 +284,12 @@ fn transferred(
         ensure!(
             !source.pages.iter().any(|p| p.id == *dest_page),
             "Cannot move a folder inside itself"
+        );
+    }
+    if source.cut {
+        ensure!(
+            target.is_none_or(|s| s.find(&source.anchor.context).is_none()),
+            "Cannot swap a nested action with its enclosing control"
         );
     }
     let swapped = if source.cut {
@@ -283,7 +321,7 @@ fn transferred(
     position(&mut incoming, controller, index);
     library::set_slot_model(&mut incoming, current.model);
     if source.cut {
-        next.remove(&source.anchor.context);
+        nested::remove_source(&mut next, &source.anchor, actions)?;
     }
     if let Some(target) = target {
         next.remove(&target.context);
@@ -312,20 +350,37 @@ fn transferred(
             source.anchor.index,
         );
         library::set_slot_model(&mut outgoing, next.profiles[sp].model);
-        next.profiles[sp].pages[sg].slots.push(outgoing);
+        if let Some(child) = &source.anchor.child {
+            let parent = next
+                .slot(&child.parent)
+                .context("Source container missing")?;
+            let (branch, index) = nested::position_in(parent, child);
+            let candidate = nested::insert(parent, outgoing, branch, index, actions)?;
+            ensure!(next.update(&candidate), "Source container missing");
+        } else {
+            next.profiles[sp].pages[sg].slots.push(outgoing);
+        }
         next.profiles[sp].pages.extend(pages);
     }
-    next.validate()?;
+    nested::finish(&mut next, actions)?;
     Ok(next)
 }
 impl Host {
+    pub(super) fn replace_clipboard(&mut self, clipboard: Option<Clipboard>) {
+        let previous = std::mem::replace(&mut self.clipboard, clipboard);
+        if let Some(source) = previous.and_then(|c| c.temporary_source)
+            && !self.retained_asset_sources().contains(&source.as_path())
+        {
+            let _ = fs::remove_file(source);
+        }
+    }
     pub(super) fn clear_device_clipboard(&mut self, device: &str) {
         if self
             .clipboard
             .as_ref()
             .is_some_and(|c| c.anchor.device == device)
         {
-            self.clipboard = None;
+            self.replace_clipboard(None);
         }
     }
     pub(super) fn asset_origin(&self, slot: &Slot) -> Option<AssetSource> {
@@ -339,21 +394,39 @@ impl Host {
         })
     }
     pub(super) fn retained_asset_sources(&self) -> Vec<&Path> {
+        let mut paths = self.live_asset_sources();
+        paths.extend(self.history.paths());
+        paths
+    }
+    pub(super) fn live_asset_sources(&self) -> Vec<&Path> {
         let mut paths = Vec::new();
         for profile in &self.library.profiles {
             if let Some(source) = &profile.source {
                 paths.push(source.as_path());
             }
             for page in &profile.pages {
-                if let Some(origin) = &page.asset_source {
+                for origin in page
+                    .asset_source
+                    .iter()
+                    .chain(page.background_source.iter())
+                {
                     paths.push(origin.source.as_path());
                 }
                 for slot in page.slots.iter().flat_map(Slot::flatten) {
                     paths.extend(
                         slot.appearances
                             .values()
-                            .flat_map(|a| a.user_image.iter().chain(a.plugin_animation_source.iter()).chain(a.encoder_animation_source.iter())
-                                .chain(a.hardware.iter().filter_map(|h| h.animation_source.as_ref())))
+                            .flat_map(|a| {
+                                a.user_image
+                                    .iter()
+                                    .chain(a.plugin_animation_source.iter())
+                                    .chain(a.encoder_animation_source.iter())
+                                    .chain(
+                                        a.hardware
+                                            .iter()
+                                            .filter_map(|h| h.animation_source.as_ref()),
+                                    )
+                            })
                             .map(PathBuf::as_path),
                     );
                     if let Some(origin) = &slot.asset_source {
@@ -371,8 +444,17 @@ impl Host {
                 paths.extend(
                     slot.appearances
                         .values()
-                        .flat_map(|a| a.user_image.iter().chain(a.plugin_animation_source.iter()).chain(a.encoder_animation_source.iter())
-                            .chain(a.hardware.iter().filter_map(|h| h.animation_source.as_ref())))
+                        .flat_map(|a| {
+                            a.user_image
+                                .iter()
+                                .chain(a.plugin_animation_source.iter())
+                                .chain(a.encoder_animation_source.iter())
+                                .chain(
+                                    a.hardware
+                                        .iter()
+                                        .filter_map(|h| h.animation_source.as_ref()),
+                                )
+                        })
                         .map(PathBuf::as_path),
                 );
                 if let Some(origin) = &slot.asset_source {
@@ -380,7 +462,11 @@ impl Host {
                 }
             }
             for page in &copy.pages {
-                if let Some(origin) = &page.asset_source {
+                for origin in page
+                    .asset_source
+                    .iter()
+                    .chain(page.background_source.iter())
+                {
                     paths.push(origin.source.as_path());
                 }
             }
@@ -388,25 +474,41 @@ impl Host {
         paths
     }
     pub(super) fn clipboard_snapshot(&self) -> Value {
-        self.clipboard.as_ref().map_or(Value::Null,|c|json!({"name":c.slot.name,"uuid":c.slot.uuid,"controller":c.slot.controller,"mode":if c.cut {"cut"}else{"copy"},"context":c.anchor.context,"profile":c.anchor.profile,"page":c.anchor.page,"device":self.library.profiles.iter().find(|p|p.id==c.anchor.profile).map(|p|p.device.as_str()).unwrap_or(&c.anchor.device)}))
+        self.clipboard.as_ref().map_or(Value::Null,|c|json!({"name":c.slot.name,"uuid":c.slot.uuid,"controller":c.slot.controller,"mode":if c.cut {"cut"}else{"copy"},"context":c.anchor.context,"root_context":c.anchor.root,"profile":c.anchor.profile,"page":c.anchor.page,"device":self.library.profiles.iter().find(|p|p.id==c.anchor.profile).map(|p|p.device.as_str()).unwrap_or(&c.anchor.device)}))
     }
     pub(super) fn transfer_command(&mut self, request: &Value) -> Result<()> {
         let command = request["command"]
             .as_str()
             .context("Missing transfer command")?;
+        if command == "slot_file_clipboard" {
+            return self.load_selected_action_clipboard(
+                Path::new(request["path"].as_str().context("Action file missing")?),
+                sharing::selection(request)?,
+                request["source_hash"].as_str(),
+            );
+        }
         if command == "slot_clipboard_clear" {
-            self.clipboard = None;
+            self.replace_clipboard(None);
             return Ok(());
         }
         self.sync_all_devices();
+        if command == "child_paste" {
+            return self.paste_child(request);
+        }
+        if command == "slot_export" {
+            return self.export_shared_action(request);
+        }
+        if command == "slot_import" {
+            return self.import_shared_action(request);
+        }
         if matches!(command, "slot_copy" | "slot_cut") {
-            self.clipboard = Some(capture(
+            self.replace_clipboard(Some(capture(
                 &self.library,
                 request["context"]
                     .as_str()
                     .context("Missing source context")?,
                 command == "slot_cut",
-            )?);
+            )?));
             return Ok(());
         }
         let source = if command == "slot_transfer" {
@@ -424,6 +526,10 @@ impl Host {
                 .clone()
                 .context("Action clipboard is empty")?
         };
+        self.paste_copy(request, source)
+    }
+    fn paste_copy(&mut self, request: &Value, source: Clipboard) -> Result<()> {
+        let command = request["command"].as_str().unwrap_or("");
         let expected = request
             .get("expected_target")
             .context("Expected target is required")?;
@@ -439,6 +545,9 @@ impl Host {
             expected,
             &self.actions,
         )?;
+        self.publish_transfer(next, &source, command)
+    }
+    fn publish_transfer(&mut self, next: Library, source: &Clipboard, command: &str) -> Result<()> {
         // During graph replacement the canonical library is authoritative.
         // Old visible projections remain only long enough to emit their scoped
         // releases/disappearances; they must never overwrite the new graph.
@@ -459,8 +568,8 @@ impl Host {
             return Err(error);
         }
         self.slots = old_slots;
-        if command == "slot_paste" && source.cut {
-            self.clipboard = None;
+        if matches!(command, "slot_paste" | "child_paste") && source.cut {
+            self.replace_clipboard(None);
         }
         let mut devices = vec![target_device];
         if source.cut

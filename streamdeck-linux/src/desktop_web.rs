@@ -63,11 +63,21 @@ struct Request {
 enum UiEvent {
     Wake,
     Snapshot,
-    Reply { generation: u64, script: String },
+    Reply {
+        generation: u64,
+        script: String,
+    },
     Loaded(u64),
     Ready(u64),
-    TestDone { generation: u64, result: Value },
+    TestDone {
+        generation: u64,
+        result: Value,
+    },
     CaptureDone(std::result::Result<(), String>),
+    FileDrag {
+        generation: u64,
+        event: wry::DragDropEvent,
+    },
 }
 struct Latest {
     snapshot: Value,
@@ -77,6 +87,8 @@ struct Shared {
     latest: Mutex<Latest>,
     proxy: Mutex<Option<EventLoopProxy<UiEvent>>>,
     ui_state: Mutex<Value>,
+    file_notice: Mutex<Option<Value>>,
+    action_files: Mutex<crate::desktop_action_file::Manager>,
     stop: AtomicBool,
     running: AtomicBool,
     refresh_queued: AtomicBool,
@@ -92,8 +104,17 @@ impl Shared {
     }
 }
 enum Job {
-    Request { generation: u64, request: Request },
+    Request {
+        generation: u64,
+        request: Request,
+    },
+    ApplicationIcon {
+        generation: u64,
+        id: Value,
+        path: std::result::Result<Option<PathBuf>, String>,
+    },
     Refresh,
+    OpenFile(PathBuf),
 }
 struct Worker {
     sender: mpsc::SyncSender<Job>,
@@ -110,7 +131,12 @@ impl Drop for Worker {
     }
 }
 impl Worker {
-    fn start(controller: Controller, state: &Path, window: Window) -> Result<Self> {
+    fn start(
+        controller: Controller,
+        state: &Path,
+        window: Window,
+        initial_file: Option<&Path>,
+    ) -> Result<Self> {
         let (sender, receiver) = mpsc::sync_channel(64);
         let shared = Arc::new(Shared {
             latest: Mutex::new(Latest {
@@ -119,6 +145,8 @@ impl Worker {
             }),
             proxy: Mutex::new(None),
             ui_state: Mutex::new(canvas::load(state)),
+            file_notice: Mutex::new(None),
+            action_files: Mutex::new(Default::default()),
             stop: AtomicBool::new(false),
             running: AtomicBool::new(true),
             refresh_queued: AtomicBool::new(false),
@@ -137,12 +165,25 @@ impl Worker {
         });
         let work = shared.clone();
         let state = state.to_owned();
+        let initial_file = initial_file.map(Path::to_owned);
         let thread = std::thread::Builder::new()
             .name("desktop-bridge".into())
             .spawn(move || {
-                refresh(&controller, &work, &window);
+                let mut icon_watch=crate::icon_pack_watch::Watch::new(state.join("icon-packs"));
+                if let Some(path)=initial_file {
+                    let result=open_file(&controller,&work,&path,None);
+                    let message=match &result {Ok(m)=>m.clone(),Err(e)=>format!("Could not open file: {e}")};
+                    *work.file_notice.lock().unwrap()=Some(json!({"id":uuid::Uuid::new_v4().to_string(),"error":result.is_err(),"message":message}));
+                }
+                refresh(&controller, &work, &window, &mut icon_watch);
                 while !work.stop.load(Ordering::Acquire) {
                     match receiver.recv_timeout(POLL) {
+                        Ok(Job::ApplicationIcon { generation, id, path }) => {
+                            let result = path.map_err(anyhow::Error::msg).and_then(|path| {
+                                path.map(|p| crate::system_app::icon_png(&p)).transpose()
+                            }).map(|icon| json!(icon));
+                            reply(&work, generation, id, result);
+                        }
                         Ok(Job::Request {
                             generation,
                             request,
@@ -218,13 +259,18 @@ impl Worker {
                                 }
                             }
                         }
+                        Ok(Job::OpenFile(path)) => {
+                            let result = open_file(&controller, &work, &path, None);
+                            let message = match &result { Ok(message)=>message.clone(),Err(error)=>format!("Could not open file: {error}") };
+                            *work.file_notice.lock().unwrap() = Some(json!({"id":uuid::Uuid::new_v4().to_string(),"error":result.is_err(),"message":message}));
+                        }
                         Ok(Job::Refresh) => {
                             work.refresh_queued.store(false, Ordering::Release);
                         }
                         Err(mpsc::RecvTimeoutError::Timeout) => {}
                         Err(mpsc::RecvTimeoutError::Disconnected) => break,
                     }
-                    refresh(&controller, &work, &window);
+                    refresh(&controller, &work, &window, &mut icon_watch);
                 }
             })?;
         Ok(Self {
@@ -234,14 +280,24 @@ impl Worker {
         })
     }
 }
-fn refresh(controller: &Controller, shared: &Shared, window: &Window) {
+fn refresh(
+    controller: &Controller,
+    shared: &Shared,
+    window: &Window,
+    icons: &mut crate::icon_pack_watch::Watch,
+) {
     let running = controller.is_running();
     shared.running.store(running, Ordering::Release);
     if !running {
         window.request(Command::Quit);
         return;
     }
-    let snapshot = controller.snapshot();
+    let mut snapshot = controller.snapshot();
+    snapshot["icon_library"] = json!(icons.poll());
+    snapshot["pending_action_file"] = shared.action_files.lock().unwrap().snapshot();
+    if let Some(notice) = shared.file_notice.lock().unwrap().as_ref() {
+        snapshot["file_open"] = notice.clone();
+    }
     let mut latest = shared.latest.lock().unwrap();
     if latest.snapshot != snapshot {
         latest.script = format!("window.__deckforgeSnapshot({});", js_json(&snapshot));
@@ -294,6 +350,29 @@ fn import_reference(controller: &Controller, payload: Value) -> Result<Value> {
     )?)
 }
 
+fn open_file(
+    controller: &Controller,
+    shared: &Shared,
+    path: &Path,
+    device: Option<&str>,
+) -> Result<String> {
+    let device = device.map(str::to_owned).unwrap_or_else(|| {
+        controller.snapshot()["device"]
+            .as_str()
+            .unwrap_or("")
+            .to_owned()
+    });
+    if crate::file_open::kind(path)? == crate::file_open::Kind::Action {
+        shared
+            .action_files
+            .lock()
+            .unwrap()
+            .prepare(controller, path, device, None)
+    } else {
+        controller.open_desktop_file_on(path, &device)
+    }
+}
+
 fn dispatch(
     controller: &Controller,
     state: &Path,
@@ -304,6 +383,9 @@ fn dispatch(
 ) -> Result<Value> {
     match method {
         "snapshot" => Ok(shared.latest.lock().unwrap().snapshot.clone()),
+        "icon_packs" => controller.icon_packs(&payload),
+        "command_output" => controller.command_output(&payload),
+        "application_catalog" => Ok(serde_json::to_value(crate::system_app::catalog())?),
         "bundled_plugins" => Ok(serde_json::to_value(crate::bundled_plugins::list()?)?),
         "fonts" => Ok(serde_json::to_value(crate::appearance::font_families()?)?),
         "marketplace" => {
@@ -315,11 +397,83 @@ fn dispatch(
             )?;
             Ok(Value::Null)
         }
+        "open_file" => {
+            let path =
+                crate::file_open::parse(payload["path"].as_str().context("File path missing")?)?;
+            Ok(json!(open_file(
+                controller,
+                shared,
+                &path,
+                payload["device"].as_str()
+            )?))
+        }
+        "action_file_prepare" => {
+            let path = Path::new(payload["path"].as_str().context("Action file missing")?);
+            let destination = serde_json::from_value(payload["destination"].clone())
+                .context("Action destination missing")?;
+            let device = payload["device"]
+                .as_str()
+                .context("Device missing")?
+                .to_owned();
+            Ok(json!(shared.action_files.lock().unwrap().prepare(
+                controller,
+                path,
+                device,
+                Some(destination)
+            )?))
+        }
+        "action_file_choose" => {
+            let result = shared.action_files.lock().unwrap().choose(
+                controller,
+                payload["id"].as_str().context("Pending import missing")?,
+                usize::try_from(payload["root"].as_u64().context("Root selection missing")?)?,
+            );
+            let message = match &result {
+                Ok(message) => message.clone(),
+                Err(e) => e.to_string(),
+            };
+            *shared.file_notice.lock().unwrap() = Some(
+                json!({"id":uuid::Uuid::new_v4().to_string(),"error":result.is_err(),"message":message}),
+            );
+            result.map(Value::String)
+        }
+        "action_file_cancel" => {
+            shared
+                .action_files
+                .lock()
+                .unwrap()
+                .cancel(payload["id"].as_str().context("Pending import missing")?)?;
+            *shared.file_notice.lock().unwrap() = Some(
+                json!({"id":uuid::Uuid::new_v4().to_string(),"error":false,"message":"Action import cancelled."}),
+            );
+            Ok(Value::Null)
+        }
         "appearance_preview" => controller.appearance_preview(payload),
+        "image_crop" => {
+            let result = controller.image_crop(payload.clone())?;
+            if payload["mode"] == "save" {
+                // Completion also clears the draft when its WebView was hidden
+                // before receiving the reply; reopening must not revive it.
+                let mut state = shared.ui_state.lock().unwrap();
+                if state["cropEdit"]["context"] == payload["context"] {
+                    state["cropEdit"] = Value::Null;
+                }
+            }
+            Ok(result)
+        }
         "mixer_control" => controller.mixer_control(payload),
         "command" => {
             ensure!(payload.is_object(), "Host command must be an object");
+            let smart_save = (payload["command"] == "smart_config").then(|| payload.clone());
             controller.command(payload)?;
+            if let Some(saved) = smart_save {
+                let mut state = shared.ui_state.lock().unwrap();
+                if state["smartEdit"]["device"] == saved["device"]
+                    && state["smartEdit"]["expected"] == saved["expected"]
+                {
+                    state["smartEdit"] = Value::Null;
+                }
+            }
             Ok(Value::Null)
         }
         "action_icon" => {
@@ -391,12 +545,22 @@ fn pick_file(payload: &Value) -> Result<Value> {
         "reference_installer" => dialog
             .add_filter("Stream Deck macOS installer", &["pkg"])
             .pick_file(),
+        "icon_pack" => dialog
+            .add_filter("Stream Deck icon pack", &["streamDeckIconPack"])
+            .pick_file(),
         "plugin" => dialog
             .add_filter("Stream Deck plugin", &["streamDeckPlugin"])
             .pick_file(),
         "profile" => dialog
             .add_filter("Stream Deck profile", &["streamDeckProfile"])
             .pick_file(),
+        "action" => dialog
+            .add_filter("Stream Deck action", &["streamDeckAction"])
+            .pick_file(),
+        "export_action" => dialog
+            .add_filter("Stream Deck action", &["streamDeckAction"])
+            .set_file_name("Action.streamDeckAction")
+            .save_file(),
         "image" => dialog
             .add_filter("Image", &["png", "jpg", "jpeg", "gif", "svg", "webp"])
             .pick_file(),
@@ -431,12 +595,22 @@ fn protected_html(html: &str) -> String {
 
 /// Runs on the process main thread. HTML is embedded by the caller; no editor
 /// HTTP listener or external browser is created. Background start creates no GUI.
-pub fn run(controller: Controller, state: &Path, background: bool, html: &str) -> Result<()> {
+pub fn run(
+    controller: Controller,
+    state: &Path,
+    background: bool,
+    html: &str,
+    initial_file: Option<&Path>,
+) -> Result<()> {
     let window = Window::new(!background);
+    window.track_smart_visibility(controller.smart_visibility());
     let endpoint = window.clone();
     let link_window = window.clone();
     let link_controller = controller.clone();
-    let _instance = crate::instance::spawn_with_deep_links(
+    let worker = Worker::start(controller, state, window.clone(), initial_file)?;
+    let file_sender = worker.sender.clone();
+    let file_window = window.clone();
+    let _instance = crate::instance::spawn_with_files(
         state,
         Arc::new(move |command| Ok(endpoint.request(command))),
         Arc::new(move |uri| {
@@ -448,6 +622,13 @@ pub fn run(controller: Controller, state: &Path, background: bool, html: &str) -
             delivery?;
             Ok(serde_json::json!({"accepted": true}))
         }),
+        Arc::new(move |path| {
+            file_sender
+                .try_send(Job::OpenFile(path.to_owned()))
+                .context("Editor is busy; try opening the file again")?;
+            file_window.request(Command::Show);
+            Ok(json!({"accepted":true,"queued":true}))
+        }),
     )?;
     let tray_window = window.clone();
     let _tray = match crate::tray::spawn(Arc::new(move |event| tray_window.tray(event))) {
@@ -457,7 +638,6 @@ pub fn run(controller: Controller, state: &Path, background: bool, html: &str) -
             None
         }
     };
-    let worker = Worker::start(controller, state, window.clone())?;
     let capture = std::env::var_os("DECKFORGE_CAPTURE").map(PathBuf::from);
     ensure!(
         !background || capture.is_none(),
@@ -493,6 +673,7 @@ pub fn run(controller: Controller, state: &Path, background: bool, html: &str) -
         *worker.shared.proxy.lock().unwrap() = Some(proxy.clone());
         let native = WindowBuilder::new()
             .with_title("Deckforge · Stream Deck+")
+            .with_window_icon(Some(crate::window::icon()?))
             .with_theme(Some(Theme::Dark))
             .with_inner_size(LogicalSize::new(1180.0, 850.0))
             .with_min_inner_size(LogicalSize::new(760.0, 620.0))
@@ -505,11 +686,16 @@ pub fn run(controller: Controller, state: &Path, background: bool, html: &str) -
         let sender = worker.sender.clone();
         let ipc_proxy = proxy.clone();
         let load_proxy = proxy.clone();
+        let drag_proxy = proxy.clone();
         let testing = test_script.is_some();
         let builder = WebViewBuilder::new()
             .with_html(&html)
             .with_background_color((19, 23, 29, 255))
             .with_initialization_script(BRIDGE)
+            .with_drag_drop_handler(move |event| {
+                let _ = drag_proxy.send_event(UiEvent::FileDrag { generation, event });
+                true
+            })
             .with_navigation_handler(|uri| trusted_document(&uri))
             .with_new_window_req_handler(|_, _| wry::NewWindowResponse::Deny)
             .with_ipc_handler(move |request| {
@@ -522,13 +708,22 @@ pub fn run(controller: Controller, state: &Path, background: bool, html: &str) -
                     }
                     Ok(request) => {
                         let id = request.id.clone();
-                        if sender
-                            .try_send(Job::Request {
+                        let job = if request.method == "application_icon" {
+                            Job::ApplicationIcon {
+                                generation,
+                                id: id.clone(),
+                                path: crate::system_app::icon_path(
+                                    request.payload["desktop"].as_str().unwrap_or(""),
+                                )
+                                .map_err(|e| e.to_string()),
+                            }
+                        } else {
+                            Job::Request {
                                 generation,
                                 request,
-                            })
-                            .is_err()
-                        {
+                            }
+                        };
+                        if sender.try_send(job).is_err() {
                             let _ = ipc_proxy.send_event(UiEvent::Reply {
                                 generation,
                                 script: format!(
@@ -596,6 +791,12 @@ pub fn run(controller: Controller, state: &Path, background: bool, html: &str) -
                     tested=true;capture_at=Some(Instant::now()+Duration::from_millis(500));
                     if let Some(path)=test_result.clone(){std::thread::spawn(move||{if let Err(error)=fs::write(path,serde_json::to_vec_pretty(&result).unwrap()){eprintln!("Editor fixture result: {error}");}});}
                 }
+                Event::UserEvent(UiEvent::FileDrag{generation:current,event}) if current==generation&&ready=>{
+                    use webkit2gtk::WebViewExt;
+                    use wry::WebViewExtUnix;
+                    let data=crate::desktop_file_drop::payload(&event,webview.webview().zoom_level());
+                    let _=webview.evaluate_script(&format!("window.dispatchEvent(new CustomEvent('deckforge-file-drag',{{detail:{}}}));",js_json(&data)));
+                }
                 Event::UserEvent(UiEvent::CaptureDone(result))=>{capture_result=Some(result);window.request(Command::Quit);}
                 Event::WindowEvent{window_id,event:WindowEvent::CloseRequested,..} if window_id==native.id()=>{window.request(Command::Hide);}
                 _=>{}
@@ -604,13 +805,20 @@ pub fn run(controller: Controller, state: &Path, background: bool, html: &str) -
                 capturing=true;capture_webkit(&webview,capture.clone().unwrap(),proxy.clone());
             }
             if capture.is_some()&&started.elapsed()>Duration::from_secs(20)&&capture_result.is_none(){capture_result=Some(Err("Native WebKit screenshot timed out before the editor rendered".into()));window.request(Command::Quit);}
+            window.minimized(native.is_minimized());
             let (keep_open,focus)=window.presentation();
             if !keep_open||!worker.shared.running.load(Ordering::Acquire){*flow=ControlFlow::Exit;}
-            else if focus{native.set_minimized(false);native.set_focus();}
+            else if focus{window.minimized(false);native.set_minimized(false);native.set_focus();}
         });
         *worker.shared.proxy.lock().unwrap() = None;
         drop(webview);
         drop(native);
+        // The GTK loop has stopped. Deliver queued surface destruction before
+        // sleeping in background mode, or KWin can retain a ghost editor as the
+        // foreground window and suppress Smart Profile fallback.
+        if let Some(display) = gtk::gdk::Display::default() {
+            display.flush();
+        }
         window.detach();
         ensure!(
             exit == 0,

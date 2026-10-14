@@ -53,6 +53,22 @@ wake. Normal key/strip frames continue to update in the cache, and reconnect
 replays the currently selected layer. No reset, persistent gallery installation
 or firmware update is involved.
 
+On Plus, normal rendering first clears the full LCD to black with the documented
+`03/05` RGB fill feature report, then replays the key and touch-strip images.
+This runs once on connection/reconnection and after leaving a software
+screensaver. Individual image transfers leave the pixels outside their windows
+untouched; without this clear, previous full-screen content can remain visible
+along the strip and key edges. Active screensavers are never cleared by this
+normal-rendering path. Other models retain their existing behavior.
+
+The 14 October 2026 regression test first failed because no clear preceded normal
+frames. It now checks startup, wake, reconnect, and absence of repeated clears on
+ordinary updates. The 31 device-session tests and the simulated sleep/wake
+integration suite pass. On the connected Plus, the installed release build
+accepted the black fill followed by all eight key images and the touch strip.
+User photos show colored fragments around normal controls; their disappearance
+still requires optical confirmation after applying the fix.
+
 Software playback uses Deckforge's logo by default, aspect-preserving black
 letterboxing, continuous GIF looping and a 10 ms floor for zero-delay frames.
 Native crop/zoom, finite GIF-loop semantics, standby installation and the original

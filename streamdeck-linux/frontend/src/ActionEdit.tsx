@@ -20,6 +20,9 @@ export function ActionEdit({
   onPaste,
   onRemove,
   onCancelCut,
+  onCreateLogic,
+  onImport,
+  onExport,
   openRequest,
   destinationAvailable = true,
 }: {
@@ -32,6 +35,9 @@ export function ActionEdit({
   onPaste: () => void;
   onRemove: () => void;
   onCancelCut: () => void;
+  onCreateLogic?: () => void;
+  onImport?: () => void;
+  onExport?: () => void;
   destinationAvailable?: boolean;
   openRequest?: { id: number; anchor?: { x: number; y: number } };
 }) {
@@ -133,6 +139,33 @@ export function ActionEdit({
         >
           Paste <kbd>Ctrl V</kbd>
         </button>
+        {onImport && (
+          <button
+            type="button"
+            disabled={readonly || busy || !destinationAvailable}
+            onClick={() => choose(onImport)}
+          >
+            Import Action…
+          </button>
+        )}
+        {onExport && (
+          <button
+            type="button"
+            disabled={!slot || busy}
+            onClick={() => choose(onExport)}
+          >
+            Export Action…
+          </button>
+        )}
+        {onCreateLogic && (
+          <button
+            type="button"
+            disabled={readonly || busy || !destinationAvailable}
+            onClick={() => choose(onCreateLogic)}
+          >
+            Create Key Logic
+          </button>
+        )}
         <button
           type="button"
           className="danger quiet"

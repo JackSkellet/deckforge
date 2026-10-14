@@ -58,6 +58,7 @@ pub fn run(options: WebviewOptions) -> Result<()> {
     );
     let mut event_loop = EventLoopBuilder::<BrowserEvent>::with_user_event().build();
     let window = WindowBuilder::new()
+        .with_window_icon(Some(crate::window::icon()?))
         .with_title(if options.visible {
             "Deckforge · Plugin settings"
         } else {

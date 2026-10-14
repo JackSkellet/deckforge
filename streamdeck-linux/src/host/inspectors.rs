@@ -224,6 +224,19 @@ impl Host {
     }
 
     pub(super) fn inspector_message(&mut self, registration: &str, message: Value) -> Result<()> {
+        let label = match message["event"].as_str() {
+            Some("setSettings") => Some("Edit plugin settings"),
+            Some("setResources") => Some("Edit plugin resources"),
+            _ => None,
+        };
+        if let Some(label) = label {
+            return self.history_edit(label, None, |host| {
+                host.inspector_message_inner(registration, message)
+            });
+        }
+        self.inspector_message_inner(registration, message)
+    }
+    fn inspector_message_inner(&mut self, registration: &str, message: Value) -> Result<()> {
         if let Some(device) = self
             .inspector_device(registration)
             .filter(|device| device != &self.device)

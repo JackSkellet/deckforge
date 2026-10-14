@@ -88,7 +88,9 @@ impl Host {
         let needs_keyboard = steps.iter().any(|e| {
             matches!(
                 e.uuid.as_str(),
-                crate::system_actions::HOTKEY | crate::system_actions::MULTIMEDIA
+                crate::system_actions::HOTKEY
+                    | crate::system_actions::HOTKEY_SWITCH
+                    | crate::system_actions::MULTIMEDIA
             )
         });
         if needs_keyboard {
@@ -270,6 +272,13 @@ impl Host {
         pressed: bool,
         cancelled: bool,
     ) -> Result<()> {
+        if slot.uuid == crate::key_logic::UUID {
+            if cancelled {
+                self.cancel_trigger(&slot.context);
+                return Ok(());
+            }
+            return self.logic_button(slot, pressed);
+        }
         if slot.uuid == library::BACK_FOLDER {
             if cancelled {
                 self.folder_back_holds.remove(&slot.context);
@@ -292,6 +301,16 @@ impl Host {
             return Ok(());
         }
         if mixer_actions::supported(&slot.uuid) || crate::system_actions::supported(&slot.uuid) {
+            if cancelled && slot.uuid == crate::system_app::UUID {
+                self.open_app_holds.remove(&slot.context);
+                return Ok(());
+            }
+            if cancelled && slot.uuid == crate::system_actions::HOTKEY_SWITCH {
+                if let Some(worker) = &self.system_actions {
+                    worker.submit(&slot.context, crate::system_actions::Plan::Release)?;
+                }
+                return Ok(());
+            }
             if cancelled
                 && !matches!(
                     slot.uuid.as_str(),

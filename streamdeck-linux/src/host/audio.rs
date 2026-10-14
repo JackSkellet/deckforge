@@ -26,7 +26,7 @@ impl Host {
         self.system_status = "Soundboard action queued".into();
         Ok(())
     }
-    fn soundboard_resource(&mut self, context: &str, resource: &str) -> Result<PathBuf> {
+    pub(super) fn soundboard_resource(&mut self, context: &str, resource: &str) -> Result<PathBuf> {
         let slot = self
             .slot_any(context)
             .context("Audio resource owner missing")?;

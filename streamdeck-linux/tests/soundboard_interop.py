@@ -66,7 +66,8 @@ def main():
         if pactl('get-default-sink')!=original:pactl('set-default-sink',original)
         with tempfile.TemporaryDirectory(prefix='deckforge-audio-') as directory:
             root=Path(directory);tone=root/'tone.wav';wav(tone)
-            host=Host(args.binary.resolve(),[],root/'state',root/'host.log')
+            # The shipped audio profile is Galleon; foreign-model imports retain the active profile.
+            host=Host(args.binary.resolve(),[],root/'state',root/'host.log',model='galleon')
             try:
                 host.ready();host.post({'command':'soundboard_refresh'})
                 host.wait(lambda s:any(o[0]==sink for o in s['audio_outputs']),'real output enumeration')

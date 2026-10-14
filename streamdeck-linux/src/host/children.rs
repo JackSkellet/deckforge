@@ -1,6 +1,17 @@
 //! Shared ownership for container actions. Raw formats remain container-specific.
 use super::*;
 impl Slot {
+    pub(super) fn coordinates(&self) -> (u8, u8) {
+        self.event_coordinates
+            .unwrap_or_else(|| match self.controller.as_str() {
+                "Keypad" => (
+                    self.index % self.model.columns(),
+                    self.index / self.model.columns(),
+                ),
+                "Encoder" => self.model.encoder_coordinates(self.index),
+                _ => (self.index, 0),
+            })
+    }
     pub(super) fn flatten(&self) -> Vec<&Self> {
         let mut slots = vec![self];
         for child in self.children.iter().flatten() {
@@ -59,7 +70,10 @@ impl Slot {
         let multi = multiaction::container(&self.uuid);
         let stack = self.uuid == crate::dial_stack::UUID;
         let wheel = self.uuid == crate::action_wheel::UUID;
-        let trigger = self.uuid == crate::action_trigger::UUID;
+        let trigger = matches!(
+            self.uuid.as_str(),
+            crate::action_trigger::UUID | crate::key_logic::UUID
+        );
         if !multi && !stack && !trigger && !wheel {
             return;
         }
@@ -109,7 +123,10 @@ impl Slot {
         let multi = multiaction::container(&self.uuid);
         let stack = self.uuid == crate::dial_stack::UUID;
         let wheel = self.uuid == crate::action_wheel::UUID;
-        let trigger = self.uuid == crate::action_trigger::UUID;
+        let trigger = matches!(
+            self.uuid.as_str(),
+            crate::action_trigger::UUID | crate::key_logic::UUID
+        );
         if !multi && !stack && !trigger && !wheel {
             // Unknown containers keep their raw Actions. They do not activate a
             // stale private runtime child tree from another action type.
@@ -140,7 +157,7 @@ impl Slot {
                 .map(|g| g.into_iter().map(|e| (e.id, e.uuid, e.raw)).collect())
                 .collect()
         } else if trigger {
-            crate::action_trigger::parse(&parent_raw)?
+            crate::action_trigger::parse_for(&parent_raw, &self.uuid)?
                 .children
                 .into_iter()
                 .map(|entry| entry.into_iter().map(|e| (e.id, e.uuid, e.raw)).collect())
@@ -167,6 +184,7 @@ impl Slot {
             ]
         };
         let keypad = multi || trigger || wheel;
+        let coordinates = self.coordinates();
         // Build a complete candidate before assigning it. Any invalid descendant
         // leaves the previous tree, contexts and raw record intact.
         let mut hydrated = Vec::with_capacity(groups.len());
@@ -205,6 +223,18 @@ impl Slot {
                             .filter(|s| s.raw.get("Resources") == raw.get("Resources"))
                             .and_then(|s| s.resources.clone()),
                         in_multi_action: multi,
+                        event_coordinates: Some(coordinates),
+                        encoder_overrides: previous
+                            .map(|s| {
+                                s.encoder_overrides
+                                    .iter()
+                                    .filter(|(key, _)| {
+                                        s.raw["Encoder"][*key] == raw["Encoder"][*key]
+                                    })
+                                    .map(|(k, v)| (k.clone(), v.clone()))
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
                         controller: if keypad { "Keypad" } else { "Encoder" }.into(),
                         index: self.index,
                         uuid: uuid.clone(),
@@ -238,6 +268,7 @@ impl Slot {
                     }
                 };
                 child.in_multi_action = multi;
+                child.event_coordinates = Some(coordinates);
                 child.controller = if keypad { "Keypad" } else { "Encoder" }.into();
                 child.index = self.index;
                 child.hydrate_children_at(actions, depth + 1)?;

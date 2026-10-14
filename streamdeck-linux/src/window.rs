@@ -2,14 +2,30 @@
 use crate::{instance::Command, tray::Event};
 use eframe::egui;
 use serde_json::{Value, json};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{
+    Arc, Condvar, Mutex,
+    atomic::{AtomicU8, Ordering},
+};
 use std::time::Duration;
+
+/// Use the same artwork as the launcher, including when run outside an install.
+pub fn icon() -> anyhow::Result<tao::window::Icon> {
+    let image = image::load_from_memory(include_bytes!("../assets/deckforge.png"))?.into_rgba8();
+    let (width, height) = image.dimensions();
+    Ok(tao::window::Icon::from_rgba(
+        image.into_raw(),
+        width,
+        height,
+    )?)
+}
 
 #[derive(Clone)]
 pub struct Window(Arc<(Mutex<State>, Condvar)>);
 struct State {
     wakeup: Option<Arc<dyn Fn() + Send + Sync>>,
     visible: bool,
+    minimized: bool,
+    smart_visibility: Option<Arc<AtomicU8>>,
     window_open: bool,
     editor_generation: u64,
     focus: bool,
@@ -17,12 +33,32 @@ struct State {
     tray_online: bool,
     tray_error: Option<String>,
 }
+impl State {
+    fn report_visibility(&self) {
+        if let Some(flag) = &self.smart_visibility {
+            flag.store(
+                if self.quitting {
+                    3
+                } else if !self.visible {
+                    0
+                } else if self.minimized {
+                    2
+                } else {
+                    1
+                },
+                Ordering::Release,
+            );
+        }
+    }
+}
 impl Window {
     pub fn new(visible: bool) -> Self {
         Self(Arc::new((
             Mutex::new(State {
                 wakeup: None,
                 visible,
+                minimized: false,
+                smart_visibility: None,
                 window_open: false,
                 editor_generation: 0,
                 focus: false,
@@ -43,6 +79,7 @@ impl Window {
             let mut state = self.0.0.lock().unwrap();
             state.wakeup = Some(wakeup.clone());
             state.window_open = true;
+            state.minimized = false;
             state.editor_generation += 1;
         }
         wakeup();
@@ -64,6 +101,7 @@ impl Window {
             match command {
                 Command::Show => {
                     state.visible = true;
+                    state.minimized = false;
                     state.focus = true;
                 }
                 Command::Hide | Command::Close => state.visible = false,
@@ -72,6 +110,7 @@ impl Window {
             }
             self.0.1.notify_one();
         }
+        state.report_visibility();
         let wakeup = (command != Command::Status)
             .then(|| state.wakeup.clone())
             .flatten();
@@ -118,6 +157,16 @@ impl Window {
             }
         }
     }
+    pub fn track_smart_visibility(&self, flag: Arc<AtomicU8>) {
+        let mut state = self.0.0.lock().unwrap();
+        state.smart_visibility = Some(flag);
+        state.report_visibility();
+    }
+    pub fn minimized(&self, minimized: bool) {
+        let mut state = self.0.0.lock().unwrap();
+        state.minimized = minimized;
+        state.report_visibility();
+    }
     pub fn quitting(&self) -> bool {
         self.0.0.lock().unwrap().quitting
     }
@@ -147,6 +196,26 @@ impl Window {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn smart_profile_guard_tracks_visibility_minimize_and_quit_immediately() {
+        let window = Window::new(true);
+        let flag = Arc::new(AtomicU8::new(0));
+        window.track_smart_visibility(flag.clone());
+        assert_eq!(flag.load(Ordering::Acquire), 1);
+        window.minimized(true);
+        assert_eq!(flag.load(Ordering::Acquire), 2);
+        window.minimized(false);
+        assert_eq!(flag.load(Ordering::Acquire), 1);
+        window.request(Command::Hide);
+        assert_eq!(flag.load(Ordering::Acquire), 0);
+        window.request(Command::Show);
+        assert_eq!(flag.load(Ordering::Acquire), 1);
+        window.minimized(true);
+        window.request(Command::Quit);
+        assert_eq!(flag.load(Ordering::Acquire), 3);
+    }
+
     #[test]
     fn visibility_coalesces_but_quit_is_sticky() {
         let window = Window::new(true);

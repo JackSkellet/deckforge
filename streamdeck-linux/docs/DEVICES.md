@@ -1,14 +1,14 @@
 # Device models
 
 Deckforge has model-specific HID transports for the documented Mini, 15-key,
-XL, Plus, Plus XL and Neo families, plus original 2017, Studio and input-only
+XL, Plus, Plus XL and Neo families, plus original 2017, Studio, Galleon and input-only
 Pedal transports. The
 implementations use Elgato's published protocols and static evidence from the
 original application. Only the attached Stream Deck+ has physical
 acceptance evidence. Packet tests, simulated input and native editor tests do
 not establish that another model works on hardware.
 
-| Layout | Keys | Dials | USB product IDs (vendor `0fd9`) | Evidence boundary |
+| Layout | Keys | Dials | USB product IDs (`0fd9` unless noted) | Evidence boundary |
 | --- | --- | --- | --- | --- |
 | Mini | 3 × 2 | — | `0063`, `0090`, `00b3`, `00b8` | Protocol and packet tests; physical validation pending |
 | Stream Deck 2017 | 5 × 3 | — | `0060` | Native protocol evidence and codec tests; physical validation pending |
@@ -18,6 +18,7 @@ not establish that another model works on hardware.
 | Plus XL | 9 × 4 | 6 | `00c6` | Protocol and packet tests; physical validation pending |
 | Neo | 4 × 2 | — | `009a` | Protocol and packet tests; physical validation pending |
 | Studio | 16 × 2 | 2 | `00aa` | Native USB/SDK contracts, packet and native editor tests; physical validation pending |
+| Galleon 100 SD | 3 × 4 | 2 physical, 4 widgets | Corsair `1b1c:2b18`, `1b1c:2b4b` | Native USB contracts, packet/heartbeat tests and verified profile/editor/simulation; physical validation pending |
 | Pedal | 3 × 1 | — | `0086` | Input/metadata protocol recovered from the original executable; physical validation pending |
 
 The module products in the table use the matching documented family. The
@@ -42,7 +43,7 @@ deckforge desktop --simulate --model plus-xl --state /tmp/deckforge-plus-xl
 ```
 
 Model names are `mini`, `classic`, `classic-2017`, `xl`, `plus`, `plus-xl`, `neo`,
-`studio` and `pedal`. The two 15-key generations can use each other's profiles while
+`studio`, `galleon` and `pedal`. The two 15-key generations can use each other's profiles while
 keeping their original device metadata and distinct USB protocols.
 The temporary `--legacy-editor` fallback supports Plus only; use the default
 TypeScript editor for other models. Saved sessions retain their model across
@@ -151,3 +152,9 @@ remaining original-2017 controls and Studio USB contracts. Those newly recovered
 original-2017 controls are still pending. Studio key output, encoder input and
 brightness now have codec, process and native editor coverage, with the remaining
 limits listed above.
+
+Encoder-display models offer **Page options → Set display background** and
+**Remove display background**. Images are copied into managed profile storage
+and embedded on export; changing the selected device while the file dialog is
+open does not redirect the edit. Galleon also streams animated WebP backgrounds; other models retain still-image behavior.
+See [Galleon backgrounds](GALLEON.md) for the rendering and evidence boundary.

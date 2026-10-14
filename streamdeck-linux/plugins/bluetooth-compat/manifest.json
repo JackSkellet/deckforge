@@ -1,0 +1,102 @@
+{
+  "UUID": "com.flowkits.bluetooth",
+  "Name": "Bluetooth for Linux",
+  "Author": "Deckforge",
+  "Description": "Independent Linux Bluetooth controls using BlueZ. Compatible action identities for existing Bluetooth Buddy profiles.",
+  "Version": "1.0.0",
+  "SDKVersion": 2,
+  "CodePath": "plugin.mjs",
+  "Nodejs": {
+    "Version": "24"
+  },
+  "Category": "Bluetooth for Linux",
+  "CategoryIcon": "icons/bluetooth",
+  "Icon": "icons/bluetooth",
+  "Software": {
+    "MinimumVersion": "6.4"
+  },
+  "OS": [
+    {
+      "Platform": "linux",
+      "MinimumVersion": "0"
+    }
+  ],
+  "Actions": [
+    {
+      "UUID": "com.flowkits.bluetooth.device",
+      "Name": "Bluetooth Device",
+      "Icon": "icons/bluetooth",
+      "Tooltip": "Connect or disconnect a paired device.",
+      "Controllers": [
+        "Keypad"
+      ],
+      "PropertyInspectorPath": "ui/index.html",
+      "SupportedInMultiActions": false,
+      "States": [
+        {
+          "Image": "icons/bluetooth",
+          "ShowTitle": false
+        }
+      ]
+    },
+    {
+      "UUID": "com.flowkits.bluetooth.radio",
+      "Name": "Bluetooth Radio",
+      "Icon": "icons/bluetooth",
+      "Tooltip": "Turn Bluetooth on or off.",
+      "Controllers": [
+        "Keypad"
+      ],
+      "PropertyInspectorPath": "ui/index.html",
+      "SupportedInMultiActions": false,
+      "States": [
+        {
+          "Image": "icons/bluetooth",
+          "ShowTitle": false
+        }
+      ]
+    },
+    {
+      "UUID": "com.flowkits.bluetooth.disconnect-all",
+      "Name": "Disconnect All",
+      "Icon": "icons/bluetooth",
+      "Tooltip": "Disconnect all connected Bluetooth devices.",
+      "Controllers": [
+        "Keypad"
+      ],
+      "PropertyInspectorPath": "ui/index.html",
+      "SupportedInMultiActions": false,
+      "States": [
+        {
+          "Image": "icons/bluetooth",
+          "ShowTitle": false
+        }
+      ]
+    },
+    {
+      "UUID": "com.flowkits.bluetooth.battery-dial",
+      "Name": "Bluetooth Battery",
+      "Icon": "icons/bluetooth",
+      "Tooltip": "Rotate or tap to choose a device. Press to connect or disconnect.",
+      "Controllers": [
+        "Encoder"
+      ],
+      "PropertyInspectorPath": "ui/index.html",
+      "SupportedInMultiActions": false,
+      "States": [
+        {
+          "Image": "icons/bluetooth",
+          "ShowTitle": false
+        }
+      ],
+      "Encoder": {
+        "layout": "layouts/battery.json",
+        "TriggerDescription": {
+          "Push": "Connect / disconnect",
+          "Rotate": "Choose device",
+          "Touch": "Next device"
+        }
+      }
+    }
+  ]
+}

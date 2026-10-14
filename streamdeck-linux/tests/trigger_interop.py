@@ -370,9 +370,23 @@ def main():
                 source = evidence.parent / path
                 require(hashlib.sha256(source.read_bytes()).hexdigest() == fixtures[0]['archive_sha256'],
                         'Original Windows source archive changed')
-                restart.post({'command': 'import_profile', 'path': str(source)})
+                # A foreign-model import must not replace the Plus active profile.
+                # Run each original fixture on its own declared model instead.
+                from models_interop import MODELS
+                with zipfile.ZipFile(source) as archive:
+                    declared = next(json.loads(archive.read(name))['Device']['Model']
+                        for name in archive.namelist() if name.endswith('manifest.json')
+                        and isinstance(json.loads(archive.read(name)).get('Device'),dict))
+                model = next(name for name,values in MODELS.items() if values[4]==declared)
+                fixture_host = Host(args.binary.resolve(), [], root/f'original-{i}', root/f'original-{i}.log', model=model)
                 output = root / f'original-trigger-{i}.streamDeckProfile'
-                restart.post({'command': 'export_profile', 'path': str(output)})
+                try:
+                    fixture_host.ready()
+                    fixture_host.post({'command': 'import_profile', 'path': str(source)})
+                    require(fixture_host.state()['device_model']==model,'Original fixture model changed')
+                    fixture_host.post({'command': 'export_profile', 'path': str(output)})
+                finally:
+                    fixture_host.stop()
                 exported_records = {a.get('ActionID'): a for a in records(output)}
                 for fixture in fixtures:
                     original = fixture['action']

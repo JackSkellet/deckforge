@@ -41,6 +41,8 @@ pub(super) struct Page {
     pub source_manifest: Option<String>,
     #[serde(default)]
     pub asset_source: Option<transfer::AssetSource>,
+    #[serde(default)]
+    pub background_source: Option<transfer::AssetSource>,
     pub manifest_path: String,
 }
 #[derive(Clone, Serialize, Deserialize)]
@@ -92,6 +94,7 @@ fn page(name: &str) -> Page {
         slots: vec![],
         raw: json!({"Controllers":[]}),
         source_manifest: None,
+        background_source: None,
         asset_source: None,
         manifest_path: page_path(&id),
     }
@@ -225,7 +228,9 @@ pub(super) fn position_index(model: Model, controller: &str, column: u8, row: u8
         "Keypad" if column < model.columns() && row < model.rows() => {
             Some(row * model.columns() + column)
         }
-        "Encoder" if column < model.dial_count() && row == 0 => Some(column),
+        "Encoder" if column < model.encoder_columns() && row < model.encoder_rows() => {
+            Some(row * model.encoder_columns() + column)
+        }
         "Neo" if model == Model::Neo && column == 1 && row == 0 => Some(1),
         _ => None,
     }
@@ -469,7 +474,7 @@ impl Library {
         let active_model = self.current().ok().map(|p| p.model);
         let active_device = self.current().ok().map(|p| p.device.as_str());
         json!({"active_profile":self.active_profile,"active_page":self.active_page,"folder_depth":self.folders.len(),
-            "profiles":self.profiles.iter().filter(|p|Some(p.device.as_str())==active_device).map(|p|json!({"id":p.id,"name":p.name,"device":p.device,"model":p.model,"device_name":p.model.name(),"compatible":active_model.is_some_and(|model|p.model.profile_compatible(model)),"readonly":p.readonly,"pin_page":p.pin_page,"page_order":p.page_order,
+            "profiles":self.profiles.iter().filter(|p|Some(p.device.as_str())==active_device).map(|p|json!({"id":p.id,"name":p.name,"device":p.device,"model":p.model,"device_name":p.model.name(),"compatible":active_model.is_some_and(|model|p.model.profile_compatible(model)),"readonly":p.readonly,"app_identifier":p.raw["AppIdentifier"].as_str(),"pin_page":p.pin_page,"page_order":p.page_order,
                 "pages":p.page_order.iter().filter_map(|id|p.pages.iter().find(|page| &page.id==id)).chain(p.pages.iter().filter(|page|page.id!=p.pin_page&&!p.page_order.contains(&page.id))).map(|page|json!({"id":page.id,"name":page_label(p,page),"folder":!p.page_order.contains(&page.id)})).collect::<Vec<_>>()})).collect::<Vec<_>>()})
     }
 }
@@ -481,6 +486,80 @@ pub(super) struct PageNavigation {
 }
 
 impl Host {
+    /// Save profile/navigation/routing as one graph before emitting lifecycle
+    /// changes. None keeps the stored routing preferences untouched.
+    pub(super) fn commit_profile_change(
+        &mut self,
+        next: Library,
+        smart: Option<smart_profiles::Config>,
+    ) -> Result<()> {
+        next.validate()?;
+        let slots = next.visible()?;
+        let refresh = next.active_profile != self.library.active_profile
+            || next.active_page != self.library.active_page;
+        let old_library = std::mem::replace(&mut self.library, next);
+        let old_slots = std::mem::replace(&mut self.slots, slots);
+        let old_smart = smart.map(|config| self.smart_profiles.insert(self.scope.clone(), config));
+        let mode = std::mem::replace(&mut self.canonical_graph_update, true);
+        if let Err(error) = self.persist() {
+            self.library = old_library;
+            self.slots = old_slots;
+            self.canonical_graph_update = mode;
+            match old_smart {
+                Some(Some(config)) => {
+                    self.smart_profiles.insert(self.scope.clone(), config);
+                }
+                Some(None) => {
+                    self.smart_profiles.remove(&self.scope);
+                }
+                None => {}
+            }
+            return Err(error);
+        }
+        self.slots = old_slots;
+        if !refresh {
+            self.canonical_graph_update = mode;
+            return Ok(());
+        }
+        let result = self
+            .refresh_page()
+            .context("Profile change was saved, but refresh failed");
+        self.canonical_graph_update = mode;
+        result
+    }
+    pub(super) fn publish_profile_copy(
+        &mut self,
+        copy: Profile,
+        binding: Option<smart_profiles::Binding>,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            copy.device == self.device && copy.model.profile_compatible(self.model),
+            "Profile geometry is incompatible with the destination device"
+        );
+        self.sync_all_devices();
+        let routing = binding.map(|binding| {
+            let mut config = self
+                .smart_profiles
+                .get(&self.scope)
+                .cloned()
+                .unwrap_or_else(|| self.smart_config());
+            config.bindings.insert(copy.id.clone(), binding);
+            config
+        });
+        let id = copy.id.clone();
+        let first = copy
+            .page_order
+            .first()
+            .context("Copied profile has no page")?
+            .clone();
+        let mut next = self.library.clone();
+        next.profiles.push(copy);
+        next.previous = Some((next.active_profile.clone(), next.active_page.clone()));
+        next.active_profile = id;
+        next.active_page = first;
+        next.folders.clear();
+        self.commit_profile_change(next, routing)
+    }
     /// Use the same root page as step_page when inside a folder.
     pub(super) fn page_navigation(&self) -> PageNavigation {
         let changes_page = |direction| {
@@ -617,6 +696,30 @@ impl Host {
             .collect();
         for (context, action) in removed {
             self.remember_removed(&context, &action);
+        }
+        // Container edits can retain the parent context while invalidating a
+        // running child's address. Release against the old tree before swapping
+        // projections, including legacy children whose IDs are positional.
+        let changed: Vec<_> = self
+            .slots
+            .iter()
+            .flat_map(Slot::visible_flatten)
+            .filter(|s| multiaction::container(&s.uuid) || s.uuid == crate::dial_stack::UUID)
+            .filter(|old| {
+                next.iter()
+                    .flat_map(Slot::visible_flatten)
+                    .find(|s| s.context == old.context)
+                    .is_some_and(|new| new.raw["Actions"] != old.raw["Actions"])
+            })
+            .map(|s| (s.context.clone(), s.uuid.clone()))
+            .collect();
+        for (context, uuid) in changed {
+            if multiaction::container(&uuid) {
+                self.cancel_multi(&context);
+            } else {
+                self.stack_gestures.remove(&context);
+                self.stack_cooldown.remove(&context);
+            }
         }
         self.cancel_changed_triggers(&next);
         self.cancel_departing_triggers(&new);
@@ -784,6 +887,20 @@ impl Host {
         owner: Option<&str>,
         readonly: bool,
     ) -> Result<String> {
+        let (profile, current) = self.prepare_bundle(bundle, owner, readonly)?;
+        let id = profile.id.clone();
+        self.library.profiles.push(profile);
+        self.library.cursors.insert(id.clone(), current);
+        Ok(id)
+    }
+    // Prepare assets and graph without publishing a profile or running actions.
+    pub(super) fn prepare_bundle(
+        &mut self,
+        bundle: profile::ProfileBundle,
+        owner: Option<&str>,
+        readonly: bool,
+    ) -> Result<(Profile, String)> {
+        let action_defaults = crate::action_defaults::import_defaults(&bundle);
         let model = match bundle.raw["Device"]["Model"]
             .as_str()
             .filter(|s| !s.is_empty())
@@ -861,6 +978,12 @@ impl Host {
                         .unwrap_or("$B1")
                         .to_owned()
                 };
+                let mut raw = item.raw.clone();
+                crate::action_defaults::materialize_action(&mut raw, action_defaults, 0);
+                let settings = raw
+                    .get("Settings")
+                    .cloned()
+                    .unwrap_or_else(|| item.settings.clone());
                 slots.push(Slot {
                     model,
                     children: vec![],
@@ -869,12 +992,14 @@ impl Host {
                     asset_source: None,
                     appearances: Default::default(),
                     in_multi_action: false,
+                    event_coordinates: None,
+                    encoder_overrides: HashMap::new(),
                     context: new_id(),
                     controller: item.controller.clone(),
                     index,
                     uuid: item.uuid.clone(),
                     name: name.clone(),
-                    settings: item.settings.clone(),
+                    settings,
                     title: item.states[state as usize]["Title"]
                         .as_str()
                         .unwrap_or_else(|| {
@@ -894,7 +1019,7 @@ impl Host {
                     layout,
                     states: item.states.clone(),
                     background,
-                    raw: item.raw.clone(),
+                    raw,
                     image_changed: false,
                     title_changed: false,
                     pinned: false,
@@ -918,6 +1043,7 @@ impl Host {
                 raw: imported.page_raw.clone(),
                 asset_source: None,
                 source_manifest: Some(original),
+                background_source: None,
                 manifest_path: target,
             });
         }
@@ -947,7 +1073,7 @@ impl Host {
         } else {
             order[0].clone()
         };
-        self.library.profiles.push(Profile {
+        let profile = Profile {
             model,
             id: id.clone(),
             name: bundle.name.clone(),
@@ -959,12 +1085,11 @@ impl Host {
             source: Some(source),
             owner_plugin: owner.map(str::to_owned),
             readonly,
-        });
-        self.library.cursors.insert(id.clone(), current);
+        };
         for warning in bundle.warnings {
             self.log(warning);
         }
-        Ok(id)
+        Ok((profile, current))
     }
 
     pub(super) fn library_command(&mut self, r: &Value) -> Result<()> {
@@ -1008,9 +1133,8 @@ impl Host {
                     .find(|p| p.id == id)
                     .context("Profile missing")?;
                 let p = copied_profile(original, &valid_name(&r["name"])?, &self.actions)?;
-                let id = p.id.clone();
-                self.library.profiles.push(p);
-                return self.select_profile(&id, None);
+                let binding = self.smart_config().bindings.get(id).cloned();
+                return self.publish_profile_copy(p, binding);
             }
             "profile_delete" => {
                 if self
@@ -1399,6 +1523,8 @@ fn navigation_slot(uuid: &str, name: &str, index: u8, settings: Value, model: Mo
         asset_source: None,
         appearances: Default::default(),
         in_multi_action: false,
+        event_coordinates: None,
+        encoder_overrides: HashMap::new(),
         context: new_id(),
         controller: "Keypad".into(),
         index,
@@ -1583,5 +1709,9 @@ mod model_tests {
         }
         assert_eq!(position_index(Model::Neo, "Neo", 1, 0), Some(1));
         assert_eq!(position_index(Model::Neo, "Encoder", 0, 0), None);
+        assert_eq!(position_index(Model::Galleon, "Encoder", 0, 1), Some(2));
+        assert_eq!(position_index(Model::Galleon, "Encoder", 1, 1), Some(3));
+        assert_eq!(position_index(Model::Galleon, "Encoder", 2, 0), None);
+        assert_eq!(position_index(Model::Galleon, "Encoder", 0, 2), None);
     }
 }

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { request, pick } from "./bridge";
+import { IconLibrary } from "./IconLibrary";
 import { Check, Field, NumberField, SelectField } from "./Fields";
 import {
   appearancePatch,
@@ -52,6 +53,7 @@ export function AppearanceEditor({
   const expected = draft.appearanceExpectedState ?? slot.state;
   const stale = hasAppearanceEdits(draft) && expected !== slot.state;
   const [expanded, setExpanded] = useState(false);
+  const [library, setLibrary] = useState<{ choose: (path: string) => void } | null>(null);
   const [fonts, setFonts] = useState<string[]>([]);
   const [fontError, setFontError] = useState("");
   const [result, setResult] = useState<{ key: string; value: Preview } | null>(
@@ -179,6 +181,7 @@ export function AppearanceEditor({
   const colour = params.titleColor ?? "#ffffff";
   return (
     <>
+      {library && <IconLibrary onChoose={library.choose} onClose={() => setLibrary(null)} />}
       <div className="appearance">
         <div className="appearance-preview">
           <div className="selected-art" aria-busy={loading}>
@@ -269,6 +272,10 @@ export function AppearanceEditor({
           disabled={!base || (!slot.appearance && !preview && !bases[state])}
         >
           <div className="appearance-icon-actions">
+            <button type="button" onClick={() => {
+              const original = base, targetState = state, edit = onEdit;
+              if (original) setLibrary({ choose: (path) => edit(targetState, { image_path: path }, original) });
+            }}>Icon library…</button>
             <button
               type="button"
               onClick={() => {

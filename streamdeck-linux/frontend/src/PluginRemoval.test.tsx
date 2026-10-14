@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { Plugins } from "./Panels";
 import App from "./App";
@@ -84,7 +84,7 @@ it("requires an inline exact-plugin confirmation and keeps failure/preconditions
   expect(
     screen.getByRole("region", { name: "Remove Alpha confirmation" }),
   ).toBeTruthy();
-  expect(screen.getByRole("alert").textContent).toContain("did not complete");
+  expect(within(screen.getByRole("region", { name: "Remove Alpha confirmation" })).getByRole("alert").textContent).toContain("did not complete");
   await user.click(screen.getByRole("button", { name: "Cancel" }));
   expect(
     screen.queryByRole("region", { name: "Remove Alpha confirmation" }),

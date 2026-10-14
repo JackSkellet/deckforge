@@ -44,6 +44,8 @@ pub struct Snapshot {
 }
 pub struct Worker {
     latest: Arc<Mutex<Option<Snapshot>>>,
+    artwork_requests: Arc<Mutex<crate::application_artwork::Requests>>,
+    artwork: Arc<Mutex<crate::application_artwork::Artwork>>,
     cancelled: Arc<AtomicBool>,
     stop: mpsc::Sender<()>,
     thread: Option<JoinHandle<()>>,
@@ -57,18 +59,26 @@ impl Worker {
         let latest = Arc::new(Mutex::new(None));
         let cancelled = Arc::new(AtomicBool::new(false));
         let (stop, stopped) = mpsc::channel();
+        let artwork_requests = Arc::new(Mutex::new(Vec::new()));
+        let requests = artwork_requests.clone();
+        let artwork = Arc::new(Mutex::new(Default::default()));
+        let visual_output = artwork.clone();
         let output = latest.clone();
         let cancel = cancelled.clone();
         let thread = thread::Builder::new()
             .name("deckforge-applications".into())
             .spawn(move || {
                 let mut previous = Snapshot::default();
+                let mut visual_cache = crate::application_artwork::Cache::default();
                 loop {
                     match scan(&root, uid, &previous, &cancel) {
                         Ok(next) => previous = next,
                         Err(e) if e.kind() == io::ErrorKind::Interrupted => break,
                         Err(e) => previous.error = Some(format!("Application inventory: {e}")),
                     }
+                    let requests = requests.lock().unwrap().clone();
+                    let visuals = visual_cache.sample(&requests, &previous, &root);
+                    *visual_output.lock().unwrap() = visuals;
                     *output.lock().unwrap() = Some(previous.clone());
                     if stopped.recv_timeout(POLL) != Err(mpsc::RecvTimeoutError::Timeout) {
                         break;
@@ -87,10 +97,18 @@ impl Worker {
         };
         Self {
             latest,
+            artwork_requests,
+            artwork,
             cancelled,
             stop,
             thread,
         }
+    }
+    pub fn watch_artwork(&self, requests: crate::application_artwork::Requests) {
+        *self.artwork_requests.lock().unwrap() = requests;
+    }
+    pub fn artwork(&self) -> crate::application_artwork::Artwork {
+        self.artwork.lock().unwrap().clone()
     }
     pub fn snapshot(&self) -> Option<Snapshot> {
         self.latest.lock().unwrap().clone()
@@ -579,5 +597,93 @@ mod tests {
             assert_eq!(before.executable, executable);
             assert_eq!(before, after);
         }
+    }
+}
+
+/// Read arguments only after confirming the sampled process still owns this directory.
+pub fn matches_arguments(root: &Path, process: &Process, args: &[String]) -> Option<bool> {
+    let dir = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(root.join(process.pid.to_string()))
+        .ok()?;
+    let matches = || -> Option<bool> {
+        if dir.metadata().ok()?.uid() != unsafe { libc::getuid() } {
+            return Some(false);
+        }
+        let stat = stat_at(&dir, process.pid).ok()?;
+        Some(
+            !stat.dead
+                && stat.started == process.started
+                && link_at(&dir, c"exe").ok()? == process.executable,
+        )
+    };
+    if !matches()? {
+        return None;
+    }
+    if args.is_empty() {
+        return Some(true);
+    }
+    // SAFETY: live directory FD and static name; ownership is transferred once.
+    let fd = unsafe {
+        libc::openat(
+            dir.as_raw_fd(),
+            c"cmdline".as_ptr(),
+            libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK,
+        )
+    };
+    if fd < 0 {
+        return None;
+    }
+    let file = unsafe { File::from_raw_fd(fd) };
+    if !file.metadata().ok()?.is_file() {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    file.take(65537).read_to_end(&mut bytes).ok()?;
+    if bytes.len() > 65536 || !matches()? {
+        return None;
+    }
+    let actual: Vec<_> = bytes.split(|b| *b == 0).skip(1).take(args.len()).collect();
+    Some(actual.len() == args.len() && actual.iter().zip(args).all(|(a, b)| *a == b.as_bytes()))
+}
+
+#[cfg(test)]
+mod argument_tests {
+    use super::*;
+    #[test]
+    fn sampled_identity_and_literal_argument_prefix_must_both_match() {
+        let child = std::process::Command::new("/usr/bin/sleep")
+            .arg("15")
+            .spawn()
+            .unwrap();
+        struct Owned(std::process::Child);
+        impl Drop for Owned {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let child = Owned(child);
+        let Observation::Present(process) = observe(
+            &PathBuf::from(format!("/proc/{}", child.0.id())),
+            child.0.id(),
+            unsafe { libc::getuid() },
+        ) else {
+            panic!("Owned process not observed")
+        };
+        assert_eq!(
+            matches_arguments(Path::new("/proc"), &process, &["15".into()]),
+            Some(true)
+        );
+        assert_eq!(
+            matches_arguments(Path::new("/proc"), &process, &["1".into()]),
+            Some(false)
+        );
+        let changed = Process {
+            started: process.started + 1,
+            ..process
+        };
+        assert_eq!(matches_arguments(Path::new("/proc"), &changed, &[]), None);
     }
 }

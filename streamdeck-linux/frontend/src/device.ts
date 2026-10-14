@@ -4,6 +4,9 @@ export interface DeviceGeometry {
   rows: number;
   keys: number;
   dials: number;
+  physical_dials?: number;
+  encoder_columns?: number;
+  encoder_rows?: number;
   key_width: number;
   key_height: number;
   strip_width: number;
@@ -108,7 +111,9 @@ export function controlName(controller: Controller, snapshot?: Snapshot) {
   return controller === "Neo"
     ? "Infobar"
     : controller === "Encoder"
-      ? "Dial"
+      ? snapshot?.device_model === "galleon"
+        ? "Dial action"
+        : "Dial"
       : snapshot && !hasKeyImages(snapshot)
         ? "Pedal"
         : "Key";

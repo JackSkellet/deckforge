@@ -19,8 +19,8 @@ function iconQueue(bridge: DesktopBridge) {
   const drain = () => {
     while (active < 4 && waiting.length) waiting.shift()!();
   };
-  return (payload: unknown): Promise<unknown> => {
-    const key = JSON.stringify(payload ?? {});
+  return (method: string, payload: unknown): Promise<unknown> => {
+    const key = JSON.stringify([method, payload ?? {}]);
     const existing = pending.get(key);
     if (existing) return existing;
     const result = new Promise((resolve, reject) => {
@@ -28,7 +28,7 @@ function iconQueue(bridge: DesktopBridge) {
         active++;
         void (async () => {
           try {
-            resolve(await bridge.request("action_icon", payload));
+            resolve(await bridge.request(method, payload));
           } catch (error) {
             reject(error);
           } finally {
@@ -54,13 +54,13 @@ export function request<T = any>(
         "Open Deckforge from the installed desktop application. The native connection is unavailable.",
       ),
     );
-  if (method === "action_icon") {
+  if (method === "action_icon" || method === "application_icon" || (method === "icon_packs" && (payload as RecordValue)?.operation === "thumbnail")) {
     let queue = iconQueues.get(window.deckforge);
     if (!queue) {
       queue = iconQueue(window.deckforge);
       iconQueues.set(window.deckforge, queue);
     }
-    return queue(payload) as Promise<T>;
+    return queue(method, payload) as Promise<T>;
   }
   return window.deckforge.request<T>(method, payload);
 }
@@ -70,7 +70,10 @@ export const pick = (kind: string) =>
   request<string | null>("pick_file", { kind });
 
 const globalCommands = new Set([
+  "text_typing_setup",
+  "text_typing_disable",
   "device_select",
+  "smart_preview",
   "device_add",
   "install_plugin",
   "restart_plugin",

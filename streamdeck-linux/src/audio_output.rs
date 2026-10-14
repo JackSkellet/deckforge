@@ -53,6 +53,7 @@ pub enum Report {
     Status(String),
 }
 enum Command {
+    StopContext(String),
     Play(String, Config),
     Refresh,
 }
@@ -112,6 +113,7 @@ impl Worker {
                         }
                         let connection = connection.as_mut().unwrap();
                         match job.command {
+                            Command::StopContext(context) => mixer.stop_context(&context),
                             Command::Refresh => {
                                 let outputs = connection.outputs(&done, &mut mixer, &reporter)?;
                                 let _ = reporter.send(Report::Outputs(outputs));
@@ -176,6 +178,9 @@ impl Worker {
     }
     pub fn play(&self, context: &str, config: Config) -> Result<()> {
         self.send(Command::Play(context.into(), config))
+    }
+    pub fn stop_context(&self, context: &str) -> Result<()> {
+        self.send(Command::StopContext(context.into()))
     }
     pub fn refresh(&self) -> Result<()> {
         self.send(Command::Refresh)

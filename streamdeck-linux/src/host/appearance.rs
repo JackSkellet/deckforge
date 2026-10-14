@@ -153,7 +153,7 @@ fn metadata(slot: &Slot, actions: &[Action], state: u64) -> Value {
 pub(super) fn style(slot: &Slot, actions: &[Action]) -> TitleStyle {
     TitleStyle::from_state(&metadata(slot, actions, slot.state)).unwrap_or_default()
 }
-fn event_style(slot: &Slot, actions: &[Action]) -> TitleStyle {
+pub(super) fn event_style(slot: &Slot, actions: &[Action]) -> TitleStyle {
     let mut value = style(slot, actions);
     if value.font_family.is_empty() {
         value.font_family = TitleStyle::default().font_family;
@@ -184,6 +184,7 @@ fn builtin_title_owner(uuid: &str) -> bool {
             crate::brightness::UUID
                 | crate::dial_stack::UUID
                 | crate::action_trigger::UUID
+                | crate::key_logic::UUID
                 | crate::action_wheel::UUID
                 | screensaver::UUID
                 | library::OPEN_FOLDER
@@ -561,7 +562,7 @@ impl Controller {
     }
     pub fn appearance_preview(&self, request: Value) -> Result<Value> {
         let (prepared, device) = self.appearance_prepare(&request, false)?;
-        let (actions, root) = {
+        let (actions, root, app_visual) = {
             let mut host = self.shared.lock().unwrap();
             host.with_device(&device, |host| {
                 ensure!(host.running, "Host stopped");
@@ -575,7 +576,12 @@ impl Controller {
                     .find(|a| a.uuid == prepared.slot.uuid)
                     .and_then(|a| host.plugins.iter().find(|p| p.id == a.plugin))
                     .map(|p| p.root.clone());
-                Ok((host.actions.clone(), root))
+                Ok((
+                    host.actions.clone(),
+                    root,
+                    openapp::visual(&host.application_artwork, &prepared.slot)
+                        .map(|v| (v.icon.clone(), v.running)),
+                ))
             })?
         };
         let mut slot = prepared.slot;
@@ -589,7 +595,18 @@ impl Controller {
             } else {
                 (120, 120)
             };
-            renderer.key_styled_size(&slot.title, slot.background.as_ref(), &style, size)
+            let background = app_visual
+                .as_ref()
+                .and_then(|(icon, _)| icon.as_deref())
+                .or(slot.background.as_ref());
+            let mut picture = renderer.key_styled_size(&slot.title, background, &style, size);
+            if app_visual
+                .as_ref()
+                .is_some_and(|(_, running)| *running == Some(true))
+            {
+                crate::application_artwork::mark(&mut picture);
+            }
+            picture
         };
         if slot.controller == "Keypad" && slot.model.capabilities().key_images {
             picture = picture.resize_exact(
@@ -608,7 +625,7 @@ impl Controller {
     pub(super) fn appearance_command(&self, request: Value) -> Result<()> {
         let (prepared, device) = self.appearance_prepare(&request, true)?;
         let mut host = self.shared.lock().unwrap();
-        host.with_device(&device,|host| {
+        host.history_edit("Edit action",request["history_group"].as_str(),|host| host.with_device(&device,|host| {
         ensure!(
             host.running,
             "Host stopped"
@@ -676,7 +693,7 @@ impl Controller {
             host.emit(&edited,"titleParametersDidChange",json!({"title":edited.title,"titleParameters":event_style(&edited,&host.actions),"state":state}));
         }
         host.render()
-        })
+        }))
     }
 }
 
@@ -714,7 +731,10 @@ impl Host {
                 entry.plugin_pixels = hardware.pixels;
                 entry.plugin_animation_source = hardware.animation_source;
                 slot.title = title(slot, &host.actions);
-                slot.background = host.key_images.frame(&slot.context, true).cloned()
+                slot.background = host
+                    .key_images
+                    .frame(&slot.context, true)
+                    .cloned()
                     .or_else(|| host.resolve_state_image(slot, slot.state));
             }
             for child in slot.children.iter_mut().flatten() {
@@ -774,9 +794,17 @@ impl Host {
             (0..count as u64).collect()
         };
         let bytes = if event == "setImage" {
-            value.filter(|v| !v.is_empty()).map(|value| image_bytes(root, value)).transpose()?
-        } else { None };
-        let image = bytes.as_ref().map(|bytes| decode_image_bytes(bytes, value.unwrap())).transpose()?;
+            value
+                .filter(|v| !v.is_empty())
+                .map(|value| image_bytes(root, value))
+                .transpose()?
+        } else {
+            None
+        };
+        let image = bytes
+            .as_ref()
+            .map(|bytes| decode_image_bytes(bytes, value.unwrap()))
+            .transpose()?;
         // Calculate the complete result before cloning pixels across states or
         // splitting a shared plane. Title-only writes can also require a split.
         let image_size = (event == "setImage").then(|| pixel_bytes(image.as_ref()));
@@ -803,8 +831,14 @@ impl Host {
             "Action image states exceed 64 MiB decoded pixels"
         );
         let animation_source = if event == "setImage" {
-            bytes.as_deref().map(|bytes| self.store_plugin_animation(bytes)).transpose()?.flatten()
-        } else {None};
+            bytes
+                .as_deref()
+                .map(|bytes| self.store_plugin_animation(bytes))
+                .transpose()?
+                .flatten()
+        } else {
+            None
+        };
         let affects_current = states.contains(&slot.state);
         for state in states {
             let entry = slot.appearances.entry(state).or_default();
@@ -840,7 +874,11 @@ impl Host {
             }
         }
         if affects_current && event == "setImage" && !custom_image(slot) {
-            self.key_images.restart(&slot.context, target != DisplayTarget::Hardware, !encoder_image && target != DisplayTarget::Software);
+            self.key_images.restart(
+                &slot.context,
+                target != DisplayTarget::Hardware,
+                !encoder_image && target != DisplayTarget::Software,
+            );
         }
         if affects_current && target != DisplayTarget::Hardware {
             if event == "setTitle" {

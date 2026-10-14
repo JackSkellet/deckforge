@@ -4,6 +4,7 @@
 //! stream-deck-xl/, stream-deck-plus/, stream-deck-plus-xl/, stream-deck-neo/.
 //! This module never resets the device or writes firmware.
 
+mod galleon;
 mod legacy2017;
 use crate::device_model::Model;
 use anyhow::{Context, Result, bail, ensure};
@@ -14,6 +15,8 @@ use image::{
     imageops::FilterType,
 };
 use std::ffi::{CStr, CString};
+
+pub(crate) use galleon::brightness as galleon_brightness_value;
 
 const VENDOR: u16 = 0x0fd9;
 const REPORT_SIZE: usize = 1024;
@@ -26,6 +29,7 @@ pub struct DeviceInfo {
     pub serial: Option<String>,
     pub product: Option<String>,
     pub model: Model,
+    pub vendor_id: u16,
     pub product_id: u16,
 }
 
@@ -54,7 +58,7 @@ impl InputState {
         Self {
             model,
             keys: vec![false; usize::from(model.key_count() + model.sensor_count())],
-            dials: vec![false; usize::from(model.dial_count())],
+            dials: vec![false; usize::from(model.physical_dial_count())],
         }
     }
 }
@@ -65,6 +69,7 @@ pub struct Deck {
     serial: String,
     model: Model,
     legacy_firmware: Option<legacy2017::Firmware>,
+    galleon_heartbeat: Option<galleon::Heartbeat>,
     input: InputState,
     trace: bool,
 }
@@ -147,12 +152,59 @@ fn select_candidate<T>(
     bail!("no matching supported Stream Deck found")
 }
 
+fn interface_model(
+    vendor: u16,
+    product: u16,
+    usage_page: u16,
+    usage: u16,
+    interface: i32,
+) -> Option<Model> {
+    if vendor == VENDOR {
+        Model::from_product(product)
+    } else if vendor == 0x1b1c
+        && matches!(product, 0x2b18 | 0x2b4b)
+        && usage_page == 0x0c
+        && usage == 1
+        && interface == 0
+    {
+        Some(Model::Galleon)
+    } else {
+        None
+    }
+}
+fn info_model(info: &hidapi::DeviceInfo) -> Option<Model> {
+    interface_model(
+        info.vendor_id(),
+        info.product_id(),
+        info.usage_page(),
+        info.usage(),
+        info.interface_number(),
+    )
+}
 impl Deck {
+    fn start(mut self) -> Result<Self> {
+        if self.model == Model::Galleon {
+            galleon::Ping::for_firmware(None)?.send(&self.device)?;
+            std::thread::sleep(galleon::WARMUP);
+            let firmware = self.firmware_version()?;
+            self.galleon_heartbeat = Some(galleon::Heartbeat::new(
+                &firmware,
+                std::time::Instant::now(),
+            )?);
+        }
+        Ok(self)
+    }
+    fn keep_alive(&self) -> Result<()> {
+        if let Some(heartbeat) = &self.galleon_heartbeat {
+            heartbeat.poll(std::time::Instant::now(), |ping| ping.send(&self.device))?;
+        }
+        Ok(())
+    }
     pub fn enumerate() -> Result<Vec<DeviceInfo>> {
         let api = HidApi::new().context("initialize HID enumeration")?;
         Ok(api
             .device_list()
-            .filter(|d| d.vendor_id() == VENDOR && Model::from_product(d.product_id()).is_some())
+            .filter(|d| info_model(d).is_some())
             .map(|d| DeviceInfo {
                 path: d.path().to_string_lossy().into_owned(),
                 raw_path: d.path().to_owned(),
@@ -161,7 +213,8 @@ impl Deck {
                     .filter(|serial| !serial.is_empty())
                     .map(str::to_owned),
                 product: d.product_string().map(str::to_owned),
-                model: Model::from_product(d.product_id()).unwrap(),
+                model: info_model(d).unwrap(),
+                vendor_id: d.vendor_id(),
                 product_id: d.product_id(),
             })
             .collect())
@@ -179,11 +232,7 @@ impl Deck {
         let api = HidApi::new().context("initialize HID")?;
         let devices: Vec<_> = api
             .device_list()
-            .filter(|d| {
-                d.vendor_id() == VENDOR
-                    && Model::from_product(d.product_id())
-                        .is_some_and(|m| model.is_none_or(|wanted| wanted == m))
-            })
+            .filter(|d| info_model(d).is_some_and(|m| model.is_none_or(|wanted| wanted == m)))
             .collect();
         let serials: Vec<_> = devices
             .iter()
@@ -191,7 +240,8 @@ impl Deck {
             .collect();
         select_candidate(serial, &serials, |index| {
             Self::open_info(&api, devices[index])
-        })
+        })?
+        .start()
     }
 
     /// Open only the exact enumerated interface. No other device is probed.
@@ -202,9 +252,7 @@ impl Deck {
             .device_list()
             .find(|d| {
                 d.path() == path
-                    && d.vendor_id() == VENDOR
-                    && Model::from_product(d.product_id())
-                        .is_some_and(|m| model.is_none_or(|wanted| m == wanted))
+                    && info_model(d).is_some_and(|m| model.is_none_or(|wanted| m == wanted))
             })
             .context("selected Stream Deck path is unavailable or model changed")?;
         if let (Some(wanted), Some(found)) =
@@ -220,13 +268,13 @@ impl Deck {
             serial.is_none_or(|wanted| wanted == found),
             "device serial does not match selected path"
         );
-        Ok(deck)
+        deck.start()
     }
     pub fn path(&self) -> &CStr {
         &self.path
     }
     fn open_info(api: &HidApi, info: &hidapi::DeviceInfo) -> Result<(String, Self)> {
-        let model = Model::from_product(info.product_id()).unwrap();
+        let model = info_model(info).context("Unsupported HID interface")?;
         let device = info
             .open_device(api)
             .context("open Stream Deck; check hidraw permissions")?;
@@ -265,6 +313,7 @@ impl Deck {
                 serial,
                 model,
                 legacy_firmware,
+                galleon_heartbeat: None,
                 input: InputState::new(model),
                 trace: std::env::var_os("DECKFORGE_TRACE_HID").is_some(),
             },
@@ -312,6 +361,26 @@ impl Deck {
             .context("set Stream Deck backlight brightness")
     }
 
+    /// Clear pixels outside the independently updated Plus key/strip windows.
+    pub fn clear_lcd_background(&self) -> Result<()> {
+        ensure!(
+            matches!(self.model, Model::Plus | Model::Galleon),
+            "model has no background clear command"
+        );
+        let mut report = [0u8; 32];
+        report[..2].copy_from_slice(&[0x03, 0x05]);
+        self.device
+            .send_feature_report(&report)
+            .context("clear Stream Deck Plus LCD background")?;
+        if self.trace {
+            eprintln!(
+                "HID LCD background cleared: model={} rgb=0,0,0",
+                self.model.id()
+            );
+        }
+        Ok(())
+    }
+
     /// Read the documented idle sleep duration. Zero disables device sleep.
     pub fn sleep_seconds(&self) -> Result<u32> {
         ensure!(
@@ -346,7 +415,7 @@ impl Deck {
         Ok(self.read_packet(timeout_ms, true)?.unwrap_or_default())
     }
 
-    /// None means timeout. Some means a physical report arrived, even if decoding
+    /// None means timeout or a non-input Galleon report. Some means a physical input report arrived, even if decoding
     /// produces no transitions. Sleeping reads bypass decoding and retain InputState.
     pub fn read_packet(
         &mut self,
@@ -354,6 +423,12 @@ impl Deck {
         decode: bool,
     ) -> Result<Option<Vec<InputEvent>>> {
         ensure!(timeout_ms >= 0, "input timeout must be nonnegative");
+        self.keep_alive()?;
+        let timeout_ms = if self.model == Model::Galleon {
+            timeout_ms.min(50)
+        } else {
+            timeout_ms
+        };
         let mut report = [0u8; 512];
         let size = self
             .device
@@ -463,6 +538,7 @@ impl Deck {
     }
     fn write_reports(&self, reports: &[[u8; REPORT_SIZE]]) -> Result<()> {
         for report in reports {
+            self.keep_alive()?;
             let written = self.device.write(report).context("write image chunk")?;
             ensure!(
                 written == REPORT_SIZE,
@@ -474,6 +550,9 @@ impl Deck {
 }
 
 fn decode_serial(model: Model, report: &[u8]) -> Result<String> {
+    if model == Model::Galleon {
+        return galleon::serial(report);
+    }
     if model == Model::Classic2017 {
         return legacy2017::decode_serial(report);
     }
@@ -497,6 +576,9 @@ fn decode_serial(model: Model, report: &[u8]) -> Result<String> {
     }
 }
 fn decode_firmware(model: Model, report: &[u8]) -> Result<String> {
+    if model == Model::Galleon {
+        return galleon::firmware(report);
+    }
     if model == Model::Classic2017 {
         return legacy2017::firmware_string(report);
     }
@@ -581,7 +663,7 @@ fn encode_model_jpeg(
     let image = match model {
         Model::Classic | Model::Xl | Model::Neo => image.rotate180(),
         Model::PlusXl => image.rotate270(),
-        Model::Plus | Model::Studio => image,
+        Model::Plus | Model::Studio | Model::Galleon => image,
         _ => bail!("model does not use JPEG images"),
     };
     encode_jpeg(&image, image.width(), image.height())
@@ -726,10 +808,13 @@ impl InputState {
             data.len() == self.keys.len(),
             "unexpected key/sensor payload length"
         );
-        ensure!(data.iter().all(|&v| v <= 1), "invalid key or sensor state");
+        ensure!(
+            self.model == Model::Galleon || data.iter().all(|&v| v <= 1),
+            "invalid key or sensor state"
+        );
         let mut events = Vec::new();
         for (index, (&value, old)) in data.iter().zip(&mut self.keys).enumerate() {
-            let pressed = value == 1;
+            let pressed = value != 0;
             if pressed != *old {
                 let index = index as u8;
                 events.push(if index < self.model.key_count() {
@@ -747,6 +832,17 @@ impl InputState {
     }
     fn packet(&mut self, report: &[u8], decode: bool) -> Result<Option<Vec<InputEvent>>> {
         if report.is_empty() {
+            return Ok(None);
+        }
+        if self.model == Model::Galleon && report.len() >= 4 && !matches!(report[1], 0 | 3) {
+            ensure!(report.len() <= 512, "invalid Galleon report size");
+            let length = usize::from(u16::from_le_bytes([report[2], report[3]]));
+            ensure!(
+                length <= report.len() - 4,
+                "truncated Galleon input payload"
+            );
+            // Unsupported control reports are not user activity and must not
+            // wake the software screen saver, even when decoding is suspended.
             return Ok(None);
         }
         Ok(Some(if decode {
@@ -770,13 +866,25 @@ impl InputState {
             report.len() >= 4 && report.len() <= 512,
             "invalid input report size"
         );
-        ensure!(report[0] == 0x01, "unexpected input report ID");
+        // Galleon's native wrapper supplies controller class0x100 regardless of
+        // the first byte (0x14061abe0). Other families validate report ID1.
+        ensure!(
+            self.model == Model::Galleon || report[0] == 0x01,
+            "unexpected input report ID"
+        );
         let size = usize::from(u16::from_le_bytes([report[2], report[3]]));
         ensure!(size <= report.len() - 4, "truncated input payload");
         let data = &report[4..4 + size];
         let mut events = Vec::new();
         match report[1] {
             0x00 => {
+                if self.model == Model::Galleon {
+                    // Native keypad polling updates min(payload, key count).
+                    let mut states: Vec<_> = self.keys.iter().map(|v| u8::from(*v)).collect();
+                    let count = data.len().min(states.len());
+                    states[..count].copy_from_slice(&data[..count]);
+                    return self.key_events(&states);
+                }
                 return self.key_events(data);
             }
             0x03 => {
@@ -790,7 +898,8 @@ impl InputState {
                         // each byte with bool(nonzero); public Plus protocols
                         // instead specify0/1 and keep their stricter validation.
                         ensure!(
-                            self.model == Model::Studio || data[1..].iter().all(|&v| v <= 1),
+                            matches!(self.model, Model::Studio | Model::Galleon)
+                                || data[1..].iter().all(|&v| v <= 1),
                             "invalid dial button state"
                         );
                         for (index, (&value, old)) in
@@ -818,6 +927,11 @@ impl InputState {
                     }
                     other => bail!("unknown dial subtype: {other:#04x}"),
                 }
+            }
+            _ if self.model == Model::Galleon => {
+                // Native polling has no handler for other controller IDs;
+                // 0x112 is explicitly unsupported. Do not disconnect on them.
+                return Ok(Vec::new());
             }
             0x02 => {
                 ensure!(
@@ -870,6 +984,125 @@ fn touch_position(model: Model, data: &[u8], offset: usize) -> Result<(u16, u16)
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn galleon_discovery_rejects_other_keyboard_interfaces() {
+        for product in [0x2b18, 0x2b4b] {
+            assert_eq!(
+                interface_model(0x1b1c, product, 12, 1, 0),
+                Some(Model::Galleon)
+            );
+            for (vendor, page, usage, interface) in [
+                (VENDOR, 12, 1, 0),
+                (0x1b1c, 1, 1, 0),
+                (0x1b1c, 12, 2, 0),
+                (0x1b1c, 12, 1, 1),
+                (0x1b1c, 12, 1, -1),
+            ] {
+                assert_eq!(
+                    interface_model(vendor, product, page, usage, interface),
+                    None
+                );
+            }
+        }
+        assert_eq!(interface_model(0x1b1c, 0x0084, 12, 1, 0), None);
+        assert_eq!(interface_model(VENDOR, 0x0084, 0, 0, -1), Some(Model::Plus));
+    }
+    #[test]
+    fn galleon_input_preserves_partial_keys_and_physical_encoder_state() {
+        let mut state = InputState::new(Model::Galleon);
+        assert_eq!(state.dials.len(), 2);
+        let mut keys = vec![9, 0, 12, 0];
+        keys.extend([0; 12]);
+        keys[15] = 255;
+        assert_eq!(
+            state.decode(&keys).unwrap(),
+            vec![InputEvent::Key {
+                index: 11,
+                pressed: true
+            }]
+        );
+        assert_eq!(
+            state.decode(&[9, 0, 1, 0, 2]).unwrap(),
+            vec![InputEvent::Key {
+                index: 0,
+                pressed: true
+            }]
+        );
+        assert!(state.keys[11]);
+        assert_eq!(
+            state.decode(&[9, 3, 3, 0, 0, 0, 255]).unwrap(),
+            vec![InputEvent::DialPress {
+                index: 1,
+                pressed: true
+            }]
+        );
+        assert!(state.decode(&[9, 3, 3, 0, 0, 0, 2]).unwrap().is_empty());
+        assert_eq!(
+            state.decode(&[9, 3, 3, 0, 1, 127, 128]).unwrap(),
+            vec![
+                InputEvent::DialRotate {
+                    index: 0,
+                    ticks: 127
+                },
+                InputEvent::DialRotate {
+                    index: 1,
+                    ticks: -128
+                }
+            ]
+        );
+        for command in [0x12, 0x7e, 2] {
+            assert!(state.decode(&[9, command, 0, 0]).unwrap().is_empty());
+        }
+        assert!(state.decode(&[9, 3, 3, 0, 0, 0]).is_err());
+        assert!(state.dials[1]);
+        assert!(state.packet(&[9, 0x12, 0, 0], false).unwrap().is_none());
+        assert!(state.packet(&[9, 0x12, 0, 0], true).unwrap().is_none());
+        assert!(state.packet(&[9, 0x12, 8, 0], false).is_err());
+        assert_eq!(
+            state.decode(&[9, 3, 3, 0, 0, 0, 0]).unwrap(),
+            vec![InputEvent::DialPress {
+                index: 1,
+                pressed: false
+            }]
+        );
+        assert!(InputState::new(Model::Plus).decode(&[9, 0, 0, 0]).is_err());
+    }
+    #[test]
+    fn galleon_jpeg_images_use_native_dimensions_orientation_and_chunk_headers() {
+        for (command, key, width, height) in
+            [(7, 11, 160, 160), (11, 0, 720, 384), (8, 0, 720, 1280)]
+        {
+            let source =
+                DynamicImage::ImageRgb8(image::RgbImage::from_fn(width, height, |x, y| {
+                    if x < width / 2 && y < height / 2 {
+                        image::Rgb([255, 0, 0])
+                    } else {
+                        image::Rgb([0, 0, 255])
+                    }
+                }));
+            let jpeg = encode_model_jpeg(Model::Galleon, &source, width, height).unwrap();
+            let decoded = image::load_from_memory(&jpeg).unwrap().to_rgb8();
+            assert_eq!(decoded.dimensions(), (width, height));
+            assert!(decoded.get_pixel(10, 10).0[0] > 240);
+            assert!(decoded.get_pixel(width - 10, height - 10).0[2] > 240);
+            let reports = model_image_reports(Model::Galleon, command, key, &jpeg).unwrap();
+            let mut assembled = Vec::new();
+            for (index, r) in reports.iter().enumerate() {
+                assert_eq!(
+                    &r[..4],
+                    &[2, command, key, u8::from(index + 1 == reports.len())]
+                );
+                assert_eq!(u16::from_le_bytes([r[6], r[7]]) as usize, index);
+                let size = u16::from_le_bytes([r[4], r[5]]) as usize;
+                assert!(size <= 1016);
+                assembled.extend_from_slice(&r[8..8 + size]);
+                assert!(r[8 + size..].iter().all(|v| *v == 0));
+            }
+            assert_eq!(assembled, jpeg);
+        }
+        assert!(model_image_reports(Model::Galleon, 7, 12, &[1]).is_err());
+        assert!(model_image_reports(Model::Galleon, 11, 1, &[1]).is_err());
+    }
     #[test]
     fn studio_rectangle_identity_jpeg_and_modern_chunks_preserve_the_key_payload() {
         let source = DynamicImage::ImageRgb8(image::RgbImage::from_fn(144, 112, |x, y| {

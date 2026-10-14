@@ -2,8 +2,10 @@
 import { afterEach, it, expect, vi } from "vitest";
 import { cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { useState } from "react";
 import { SettingsFields } from "./Fields";
 import type { MixerConfig } from "./Mixer";
+import type { RecordValue } from "./model";
 const mixer: MixerConfig = {
   enabled: false,
   channels: [{ id: "music", name: "Music", apps: [], sources: [] }],
@@ -14,6 +16,168 @@ const mixer: MixerConfig = {
   routes: [],
 };
 afterEach(cleanup);
+it("edits terminal Text paste shortcuts and preserves them while typing mode is selected", async () => {
+  const user=userEvent.setup();let current:any;
+  function Harness(){const [settings,setSettings]=useState<RecordValue>({pastedText:"hello",isTypingMode:false,linuxKeyMode:"logical",Future:7});current=settings;return <SettingsFields uuid="com.elgato.streamdeck.system.text" controller="Keypad" settings={settings} onChange={setSettings} onError={vi.fn()} />;}
+  render(<Harness />);
+  await user.click(screen.getByText("Paste shortcut"));
+  await user.click(screen.getByLabelText("Shift"));
+  expect(current.Hotkey).toMatchObject({QTKeyCode:86,KeyModifiers:3,linuxKeyMode:"logical"});
+  const shortcut=current.Hotkey;
+  await user.selectOptions(screen.getByLabelText("Text mode"),"typing");
+  expect(screen.queryByText("Paste shortcut")).toBeNull();
+  expect(current.Hotkey).toEqual(shortcut);
+  await user.selectOptions(screen.getByLabelText("Text mode"),"paste");
+  await user.click(screen.getByText("Paste shortcut"));
+  expect((screen.getByLabelText("Shift") as HTMLInputElement).checked).toBe(true);
+  await user.click(screen.getByRole("button",{name:"Reset paste shortcut"}));
+  expect(current.Hotkey).toBeUndefined();
+  expect(current.linuxKeyMode).toBe("logical");
+  expect(current.Future).toBe(7);
+});
+it("renders legacy modifier markers and normalizes only the edited chord", async () => {
+  const user=userEvent.setup();let current:any;
+  function Harness(){const [settings,setSettings]=useState<RecordValue>({Hotkeys:[{QTKeyCode:65,KeyModifiers:8192,KeyCtrl:true,Future:9}],Future:7});current=settings;return <SettingsFields uuid="com.elgato.streamdeck.system.hotkey" controller="Keypad" settings={settings} onChange={setSettings} onError={vi.fn()} />;}
+  render(<Harness />);
+  expect((screen.getByLabelText("Key") as HTMLSelectElement).selectedOptions[0].textContent).toBe("A");
+  expect((screen.getByLabelText("Ctrl") as HTMLInputElement).checked).toBe(true);
+  expect(current.Hotkeys[0].KeyModifiers).toBe(8192);
+  await user.click(screen.getByLabelText("Shift"));
+  expect(current).toEqual({Hotkeys:[{QTKeyCode:65,KeyModifiers:3,KeyCtrl:true,KeyShift:true,Future:9}],Future:7});
+});
+it("shows the authoritative modern mask despite stale legacy fields", async () => {
+  const onChange=vi.fn();
+  render(<SettingsFields uuid="com.elgato.streamdeck.system.hotkey" controller="Keypad" settings={{Hotkeys:[{QTKeyCode:65,KeyModifiers:2,KeyCtrl:false,KeyShift:true,Future:9}]}} onChange={onChange} onError={vi.fn()} />);
+  expect((screen.getByLabelText("Ctrl") as HTMLInputElement).checked).toBe(true);
+  expect((screen.getByLabelText("Shift") as HTMLInputElement).checked).toBe(false);
+  expect(onChange).not.toHaveBeenCalled();
+  await userEvent.selectOptions(screen.getByLabelText("Key"),"1");
+  expect(onChange.mock.calls.at(-1)?.[0].Hotkeys[0]).toMatchObject({QTKeyCode:66,KeyModifiers:2,KeyCtrl:true,KeyShift:false,Future:9});
+});
+it("retains modifier sides across key selection and switches explicitly to generic modifiers", async () => {
+  const user = userEvent.setup(); let current: any;
+  function Harness() {
+    const [settings, setSettings] = useState<RecordValue>({Hotkeys:[{QTKeyCode:65,VKeyCode:65,KeyModifiers:0x10404,Future:9}],Future:7});
+    current=settings;
+    return <SettingsFields uuid="com.elgato.streamdeck.system.hotkey" controller="Keypad" settings={settings} onChange={setSettings} onError={vi.fn()} />;
+  }
+  render(<Harness />);
+  expect((screen.getByLabelText("Alt side") as HTMLSelectElement).value).toBe("2");
+  await user.selectOptions(screen.getByLabelText("Ctrl side"),"3");
+  await user.selectOptions(screen.getByLabelText("Key"),"16");
+  expect(current.Hotkeys[0]).toMatchObject({QTKeyCode:81,KeyModifiers:0x10626,KeyCtrl:true,KeyOption:true,Future:9});
+  await user.selectOptions(screen.getByLabelText("Key mapping"),"logical");
+  expect(current.Hotkeys[0].linuxKeyMode).toBe("logical");
+  await user.click(screen.getByLabelText("Choose modifier sides"));
+  expect(current.Hotkeys[0].KeyModifiers).toBe(6);
+  await user.click(screen.getByLabelText("Choose modifier sides"));
+  expect(current.Hotkeys[0].KeyModifiers).toBe(0x10066);
+  expect(current.Future).toBe(7);
+});
+it("switches clipboard operations without discarding saved Unicode text", async () => {
+  const user = userEvent.setup(); let current: any;
+  function Harness() {
+    const [settings, setSettings] = useState<RecordValue>({ operation: "copy_text", text: "Hei 🌍", terminal_shortcuts: true, Future: 7 });
+    current = settings;
+    return <SettingsFields uuid="com.deckforge.system.clipboard" controller="Keypad" settings={settings} onChange={setSettings} onError={vi.fn()} />;
+  }
+  render(<Harness />);
+  await user.selectOptions(screen.getByLabelText("Clipboard operation"), "paste");
+  expect(screen.getByText(/Sends Ctrl\+Shift\+V/)).toBeTruthy();
+  await user.selectOptions(screen.getByLabelText("Clipboard operation"), "cut");
+  await user.click(screen.getByRole("button", { name: "Use standard Cut shortcut" }));
+  expect(current).toEqual({ operation: "cut", text: "Hei 🌍", terminal_shortcuts: false, Future: 7 });
+  await user.selectOptions(screen.getByLabelText("Clipboard operation"), "copy_text");
+  expect((screen.getByLabelText("Clipboard text") as HTMLTextAreaElement).value).toBe("Hei 🌍");
+});
+it("retains program arguments while editing an explicit shell command and terminal", async () => {
+  const user = userEvent.setup(); let current: any;
+  function Harness() {
+    const [settings, setSettings] = useState<RecordValue>({ mode: "program", program: "echo", args: "'two words'", script: "", terminal: false, output: "clipboard", timeout_seconds: 45, Future: 8 });
+    current = settings;
+    return <SettingsFields uuid="com.deckforge.system.command" controller="Keypad" settings={settings} onChange={setSettings} onError={vi.fn()} />;
+  }
+  render(<Harness />);
+  await user.selectOptions(screen.getByLabelText("Command mode"), "shell");
+  await user.type(screen.getByLabelText("Shell script"), "printf hello | cat");
+  await user.click(screen.getByLabelText("Run in terminal window"));
+  expect(screen.getByLabelText(/^Terminal arguments/)).toBeTruthy();
+  expect(screen.queryByLabelText("Command output")).toBeNull();
+  expect(current).toMatchObject({ mode: "shell", script: "printf hello | cat", terminal: true, program: "echo", args: "'two words'", output: "clipboard", timeout_seconds: 45, Future: 8 });
+  await user.click(screen.getByLabelText("Run in terminal window"));
+  expect((screen.getByLabelText("Command output") as HTMLSelectElement).value).toBe("clipboard");
+  expect((screen.getByLabelText("Timeout (seconds)") as HTMLInputElement).value).toBe("45");
+});
+it("edits both switch shortcuts and retains unknown settings", async () => {
+  const user = userEvent.setup(),
+    onChange = vi.fn();
+  render(
+    <SettingsFields
+      uuid="com.elgato.streamdeck.system.hotkeyswitch"
+      controller="Keypad"
+      settings={{ Hotkeys: [{}, {}], Future: 9 }}
+      onChange={onChange}
+      onError={vi.fn()}
+    />,
+  );
+  expect(screen.getByText("First shortcut")).toBeTruthy();
+  expect(screen.getByText("Second shortcut")).toBeTruthy();
+  const selects = screen.getAllByLabelText("Key");
+  await user.selectOptions(selects[1], "0");
+  expect(onChange.mock.calls.at(-1)![0].Hotkeys[1].QTKeyCode).toBe(65);
+  expect(onChange.mock.calls.at(-1)![0].Future).toBe(9);
+});
+it("retains Unicode Text and makes imported typing mode explicit", async () => {
+  const user = userEvent.setup(),
+    onChange = vi.fn();
+  render(
+    <SettingsFields
+      uuid="com.elgato.streamdeck.system.text"
+      controller="Keypad"
+      settings={{ pastedText: "Hei 🌍", isTypingMode: true, Future: 7 }}
+      onChange={onChange}
+      onError={vi.fn()}
+    />,
+  );
+  expect(
+    (screen.getByRole("textbox", { name: "Text" }) as HTMLTextAreaElement)
+      .value,
+  ).toBe("Hei 🌍");
+  await user.selectOptions(screen.getByLabelText("Text mode"), "paste");
+  expect(onChange).toHaveBeenLastCalledWith({
+    pastedText: "Hei 🌍",
+    isTypingMode: false,
+    Future: 7,
+  });
+});
+it.each([null, "true", 0])("preserves unsupported saved Text mode %s until explicitly changed", async (mode) => {
+  const onChange = vi.fn();
+  render(<SettingsFields uuid="com.elgato.streamdeck.system.text" controller="Keypad" settings={{ pastedText: "keep", isTypingMode: mode, Future: 7 }} onChange={onChange} onError={vi.fn()} />);
+  expect((screen.getByLabelText("Text mode") as HTMLSelectElement).value).toBe("invalid");
+  expect(onChange).not.toHaveBeenCalled();
+  await userEvent.selectOptions(screen.getByLabelText("Text mode"), "paste");
+  expect(onChange).toHaveBeenCalledWith({ pastedText: "keep", isTypingMode: false, Future: 7 });
+});
+it("Close preserves legacy automatic behavior and the selected executable", async () => {
+  const user = userEvent.setup(),
+    onChange = vi.fn();
+  render(
+    <SettingsFields
+      uuid="com.elgato.streamdeck.system.close"
+      controller="Keypad"
+      settings={{ path: "/tmp/owned app", forceQuit: false, Future: 2 }}
+      onChange={onChange}
+      onError={vi.fn()}
+    />,
+  );
+  expect((screen.getByLabelText("Close behavior") as HTMLSelectElement).value).toBe("automatic");
+  await user.click(screen.getByRole("checkbox", { name: "Force close" }));
+  expect(onChange).toHaveBeenLastCalledWith({
+    path: "/tmp/owned app",
+    forceQuit: true,
+    Future: 2,
+  });
+});
 it("edits a mixer dial target while preserving unknown settings and unavailable identities", async () => {
   const user = userEvent.setup();
   const onChange = vi.fn();
@@ -390,4 +554,38 @@ it("retains out-of-range imported Counter increments without blocking unrelated 
     count: 42,
     Future: true,
   });
+});
+it("edits dial Coalesce without rewriting chords or unknown fields", async () => {
+  const user = userEvent.setup(),
+    onChange = vi.fn();
+  const settings = {
+    Hotkeys: [{ QTKeyCode: 65 }, { QTKeyCode: 66 }, { QTKeyCode: 67 }],
+    Future: 9,
+  };
+  render(
+    <SettingsFields
+      uuid="com.elgato.streamdeck.system.hotkey"
+      controller="Encoder"
+      settings={settings}
+      onChange={onChange}
+      onError={vi.fn()}
+    />,
+  );
+  const checkbox = screen.getByRole("checkbox", {
+    name: "Limit queued dial shortcuts",
+  }) as HTMLInputElement;
+  expect(checkbox.checked).toBe(true);
+  expect(onChange).not.toHaveBeenCalled();
+  await user.click(checkbox);
+  expect(onChange).toHaveBeenLastCalledWith({ ...settings, Coalesce: false });
+});
+it("Open Application keeps imported fields and clears the desktop binding when editing the executable", async () => {
+  const user=userEvent.setup(), onChange=vi.fn();
+  render(<SettingsFields uuid="com.elgato.streamdeck.system.openapp" controller="Keypad"
+    settings={{exec:"/old/app",source:"/old/app.desktop",bundle_id:"old",bundle_path:"old",is_bundle:true,Future:7}}
+    onChange={onChange} onError={vi.fn()} />);
+  await user.type(screen.getByRole("textbox",{name:"Application executable"}),"x");
+  expect(onChange.mock.calls.at(-1)![0]).toMatchObject({source:"",bundle_id:"",bundle_path:"",is_bundle:false,Future:7});
+  await user.selectOptions(screen.getByRole("combobox",{name:"When held"}),"force_kill");
+  expect(onChange.mock.calls.at(-1)![0].long_press).toBe("force_kill");
 });

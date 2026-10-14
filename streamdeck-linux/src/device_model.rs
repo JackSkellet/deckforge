@@ -16,6 +16,7 @@ pub enum Model {
     PlusXl,
     Neo,
     Studio,
+    Galleon,
     Pedal,
 }
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -41,6 +42,7 @@ impl Model {
             Self::PlusXl,
             Self::Neo,
             Self::Studio,
+            Self::Galleon,
             Self::Pedal,
         ]
     }
@@ -69,6 +71,7 @@ impl Model {
             "20GBX9901" | "plus-xl" => Some(Self::PlusXl),
             "20GBJ9901" | "neo" => Some(Self::Neo),
             "20GBO9901" | "studio" => Some(Self::Studio),
+            "GRETSCH" | "GRETSCH1G" | "galleon" => Some(Self::Galleon),
             "20GBF9901" | "deckforge-pedal" | "pedal" => Some(Self::Pedal),
             _ => None,
         }
@@ -83,6 +86,7 @@ impl Model {
             Self::PlusXl => "plus-xl",
             Self::Neo => "neo",
             Self::Studio => "studio",
+            Self::Galleon => "galleon",
             Self::Pedal => "pedal",
         }
     }
@@ -111,6 +115,7 @@ impl Model {
             Self::PlusXl => "Stream Deck + XL",
             Self::Neo => "Stream Deck Neo",
             Self::Studio => "Stream Deck Studio",
+            Self::Galleon => "Galleon 100 SD",
             Self::Pedal => "Stream Deck Pedal",
         }
     }
@@ -123,6 +128,7 @@ impl Model {
             Self::Plus => "20GBD9901",
             Self::Neo => "20GBJ9901",
             Self::Studio => "20GBO9901",
+            Self::Galleon => "GRETSCH",
             // Plus XL identity recovered from the shipped 7.6 profile; its HID
             // page currently repeats Plus's identifier. Pedal is from native RTTI
             // and its registry/factory binding in the same shipped executable.
@@ -139,12 +145,13 @@ impl Model {
             Self::PlusXl => 13,
             Self::Neo => 9,
             Self::Studio => 10,
+            Self::Galleon => 12,
             Self::Pedal => 5,
         }
     }
     pub const fn columns(self) -> u8 {
         match self {
-            Self::Mini | Self::Pedal => 3,
+            Self::Mini | Self::Pedal | Self::Galleon => 3,
             Self::Classic | Self::Classic2017 => 5,
             Self::Xl => 8,
             Self::Plus | Self::Neo => 4,
@@ -156,7 +163,7 @@ impl Model {
         match self {
             Self::Mini | Self::Plus | Self::Neo | Self::Studio => 2,
             Self::Classic | Self::Classic2017 => 3,
-            Self::Xl | Self::PlusXl => 4,
+            Self::Xl | Self::PlusXl | Self::Galleon => 4,
             Self::Pedal => 1,
         }
     }
@@ -165,7 +172,7 @@ impl Model {
     }
     pub const fn dial_count(self) -> u8 {
         match self {
-            Self::Plus => 4,
+            Self::Plus | Self::Galleon => 4,
             Self::PlusXl => 6,
             Self::Studio => 2,
             _ => 0,
@@ -179,7 +186,56 @@ impl Model {
             Self::Plus => 120,
             Self::PlusXl => 112,
             Self::Studio => 144,
+            Self::Galleon => 160,
             Self::Pedal => 0,
+        }
+    }
+    /// Logical encoder action positions can outnumber the physical controls.
+    pub const fn physical_dial_count(self) -> u8 {
+        if matches!(self, Self::Galleon) {
+            2
+        } else {
+            self.dial_count()
+        }
+    }
+    pub const fn encoder_columns(self) -> u8 {
+        if matches!(self, Self::Galleon) {
+            2
+        } else {
+            self.dial_count()
+        }
+    }
+    pub const fn encoder_rows(self) -> u8 {
+        if matches!(self, Self::Galleon) {
+            2
+        } else if self.dial_count() > 0 {
+            1
+        } else {
+            0
+        }
+    }
+    pub fn encoder_coordinates(self, index: u8) -> (u8, u8) {
+        let columns = self.encoder_columns().max(1);
+        (index % columns, index / columns)
+    }
+    pub fn encoder_size(self) -> (u32, u32) {
+        if self == Self::Galleon {
+            return (320, 160);
+        }
+        (
+            self.strip_width() / u32::from(self.encoder_columns()).max(1),
+            self.strip_height() / u32::from(self.encoder_rows()).max(1),
+        )
+    }
+    pub fn encoder_origin(self, index: u8) -> (u32, u32) {
+        let (column, row) = self.encoder_coordinates(index);
+        if self == Self::Galleon {
+            // Canonical composer: 200x100 cells, 15px margins, 20x10 gaps;
+            // its 450x240 canvas is scaled by 1.6 onto the 720x384 display.
+            (24 + u32::from(column) * 352, 24 + u32::from(row) * 176)
+        } else {
+            let (width, height) = self.encoder_size();
+            (u32::from(column) * width, u32::from(row) * height)
         }
     }
     pub const fn key_height(self) -> u32 {
@@ -194,6 +250,7 @@ impl Model {
             Self::Plus => 800,
             Self::PlusXl => 1200,
             Self::Neo => 248,
+            Self::Galleon => 720,
             _ => 0,
         }
     }
@@ -201,6 +258,7 @@ impl Model {
         match self {
             Self::Plus | Self::PlusXl => 100,
             Self::Neo => 58,
+            Self::Galleon => 384,
             _ => 0,
         }
     }
@@ -211,6 +269,7 @@ impl Model {
             Self::Xl => 1024,
             Self::Plus => 800,
             Self::PlusXl => 1280,
+            Self::Galleon => 720,
             Self::Pedal | Self::Studio => 0,
         }
     }
@@ -222,6 +281,7 @@ impl Model {
             Self::Xl => 600,
             Self::Plus => 480,
             Self::PlusXl => 800,
+            Self::Galleon => 1280,
             Self::Pedal | Self::Studio => 0,
         }
     }
@@ -233,7 +293,10 @@ impl Model {
             brightness: !matches!(self, Self::Pedal),
             // Studio's native setter exists, but readback is unproven. This
             // capability currently promises getter-verified timer control.
-            sleep: !matches!(self, Self::Pedal | Self::Classic2017 | Self::Studio),
+            sleep: !matches!(
+                self,
+                Self::Pedal | Self::Classic2017 | Self::Studio | Self::Galleon
+            ),
             full_lcd: !matches!(
                 self,
                 Self::Mini | Self::Pedal | Self::Classic2017 | Self::Studio
@@ -247,6 +310,34 @@ impl Model {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn galleon_separates_logical_widgets_from_physical_dials() {
+        let model = Model::Galleon;
+        assert_eq!(
+            (model.columns(), model.rows(), model.key_count()),
+            (3, 4, 12)
+        );
+        assert_eq!(
+            (
+                model.encoder_columns(),
+                model.encoder_rows(),
+                model.dial_count(),
+                model.physical_dial_count()
+            ),
+            (2, 2, 4, 2)
+        );
+        assert_eq!(model.encoder_coordinates(3), (1, 1));
+        assert_eq!(model.encoder_size(), (320, 160));
+        assert_eq!(model.encoder_origin(3), (376, 200));
+        assert_eq!((model.key_width(), model.key_height()), (160, 160));
+        assert_eq!((model.lcd_width(), model.lcd_height()), (720, 1280));
+        assert_eq!(Model::from_profile_model("GRETSCH"), Some(model));
+        assert_eq!(Model::from_profile_model("GRETSCH1G"), Some(model));
+        assert_eq!(model.sdk_type(), 12);
+        assert!(model.capabilities().transport_supported);
+        assert!(!model.capabilities().touchscreen);
+        assert!(!model.profile_compatible(Model::Plus));
+    }
     #[test]
     fn studio_rectangular_keys_and_displayless_encoders_are_distinct_capabilities() {
         let m = Model::Studio;

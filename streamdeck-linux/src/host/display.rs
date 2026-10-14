@@ -25,6 +25,16 @@ pub(super) fn dial_image(
     root: Option<&Path>,
     actions: &[Action],
 ) -> Result<DynamicImage> {
+    let background = encoder_assets::image(slot, encoder_assets::BACKGROUND).cloned();
+    dial_image_on(renderer, slot, root, actions, background.as_ref())
+}
+pub(super) fn dial_image_on(
+    renderer: &Renderer,
+    slot: &mut Slot,
+    root: Option<&Path>,
+    actions: &[Action],
+    background: Option<&DynamicImage>,
+) -> Result<DynamicImage> {
     if slot.layout_cache.is_none() {
         slot.layout_cache = Some(load_layout(root, &slot.layout)?);
     }
@@ -36,6 +46,16 @@ pub(super) fn dial_image(
     let mut images = HashMap::new();
     if let Some(background) = &slot.background {
         images.insert("icon".to_owned(), background.clone());
+    }
+    if slot.controller == "Encoder"
+        && !appearance::custom_image(slot)
+        && !slot
+            .appearances
+            .get(&slot.state)
+            .is_some_and(|s| s.image_reset)
+        && let Some(icon) = encoder_assets::image(slot, encoder_assets::ICON)
+    {
+        images.insert("icon".into(), icon.clone());
     }
     for item in crate::layout::resolved_items(layout, &slot.feedback)? {
         if item["type"] != "pixmap" {
@@ -78,8 +98,18 @@ pub(super) fn dial_image(
     {
         merge_feedback(&mut feedback["title"], &json!(title));
     }
+    if slot.controller == "Encoder" && slot.raw["Encoder"]["IconVisible"] == false {
+        merge_feedback(&mut feedback["icon"], &json!({"enabled":false}));
+    }
     let style = appearance::explicit_style(slot, actions).then(|| appearance::style(slot, actions));
-    renderer.dial_layout_styled(&slot.title, &feedback, layout, &images, style.as_ref())
+    renderer.dial_layout_on(
+        &slot.title,
+        &feedback,
+        layout,
+        &images,
+        style.as_ref(),
+        background,
+    )
 }
 
 /// SDK scalar shorthand changes an item's value without erasing its properties.

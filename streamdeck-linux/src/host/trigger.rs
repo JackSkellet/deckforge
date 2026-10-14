@@ -7,6 +7,7 @@ const PULSE: u8 = 2;
 #[derive(Default)]
 pub(super) struct Runtime {
     pub repeater: Repeater,
+    pub logic: crate::key_logic::Gestures,
     targets: HashMap<String, usize>,
     // Store the dispatched instance, not a later edited replacement.
     held: HashMap<(String, usize), (Slot, u8)>,
@@ -21,37 +22,55 @@ pub(super) fn action() -> Action {
         raw: json!({"SupportedInMultiActions":false,"Encoder":{"layout":"$X1"},"States":[{"Title":"Action Trigger"}]}),
     }
 }
+pub(super) fn logic_action() -> Action {
+    Action {
+        uuid: crate::key_logic::UUID.into(),
+        name: "Key Logic".into(),
+        plugin: "deckforge.triggers".into(),
+        controllers: vec!["Keypad".into()],
+        raw: json!({"SupportedInMultiActions":false,"SupportedInKeyLogicActions":false,"States":[{"Title":"Key Logic"}]}),
+    }
+}
 pub(super) fn picture(
-    renderer: &Renderer,
-    actions: &[Action],
+    display: &display_targets::Display<'_>,
     slot: &mut Slot,
-    badges: &HashMap<String, feedback::Badge>,
-    now: Duration,
-    progress: &BTreeMap<String, u8>,
-    images: Option<(&key_images::Runtime, bool)>,
+    background: Option<&DynamicImage>,
 ) -> Result<DynamicImage> {
-    let mut canvas = DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
-        200,
-        100,
-        image::Rgba([14, 21, 29, 255]),
-    ));
+    let mut canvas = background
+        .cloned()
+        .or_else(|| display.encoder_backdrop(slot))
+        .map(|image| image.resize_exact(200, 100, image::imageops::FilterType::Lanczos3))
+        .unwrap_or_else(|| {
+            DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+                200,
+                100,
+                image::Rgba([14, 21, 29, 255]),
+            ))
+        });
     for (index, (x, y)) in [(12, 29), (72, 14), (132, 29)].into_iter().enumerate() {
         if let Some(child) = slot.children.get_mut(index).and_then(|g| g.first_mut()) {
-            let mut key = if actions.iter().any(|action| action.uuid == child.uuid) {
-                renderer.key_styled(
-                    &child.title,
-                    images.and_then(|(images, hardware)| images.frame(&child.context, hardware)).or(child.background.as_ref()),
-                    &appearance::style(child, actions),
+            let mut key = if display
+                .actions
+                .iter()
+                .any(|action| action.uuid == child.uuid)
+            {
+                display.renderer.key_styled(
+                    timer::title(child),
+                    display
+                        .key_images
+                        .frame(&child.context, display.hardware_plane)
+                        .or(child.background.as_ref()),
+                    &appearance::style(child, display.actions),
                 )
             } else {
-                appearance::unavailable_picture(renderer, (120, 120))
+                appearance::unavailable_picture(display.renderer, (120, 120))
             };
             feedback::paint_key(
-                badges,
+                display.badges,
                 &mut key,
                 child,
-                now,
-                progress.get(&child.context).copied(),
+                display.now,
+                display.progress.get(&child.context).copied(),
             );
             let mut png = Cursor::new(Vec::new());
             key.write_to(&mut png, image::ImageFormat::Png)?;
@@ -70,12 +89,61 @@ pub(super) fn picture(
     Ok(canvas)
 }
 impl Host {
+    pub(super) fn logic_button(&mut self, slot: &Slot, pressed: bool) -> Result<()> {
+        let events = self
+            .triggers
+            .logic
+            .input(&slot.context, pressed, self.multi_clock.elapsed());
+        self.multi_notify.notify_one();
+        self.dispatch_logic(events)
+    }
+    pub(super) fn poll_logic(&mut self) {
+        let events = self.triggers.logic.poll(self.multi_clock.elapsed());
+        if let Err(error) = self.dispatch_logic(events) {
+            self.log(format!("Key Logic: {error:#}"));
+        }
+    }
+    fn dispatch_logic(&mut self, events: Vec<crate::key_logic::Event>) -> Result<()> {
+        use crate::key_logic::Event as LogicEvent;
+        for event in events {
+            let (parent, index) = match &event {
+                LogicEvent::Single(p) => (p, 0),
+                LogicEvent::Down(p, i) | LogicEvent::Up(p, i) => (p, *i),
+            };
+            if matches!(event, LogicEvent::Up(_, _)) {
+                self.trigger_edge(parent, index, DIRECT, false, false)?;
+                continue;
+            }
+            let Some(slot) = self.visible_slot(parent).cloned() else {
+                self.cancel_trigger(parent);
+                continue;
+            };
+            if self.trigger_child(parent, index).is_none() {
+                self.show_feedback(&slot, crate::feedback::Kind::Alert)?;
+                continue;
+            }
+            let result = match event {
+                LogicEvent::Single(_) => self.adapter_pulse(&slot, 0, 1),
+                LogicEvent::Down(_, i) => self.trigger_edge(&slot.context, i, DIRECT, true, false),
+                LogicEvent::Up(_, _) => unreachable!(),
+            };
+            if let Err(error) = result {
+                self.cancel_trigger(&slot.context);
+                self.show_feedback(&slot, crate::feedback::Kind::Alert)?;
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
     fn trigger_child(&self, parent: &str, index: usize) -> Option<Slot> {
         self.visible_slot(parent)
             .and_then(|slot| {
                 if slot.uuid == crate::action_wheel::UUID {
                     slot.children.first()?.get(index)
-                } else if slot.uuid == action_trigger::UUID {
+                } else if matches!(
+                    slot.uuid.as_str(),
+                    action_trigger::UUID | crate::key_logic::UUID
+                ) {
                     slot.children.get(index)?.first()
                 } else {
                     None
@@ -133,6 +201,13 @@ impl Host {
                 .iter()
                 .find(|a| a.uuid == child.uuid)
                 .context("Action Trigger child is unavailable")?;
+            if self
+                .visible_slot(parent)
+                .is_some_and(|p| p.uuid == crate::key_logic::UUID)
+                && action.raw["SupportedInKeyLogicActions"] == false
+            {
+                bail!("{} cannot be used in Key Logic", action.name);
+            }
             if !action.controllers.iter().any(|c| c == "Keypad") {
                 bail!("Action Trigger requires a key action");
             }
@@ -179,7 +254,9 @@ impl Host {
         };
         if matches!(
             child.uuid.as_str(),
-            crate::system_actions::HOTKEY | crate::system_actions::MULTIMEDIA
+            crate::system_actions::HOTKEY
+                | crate::system_actions::HOTKEY_SWITCH
+                | crate::system_actions::MULTIMEDIA
         ) {
             let worker = self
                 .system_actions
@@ -272,6 +349,16 @@ impl Host {
         }
     }
     pub(super) fn disconnect_trigger_buttons(&mut self) {
+        let parents: Vec<_> = self
+            .slots
+            .iter()
+            .flat_map(Slot::visible_flatten)
+            .filter(|s| s.uuid == crate::key_logic::UUID)
+            .map(|s| s.context.clone())
+            .collect();
+        for parent in parents {
+            self.cancel_trigger(&parent);
+        }
         let held: Vec<_> = self
             .triggers
             .held
@@ -286,6 +373,7 @@ impl Host {
         }
     }
     pub(super) fn cancel_trigger(&mut self, parent: &str) {
+        self.triggers.logic.cancel(parent);
         self.triggers.targets.remove(parent);
         self.triggers.pending.remove(parent);
         let _ = self.triggers.repeater.cancel(parent);
@@ -311,6 +399,7 @@ impl Host {
             .targets
             .keys()
             .chain(self.triggers.pending.keys())
+            .chain(self.triggers.logic.parents())
             .chain(self.triggers.held.keys().map(|(parent, _)| parent))
             .filter(|parent| {
                 self.slot_any(parent)
@@ -327,7 +416,12 @@ impl Host {
             .slots
             .iter()
             .flat_map(Slot::visible_flatten)
-            .filter(|s| s.uuid == action_trigger::UUID || s.uuid == crate::action_wheel::UUID)
+            .filter(|s| {
+                matches!(
+                    s.uuid.as_str(),
+                    action_trigger::UUID | crate::action_wheel::UUID | crate::key_logic::UUID
+                )
+            })
             .filter(|old| {
                 next.iter()
                     .flat_map(Slot::visible_flatten)
@@ -363,6 +457,7 @@ impl Host {
             .targets
             .keys()
             .chain(self.triggers.pending.keys())
+            .chain(self.triggers.logic.parents())
             .chain(self.triggers.held.keys().map(|(parent, _)| parent))
             .filter(|p| !visible.contains(*p))
             .cloned()
@@ -377,10 +472,17 @@ impl Host {
             .visible_slot(context)
             .cloned()
             .context("Action Trigger is no longer visible")?;
-        if parent.uuid != action_trigger::UUID {
+        if !matches!(
+            parent.uuid.as_str(),
+            action_trigger::UUID | crate::key_logic::UUID
+        ) {
             bail!("This control is not an Action Trigger");
         }
-        action_trigger::parse(&raw)?;
+        if parent.uuid == action_trigger::UUID {
+            action_trigger::parse(&raw)?;
+        } else {
+            action_trigger::parse_for(&raw, &parent.uuid)?;
+        }
         let old = parent.clone();
         parent.raw = raw;
         parent.settings = parent
@@ -391,6 +493,15 @@ impl Host {
             .unwrap_or(json!({}));
         parent.hydrate_children(&self.actions)?;
         for child in parent.children.iter().flatten() {
+            if parent.uuid == crate::key_logic::UUID
+                && self
+                    .actions
+                    .iter()
+                    .find(|a| a.uuid == child.uuid)
+                    .is_some_and(|a| a.raw["SupportedInKeyLogicActions"] == false)
+            {
+                bail!("{} cannot be used in Key Logic", child.name);
+            }
             if self
                 .actions
                 .iter()
@@ -425,6 +536,109 @@ impl Host {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn logic_setup() -> (
+        tempfile::TempDir,
+        Host,
+        Slot,
+        mpsc::UnboundedReceiver<Value>,
+    ) {
+        let root = tempfile::tempdir().unwrap();
+        let mut host = super::super::tests::fixture(root.path());
+        host.actions.push(logic_action());
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        host.plugins[0].sender = Some(tx);
+        host.assign("Keypad", 0, crate::key_logic::UUID).unwrap();
+        let parent = host
+            .slots
+            .iter()
+            .find(|s| s.uuid == crate::key_logic::UUID)
+            .unwrap()
+            .context
+            .clone();
+        host.save_trigger(
+            &parent,
+            json!({"UUID":crate::key_logic::UUID,"UnknownParent":7,"Actions":[
+                {"UUID":"test.action","ActionID":"single","Settings":{"tag":"single"}},
+                {"UUID":"test.action","ActionID":"double","Settings":{"tag":"double"}},
+                {"UUID":"test.action","ActionID":"hold","Settings":{"tag":"hold"}}
+            ]}),
+        )
+        .unwrap();
+        while rx.try_recv().is_ok() {}
+        let slot = host.visible_slot(&parent).unwrap().clone();
+        host.multi_clock = std::time::Instant::now();
+        (root, host, slot, rx)
+    }
+    #[test]
+    fn logic_dispatches_normal_children_and_balances_cancelled_holds() {
+        let (_root, mut host, parent, mut rx) = logic_setup();
+        host.logic_button(&parent, true).unwrap();
+        host.logic_button(&parent, false).unwrap();
+        assert!(rx.try_recv().is_err());
+        host.multi_clock = std::time::Instant::now() - Duration::from_millis(310);
+        host.poll_logic();
+        let down = rx.try_recv().unwrap();
+        assert_eq!(down["event"], "keyDown");
+        assert_eq!(down["payload"]["settings"]["tag"], "single");
+        assert_eq!(down["payload"]["isInMultiAction"], false);
+        host.multi_clock = std::time::Instant::now() - Duration::from_millis(390);
+        host.poll_triggers();
+        assert_eq!(rx.try_recv().unwrap()["event"], "keyUp");
+        assert!(rx.try_recv().is_err());
+        host.logic_button(&parent, true).unwrap();
+        host.logic_button(&parent, false).unwrap();
+        host.logic_button(&parent, true).unwrap();
+        let down = rx.try_recv().unwrap();
+        assert_eq!(down["payload"]["settings"]["tag"], "double");
+        host.logic_button(&parent, false).unwrap();
+        assert_eq!(rx.try_recv().unwrap()["event"], "keyUp");
+        host.logic_button(&parent, true).unwrap();
+        host.multi_clock = std::time::Instant::now() - Duration::from_millis(1000);
+        host.poll_logic();
+        let down = rx.try_recv().unwrap();
+        assert_eq!(down["payload"]["settings"]["tag"], "hold");
+        host.cancel_departing_triggers(&HashSet::new());
+        assert_eq!(rx.try_recv().unwrap()["event"], "keyUp");
+        host.logic_button(&parent, false).unwrap();
+        assert!(rx.try_recv().is_err());
+        assert!(host.triggers.logic.next_due().is_none());
+    }
+    #[test]
+    fn logic_respects_manifest_opt_out_and_preserves_tree_on_rejection() {
+        let (_root, mut host, parent, mut rx) = logic_setup();
+        host.actions[0].raw["SupportedInKeyLogicActions"] = json!(false);
+        assert!(
+            host.save_trigger(&parent.context, parent.raw.clone())
+                .is_err()
+        );
+        assert_eq!(host.visible_slot(&parent.context).unwrap().raw, parent.raw);
+        host.logic_button(&parent, true).unwrap();
+        host.logic_button(&parent, false).unwrap();
+        host.multi_clock = std::time::Instant::now() - Duration::from_millis(310);
+        host.poll_logic();
+        assert!(rx.try_recv().is_err());
+        assert!(host.badges.contains_key(&parent.context));
+    }
+    #[test]
+    fn logic_pending_gesture_is_cancelled_by_device_loss_and_reconfiguration() {
+        let (_root, mut host, parent, mut rx) = logic_setup();
+        host.logic_button(&parent, true).unwrap();
+        host.release_device_holds();
+        host.multi_clock = std::time::Instant::now() - Duration::from_millis(700);
+        host.poll_logic();
+        assert!(rx.try_recv().is_err());
+        assert!(host.triggers.logic.next_due().is_none());
+        host.logic_button(&parent, true).unwrap();
+        host.logic_button(&parent, false).unwrap();
+        let mut raw = parent.raw.clone();
+        raw["Actions"][0]["Settings"]["tag"] = json!("replacement");
+        host.save_trigger(&parent.context, raw).unwrap();
+        while rx.try_recv().is_ok() {}
+        host.multi_clock = std::time::Instant::now() - Duration::from_millis(1400);
+        host.poll_logic();
+        assert!(rx.try_recv().is_err());
+        assert!(host.triggers.logic.next_due().is_none());
+    }
     #[test]
     fn missing_child_changes_only_its_derived_miniature() {
         let root = tempfile::tempdir().unwrap();
@@ -440,33 +654,39 @@ mod tests {
         )));
         let retained = missing.clone();
         parent.children = vec![vec![missing], vec![host.slots[0].clone()]];
+        let display = display_targets::Display {
+            hardware_plane: false,
+            encoder_background: None,
+            key_images: &host.key_images,
+            application_artwork: &host.application_artwork,
+            folder_progress: None,
+            model: host.model,
+            renderer: &host.renderer,
+            actions: &host.actions,
+            plugins: &host.plugins,
+            badges: &HashMap::new(),
+            now: Duration::ZERO,
+            wheels: &host.wheels,
+            wheel_pressed: &HashSet::new(),
+            progress: &BTreeMap::new(),
+        };
         let before = picture(
-            &host.renderer,
-            &[
-                host.actions[0].clone(),
-                Action {
-                    uuid: retained.uuid.clone(),
-                    ..host.actions[0].clone()
-                },
-            ],
+            &display_targets::Display {
+                actions: &[
+                    host.actions[0].clone(),
+                    Action {
+                        uuid: retained.uuid.clone(),
+                        ..host.actions[0].clone()
+                    },
+                ],
+                ..display
+            },
             &mut parent,
-            &HashMap::new(),
-            Duration::ZERO,
-            &BTreeMap::new(),
             None,
         )
         .unwrap();
         let unchanged_preview = parent.children[1][0].preview.clone();
-        let after = picture(
-            &host.renderer,
-            &host.actions,
-            &mut parent,
-            &HashMap::new(),
-            Duration::ZERO,
-            &BTreeMap::new(),
-            None,
-        )
-        .unwrap();
+        let after = picture(&display, &mut parent, None).unwrap();
         assert_ne!(before.to_rgba8(), after.to_rgba8());
         assert_eq!(parent.children[1][0].preview, unchanged_preview);
         let child = &parent.children[0][0];

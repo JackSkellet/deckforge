@@ -385,12 +385,24 @@ fn merge_draft(current: &Value, base: &Value, edited: &Value) -> Result<Value> {
 
 /// Independent raster artwork using recovered card bounds and layering. Smooth
 /// carousel interpolation is separate from the recovered selection timer.
-pub(super) fn picture(display: &display_targets::Display<'_>, slot: &Slot) -> Result<DynamicImage> {
+pub(super) fn picture(
+    display: &display_targets::Display<'_>,
+    slot: &Slot,
+    background: Option<&DynamicImage>,
+) -> Result<DynamicImage> {
     let children = slot.children.first().map(Vec::as_slice).unwrap_or(&[]);
     let selected = current(slot);
     let extended = slot.settings["ExtTitles"] == true;
     let pressed = display.wheel_pressed.contains(&slot.context);
-    let mut canvas = image::RgbaImage::from_pixel(200, 100, image::Rgba([0, 0, 0, 255]));
+    let mut canvas = background
+        .cloned()
+        .or_else(|| display.encoder_backdrop(slot))
+        .map(|image| {
+            image
+                .resize_exact(200, 100, image::imageops::FilterType::Lanczos3)
+                .to_rgba8()
+        })
+        .unwrap_or_else(|| image::RgbaImage::from_pixel(200, 100, image::Rgba([0, 0, 0, 255])));
     let animation = display
         .wheels
         .animations
@@ -513,9 +525,12 @@ fn key_picture(
         .iter()
         .any(|action| action.uuid == child.uuid)
     {
-        display
-            .renderer
-            .key_styled_size(&child.title, display.key_background(child), &style, (72, 72))
+        display.renderer.key_styled_size(
+            timer::title(child),
+            display.key_background(child),
+            &style,
+            (72, 72),
+        )
     } else {
         appearance::unavailable_picture(display.renderer, (72, 72))
     };
@@ -768,7 +783,7 @@ mod tests {
                         hardware: initially_split.then(|| appearance::PluginAppearance {
                             title: None,
                             pixels: Some(red.clone()),
-                        animation_source: None,
+                            animation_source: None,
                         }),
                         ..Default::default()
                     },

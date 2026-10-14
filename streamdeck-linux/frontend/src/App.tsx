@@ -1,5 +1,12 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 import { command, pick, request } from "./bridge";
+import { newId } from "./ids";
 import { mergeSettingsEdit } from "./settings";
 import {
   allowed,
@@ -13,7 +20,9 @@ import {
   sourceOf,
   isContainer,
   STACK,
+  LOGIC,
   type Action,
+  type ActionFileChoice,
   type Controller,
   type Draft,
   type RecordValue,
@@ -25,7 +34,13 @@ import { FolderExit } from "./FolderExit";
 import { Sequence } from "./Sequence";
 import { AudioMixer } from "./Mixer";
 import { ActionEdit, isEditingTarget } from "./ActionEdit";
+import { CommandOutput } from "./CommandOutput";
+import { TypingAccess } from "./TypingAccess";
 import { AppearanceEditor } from "./Appearance";
+import { ImageCropper } from "./ImageCropper";
+import { IconLibrary } from "./IconLibrary";
+import { ActionFileChooser } from "./ActionFileChooser";
+import type { CropEdit } from "./crop";
 import { DeviceCanvas, canvasStyle } from "./DeviceCanvas";
 import {
   deviceName,
@@ -58,7 +73,16 @@ import {
   getFormDraft,
   setFormDraft,
 } from "./transient";
+import {
+  useNativeFileDrop,
+  type DroppedFile,
+  type DropControl,
+} from "./fileDrop";
+import { SmartProfiles, type SmartDraft } from "./SmartProfiles";
 import "./style.css";
+export const containsDesktopTyping = (slot: Slot): boolean =>
+  (slot.uuid === "com.elgato.streamdeck.system.text" && slot.settings?.isTypingMode === true) ||
+  [...(slot.multi_children ?? []).flat(), ...(slot.trigger_children ?? []).filter((s): s is Slot => !!s), ...(slot.stack_children ?? [])].some(containsDesktopTyping);
 const iconCache = new Map<string, string | null>();
 function ActionIcon({ action }: { action: Action | undefined }) {
   const key = `${action?.uuid}:${action?.icon_generation ?? 0}`;
@@ -91,8 +115,19 @@ function ActionIcon({ action }: { action: Action | undefined }) {
 const defaultSelection = { controller: "Keypad" as Controller, index: 0 };
 export default function App() {
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
+  const [backgroundBusy, setBackgroundBusy] = useState(false);
+  const [cropEdit, setCropEdit] = useState<CropEdit | null>(null);
+  const [smartEdit, setSmartEdit] = useState<SmartDraft | null>(null);
+  const [smartBusy, setSmartBusy] = useState(false);
+  const [actionFileChoice, setActionFileChoice] = useState<ActionFileChoice | null>(null);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  useEffect(() => {
+    const result = snapshot?.file_open;
+    if (!result) return;
+    setNotice(result.error ? "" : result.message);
+    setError(result.error ? result.message : "");
+  }, [snapshot?.file_open?.id]);
   const currentDevice = snapshot?.device ?? "";
   const [selections, setSelections] = useState<
     Record<string, { controller: Controller; index: number }>
@@ -107,7 +142,7 @@ export default function App() {
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<Controller | "All">("All");
   const [panel, setPanel] = useState<
-    "plugins" | "preferences" | "logs" | "mixer" | null
+    "plugins" | "preferences" | "logs" | "mixer" | "icons" | null
   >(null);
   const [libraryEdit, setLibraryEdit] = useState<{
     kind: "profile" | "page";
@@ -171,9 +206,12 @@ export default function App() {
             setFilter(state.filter);
           importTextDrafts(state.textDrafts);
           importFormDrafts(state.formDrafts);
-          if (["plugins", "preferences", "logs", "mixer"].includes(state.panel))
+          if (["plugins", "preferences", "logs", "mixer", "icons"].includes(state.panel))
             setPanel(state.panel);
           if (state.copyProfile) setCopyProfile(state.copyProfile);
+          if (state.cropEdit) setCropEdit(state.cropEdit);
+          if (state.smartEdit) setSmartEdit(state.smartEdit);
+          if (state.actionFileChoice) setActionFileChoice(state.actionFileChoice);
           if (state.libraryEdit)
             setLibraryEdit({
               ...state.libraryEdit,
@@ -209,6 +247,9 @@ export default function App() {
     panel,
     libraryEdit,
     copyProfile,
+    cropEdit,
+    smartEdit,
+    actionFileChoice,
   };
   useEffect(() => {
     if (booted) void request("ui_state_set", { state: uiState }).catch(onError);
@@ -223,8 +264,32 @@ export default function App() {
     panel,
     libraryEdit,
     copyProfile,
+    cropEdit,
+    smartEdit,
+    actionFileChoice,
     onError,
   ]);
+  useEffect(() => {
+    const pending = snapshot?.pending_action_file;
+    setActionFileChoice((current) => pending ? current?.id === pending.id ? current : { id: pending.id, root: pending.info.roots[0]?.index ?? 0, query: "" } : null);
+  }, [snapshot?.pending_action_file?.id]);
+  async function finishActionFile(cancel = false) {
+    const pending = snapshot?.pending_action_file;
+    if (!pending || editBusy || saving) return;
+    if (!cancel && pending.destination && !savedOnly(pending.destination.expected_target ?? undefined, "replacing this action")) return;
+    setEditBusy(true); setError("");
+    try {
+      const message = await request<string | null>(cancel ? "action_file_cancel" : "action_file_choose", {
+        id: pending.id, ...(cancel ? {} : { root: actionFileChoice?.id === pending.id ? actionFileChoice.root : 0 }),
+      });
+      accept(await request<Snapshot>("snapshot"));
+      setNotice(message || "Action import cancelled.");
+    } catch (error) { onError(error); } finally { setEditBusy(false); }
+  }
+  async function prepareActionFile(path: string, device: string, destination: RecordValue) {
+    const message = await request<string>("action_file_prepare", { path, device, destination });
+    accept(await request<Snapshot>("snapshot")); setError(""); setNotice(message);
+  }
   async function hide() {
     try {
       await request("ui_state_set", { state: uiState });
@@ -314,6 +379,29 @@ export default function App() {
     .filter((candidate) => candidate.id !== profile?.pin_page)
     .map((candidate) => [candidate.id, candidate.name]);
   const readonly = profile?.readonly ?? false;
+  async function chooseBackground() {
+    if (!page || !profile || readonly || backgroundBusy) return;
+    const owner = { device: currentDevice, profile: profile.id, id: page.id };
+    setBackgroundBusy(true);
+    try {
+      const path = await pick("image");
+      if (path)
+        await run(
+          {
+            command: "page_background",
+            profile: owner.profile,
+            id: owner.id,
+            path,
+          },
+          owner.device,
+        );
+    } catch (error) {
+      onError(error);
+    } finally {
+      setBackgroundBusy(false);
+    }
+  }
+
   function openProfileCopy() {
     if (!snapshot || !profile) return;
     const devices = associatedDevices(snapshot).map((device) => ({
@@ -428,6 +516,7 @@ export default function App() {
     }
     const target = slot;
     const savingDraft = draft;
+    const historyGroup = newId();
     setSaving(true);
     try {
       for (const payload of saveRequests(
@@ -435,7 +524,7 @@ export default function App() {
         savingDraft,
         action?.user_title_enabled !== false,
       )) {
-        if (!(await run(payload))) return;
+        if (!(await run({ ...payload, history_group: historyGroup }))) return;
       }
       setDrafts((prev) => ({
         ...prev,
@@ -446,9 +535,38 @@ export default function App() {
       setSaving(false);
     }
   }
-  useEffect(() => {
+  const historyContexts = snapshot?.history?.contexts;
+  const historyDirty = Object.entries(drafts).some(([context, value]) =>
+    value.dirty && (!historyContexts || historyContexts.includes(context)))
+    || Object.keys(exportTextDrafts()).some((key) => !historyContexts || historyContexts.some(
+      (context) => key.startsWith(context + ":") || key.startsWith(context + "/")));
+  async function reverseEdit(redo: boolean) {
+    if (!snapshot?.history || saving || editBusy || selectingDevice || document.querySelector("dialog[open]")) return;
+    if (historyDirty) {
+      onError(new Error("Save or revert pending editor changes before using undo or redo."));
+      return;
+    }
+    const label = redo ? snapshot.history.redo : snapshot.history.undo;
+    if (!label) return;
+    setEditBusy(true);
+    try {
+      if (await run({ command: redo ? "history_redo" : "history_undo", expected_revision: snapshot.history.revision }, currentDevice))
+        setNotice(`${redo ? "Redid" : "Undid"}: ${label}`);
+    } finally { setEditBusy(false); }
+  }
+  // Keyboard routing must match the controls just committed to the DOM. A
+  // passive effect could briefly keep the previous busy/clipboard state after
+  // Cut becomes ready, causing an immediate Escape to be ignored.
+  useLayoutEffect(() => {
     function key(event: KeyboardEvent) {
       if (document.querySelector("dialog[open]")) return;
+      if (!event.defaultPrevented && !event.repeat && !event.altKey && !isEditingTarget(event.target)
+        && (event.ctrlKey || event.metaKey)
+        && (event.key.toLowerCase() === "z" || (!event.shiftKey && event.key.toLowerCase() === "y"))) {
+        event.preventDefault();
+        void reverseEdit(event.shiftKey || event.key.toLowerCase() === "y");
+        return;
+      }
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "f") {
         event.preventDefault();
         searchRef.current?.focus();
@@ -498,6 +616,8 @@ export default function App() {
     drafts,
     saving,
     editBusy,
+    selectingDevice,
+    historyDirty,
     selected,
     readonly,
     textRevision,
@@ -526,6 +646,40 @@ export default function App() {
     if (await run({ command: "slot_clipboard_clear" }))
       setNotice("Cut cancelled; the source action is unchanged.");
   }
+  async function containerClipboard(payload: RecordValue) {
+    if (readonly && payload.command !== "slot_copy") return false;
+    if (
+      !slot ||
+      editBusy ||
+      saving ||
+      !savedOnly(slot.context, "copying or pasting nested actions")
+    )
+      return false;
+    if (
+      payload.command === "child_paste" &&
+      snapshot?.clipboard?.mode === "cut" &&
+      !savedOnly(
+        snapshot.clipboard.root_context ?? snapshot.clipboard.context,
+        "moving the cut action",
+      )
+    )
+      return false;
+    setEditBusy(true);
+    try {
+      const applied = await run(payload);
+      if (applied)
+        setNotice(
+          payload.command === "child_paste"
+            ? "Pasted action"
+            : payload.command === "slot_cut"
+              ? "Action cut. Select a destination and paste."
+              : "Action copied. Select a destination and paste.",
+        );
+      return applied;
+    } finally {
+      setEditBusy(false);
+    }
+  }
   async function clipboardAction(mode: "copy" | "cut") {
     if (!slot || editBusy || saving || (mode === "cut" && readonly)) return;
     if (
@@ -550,6 +704,90 @@ export default function App() {
       setEditBusy(false);
     }
   }
+  const nativeDropTarget = useNativeFileDrop(dropFile, onError);
+  async function dropFile(file: DroppedFile, target: DropControl | null) {
+    if (!snapshot || editBusy || saving)
+      throw new Error(
+        "Wait for the current edit to finish before dropping a file.",
+      );
+    if (document.querySelector("dialog[open]"))
+      throw new Error("Close the dialog before dropping a file.");
+    const device = currentDevice;
+    if (file.kind === "action" && target) {
+      if (readonly)
+        throw new Error("Cannot drop an action into a read-only profile.");
+      if (!validControl(snapshot, target.controller, target.index))
+        throw new Error("Choose a control within this device layout.");
+      const destination = snapshot.slots.find(
+        (s) => s.controller === target.controller && s.index === target.index,
+      );
+      if (!savedOnly(destination?.context, "replacing this action")) return;
+      setSelected(target);
+      setEditBusy(true);
+      try {
+        await prepareActionFile(file.path, device, {
+          controller: target.controller, index: target.index,
+          expected_target: destination?.context ?? null,
+          expected_profile: snapshot.library.active_profile,
+          expected_page: snapshot.library.active_page,
+        });
+      } finally {
+        setEditBusy(false);
+      }
+    } else {
+      setEditBusy(true);
+      try {
+        const message = await request<string>("open_file", {
+          path: file.path,
+          device,
+        });
+        accept(await request<Snapshot>("snapshot"));
+        setError("");
+        setNotice(message);
+      } finally {
+        setEditBusy(false);
+      }
+    }
+  }
+  async function shareAction(mode: "import" | "export") {
+    if (!snapshot || editBusy || saving || (mode === "import" && readonly))
+      return;
+    if (!validControl(snapshot, selected.controller, selected.index)) return;
+    if (mode === "export" && !slot) return;
+    if (
+      !savedOnly(
+        slot?.context,
+        mode === "import" ? "replacing this action" : "exporting this action",
+      )
+    )
+      return;
+    const device = currentDevice;
+    const payload =
+      mode === "export"
+        ? { command: "slot_export", context: slot!.context }
+        : {
+            command: "slot_import",
+            controller: selected.controller,
+            index: selected.index,
+            expected_target: slot?.context ?? null,
+            expected_profile: snapshot.library.active_profile,
+            expected_page: snapshot.library.active_page,
+          };
+    setEditBusy(true);
+    try {
+      const path = await pick(mode === "export" ? "export_action" : "action");
+      if (path) {
+        if (mode === "import") {
+          const { command: _command, ...destination } = payload;
+          await prepareActionFile(path, device, destination);
+        } else if (await run({ ...payload, path }, device)) setNotice("Action exported");
+      }
+    } catch (error) {
+      onError(error);
+    } finally {
+      setEditBusy(false);
+    }
+  }
   async function pasteAction(target = selected) {
     const clipboard = snapshot?.clipboard;
     if (!clipboard || readonly || editBusy || saving) return;
@@ -565,7 +803,10 @@ export default function App() {
     if (
       !savedOnly(destination?.context, "replacing this action") ||
       (clipboard.mode === "cut" &&
-        !savedOnly(clipboard.context, "moving the cut action"))
+        !savedOnly(
+          clipboard.root_context ?? clipboard.context,
+          "moving the cut action",
+        ))
     )
       return;
     const metadata = snapshot?.actions.find((a) => a.uuid === clipboard.uuid);
@@ -583,7 +824,6 @@ export default function App() {
           expected_target: destination?.context ?? null,
         })
       ) {
-        setSelected(target);
         setNotice(`Pasted ${clipboard.name}`);
       }
     } finally {
@@ -708,7 +948,7 @@ export default function App() {
       !slot ||
       slot.plugin_disabled ||
       !snapshot ||
-      !acceptsInput(snapshot, slot.controller, slot.index)
+      !acceptsInput(snapshot, slot.controller, slot.index) || containsDesktopTyping(slot)
     )
       return;
     const prefix = slot.controller === "Encoder" ? "dial" : "key";
@@ -777,11 +1017,18 @@ export default function App() {
     const item = snapshot.slots.find(
       (s) => s.controller === controller && s.index === index,
     );
+    const controlPreview =
+      item?.preview ||
+      (controller === "Encoder"
+        ? snapshot.encoder_background_tiles?.[index]
+        : undefined);
     const active =
       selected.controller === controller && selected.index === index;
     return (
       <button
         key={index}
+        data-drop-controller={controller}
+        data-drop-index={index}
         type="button"
         className={
           (controller === "Neo"
@@ -791,6 +1038,13 @@ export default function App() {
               : "deck-dial") +
           (active ? " selected" : "") +
           (!item ? " unassigned" : "") +
+          (!readonly &&
+          !saving &&
+          !editBusy &&
+          nativeDropTarget?.controller === controller &&
+          nativeDropTarget.index === index
+            ? " file-drop-target"
+            : "") +
           (item &&
           snapshot.clipboard?.mode === "cut" &&
           snapshot.clipboard.context === item.context
@@ -863,17 +1117,20 @@ export default function App() {
             <span>Pedal {index + 1}</span>
             <strong>{item?.name ?? "Unassigned"}</strong>
           </span>
-        ) : item?.preview ? (
+        ) : controlPreview ? (
           <img
             src={
-              item.preview.startsWith("data:")
-                ? item.preview
-                : `data:image/png;base64,${item.preview}`
+              controlPreview.startsWith("data:")
+                ? controlPreview
+                : `data:image/png;base64,${controlPreview}`
             }
             alt=""
           />
         ) : (
           <span className="empty-control">+</span>
+        )}
+        {!item && controlPreview && (
+          <span className="empty-control background-add">+</span>
         )}
         {item &&
           snapshot.clipboard?.mode === "cut" &&
@@ -886,7 +1143,7 @@ export default function App() {
           </span>
         )}
         <span className="sr-only">{item?.title}</span>
-        {controller === "Encoder" && (
+        {controller === "Encoder" && snapshot.device_model !== "galleon" && (
           <span className="dial-knob" aria-hidden="true">
             {item?.software_icon?.trim() ? (
               <img
@@ -950,6 +1207,7 @@ export default function App() {
             Plugins <span className="count">{snapshot.plugins.length}</span>
           </button>
           <button onClick={() => setPanel("preferences")}>Preferences</button>
+          {(snapshot?.typing_status?.phase === "typing" || snapshot?.typing_status?.phase === "stopping") && <button type="button" aria-label="Stop desktop typing" disabled={snapshot.typing_status.phase === "stopping"} onClick={() => request("command", { command: "text_typing_disable" }).catch(onError)}>Stop typing</button>}
           <button
             title="Keep running in background"
             aria-label="Hide Deckforge"
@@ -1032,6 +1290,20 @@ export default function App() {
                   {p.name}
                   {p.device_name && <small>{p.device_name}</small>}
                   {p.readonly && <small>Plugin managed</small>}
+                  {snapshot.smart_profiles?.config.bindings[p.id] && (
+                    <small
+                      title={
+                        snapshot.smart_profiles.config.bindings[p.id].value
+                      }
+                    >
+                      Smart:{" "}
+                      {snapshot.smart_profiles.config.bindings[p.id].name ||
+                        snapshot.smart_profiles.config.bindings[p.id].value}
+                    </small>
+                  )}
+                  {snapshot.smart_profiles?.config.fallback === p.id && (
+                    <small>Default profile</small>
+                  )}
                 </span>
               </button>
             ))}
@@ -1052,9 +1324,35 @@ export default function App() {
             >
               ↑ Export profile
             </button>
+            <button type="button" onClick={() => setPanel("icons")}>Manage icon packs…</button>
             <details>
               <summary>Profile options</summary>
               <div className="menu-stack">
+                <button
+                  type="button"
+                  disabled={
+                    !profile ||
+                    !snapshot.smart_profiles ||
+                    profile.compatible === false
+                  }
+                  onClick={() => {
+                    setError("");
+                    setSmartEdit({
+                      device: currentDevice,
+                      deviceName: deviceName(snapshot),
+                      profile: profile!.id,
+                      profiles: structuredClone(snapshot.library.profiles),
+                      expected: structuredClone(
+                        snapshot.smart_profiles!.config,
+                      ),
+                      settings: structuredClone(
+                        snapshot.smart_profiles!.config,
+                      ),
+                    });
+                  }}
+                >
+                  Smart Profiles…
+                </button>
                 <button
                   type="button"
                   disabled={!profile}
@@ -1135,6 +1433,15 @@ export default function App() {
                 +
               </button>
             </nav>
+            <div className="history-controls" aria-label="Edit history">
+              <button type="button" title={historyDirty ? "Save or revert pending changes first" : `Undo${snapshot.history?.undo ? ": " + snapshot.history.undo : ""} (Ctrl+Z)`}
+                disabled={!snapshot.history?.undo || saving || editBusy || selectingDevice || historyDirty}
+                onClick={() => void reverseEdit(false)}>Undo</button>
+              <button type="button" title={historyDirty ? "Save or revert pending changes first" : `Redo${snapshot.history?.redo ? ": " + snapshot.history.redo : ""} (Ctrl+Shift+Z)`}
+                disabled={!snapshot.history?.redo || saving || editBusy || selectingDevice || historyDirty}
+                onClick={() => void reverseEdit(true)}>Redo</button>
+              {snapshot.history?.note && <span className="hint" title={snapshot.history.note} aria-label={snapshot.history.note}>ⓘ</span>}
+            </div>
             <details className="page-menu">
               <summary aria-label="Page options">•••</summary>
               <div className="floating-menu">
@@ -1165,6 +1472,34 @@ export default function App() {
                       {operation[0].toUpperCase() + operation.slice(1)} page
                     </button>
                   ),
+                )}
+                {hasEncoderDisplay(snapshot) && (
+                  <>
+                    <button
+                      disabled={!page || readonly || backgroundBusy}
+                      onClick={() => void chooseBackground()}
+                    >
+                      Set display background…
+                    </button>
+                    <button
+                      disabled={
+                        !page ||
+                        readonly ||
+                        backgroundBusy ||
+                        !snapshot.encoder_background_configured
+                      }
+                      onClick={() =>
+                        run({
+                          command: "page_background",
+                          profile: profile?.id,
+                          id: page?.id,
+                          path: null,
+                        })
+                      }
+                    >
+                      Remove display background
+                    </button>
+                  </>
                 )}
                 <button
                   disabled={!page || readonly}
@@ -1259,6 +1594,19 @@ export default function App() {
             <DeviceCanvas
               snapshot={snapshot}
               renderSlot={slotButton}
+              onDialInput={(index, event, ticks) =>
+                void run({
+                  command:
+                    event === "click" || event === "next"
+                      ? "physical_dial_action"
+                      : "input",
+                  device: snapshot.device,
+                  index,
+                  event,
+                  ticks,
+                  physical: true,
+                })
+              }
               onPage={(direction) =>
                 void run({ command: "page_step", direction })
               }
@@ -1299,15 +1647,22 @@ export default function App() {
                   onCopy={() => void clipboardAction("copy")}
                   onCut={() => void clipboardAction("cut")}
                   onPaste={() => void pasteAction()}
+                  onImport={() => void shareAction("import")}
+                  onExport={() => void shareAction("export")}
                   onRemove={() => void removeAction()}
                   onCancelCut={() => void cancelCut()}
+                  onCreateLogic={
+                    selected.controller === "Keypad" && slot?.uuid !== LOGIC
+                      ? () => void assign(LOGIC)
+                      : undefined
+                  }
                 />
                 {slot && (
                   <>
                     {slot.controller !== "Neo" && (
                       <button
                         onClick={testPress}
-                        disabled={!selectedAvailable || slot.plugin_disabled}
+                        disabled={!selectedAvailable || slot.plugin_disabled || containsDesktopTyping(slot) || (slot.uuid === "com.elgato.streamdeck.system.text" && draft?.settings?.isTypingMode === true)}
                       >
                         Test{" "}
                         {selected.controller === "Keypad" ? "press" : "push"}
@@ -1330,6 +1685,7 @@ export default function App() {
                 )}
               </div>
             </header>
+            {slot && containsDesktopTyping(slot) && <p className="hint outside-selected">For typing, focus the destination app and press your Stream Deck key.</p>}
             {!selectedAvailable && (
               <p className="warning outside-selected">
                 This saved action lies outside the current device layout. You
@@ -1368,190 +1724,275 @@ export default function App() {
                   }}
                 >
                   <fieldset
-                    disabled={readonly || saving || editBusy}
+                    disabled={saving || editBusy}
                     className="inspector-fields"
                   >
-                    {slot.controller === "Encoder" &&
-                    !hasEncoderDisplay(snapshot) ? (
-                      <>
-                        <p className="hint">
-                          This dial has no display. Its action settings remain
-                          editable.
-                        </p>
-                        {snapshot.device_model === "studio" && (
+                    <fieldset
+                      disabled={readonly}
+                      className="inspector-edit-fields"
+                    >
+                      {slot.controller === "Encoder" &&
+                      !hasEncoderDisplay(snapshot) ? (
+                        <>
                           <p className="hint">
-                            Studio LED and ring feedback is not supported.
+                            This dial has no display. Its action settings remain
+                            editable.
                           </p>
-                        )}
-                        <Check
-                          label="Pin on every page"
-                          checked={slot.pinned}
-                          onChange={(pinned) =>
-                            run({
-                              command: "slot_pin",
-                              context: slot.context,
-                              pinned,
-                            })
-                          }
-                        />
-                      </>
-                    ) : (
-                      <AppearanceEditor
-                        key={`appearance:${snapshot.device}:${snapshot.device_model}:${slot.context}`}
-                        slot={slot}
-                        device={currentDevice}
-                        draft={draft}
-                        userTitleEnabled={action?.user_title_enabled !== false}
-                        fallback={<ActionIcon action={action} />}
-                        onError={onError}
-                        onEdit={(state, patch, base) =>
-                          setDrafts((previous) => ({
-                            ...previous,
-                            [slot.context]: editAppearance(
-                              previous[slot.context] ??
-                                reconcileDraft(undefined, slot),
-                              slot,
-                              state,
-                              patch,
-                              base,
-                            ),
-                          }))
-                        }
-                        onSelectState={(state) =>
-                          setDrafts((previous) => ({
-                            ...previous,
-                            [slot.context]: {
-                              ...previous[slot.context],
-                              appearanceState: state,
-                            },
-                          }))
-                        }
-                        onRefreshState={() =>
-                          setDrafts((previous) => ({
-                            ...previous,
-                            [slot.context]: {
-                              ...previous[slot.context],
-                              appearanceExpectedState: slot.state,
-                              revision: previous[slot.context].revision + 1,
-                            },
-                          }))
-                        }
-                      >
-                        <Check
-                          label="Pin on every page"
-                          checked={slot.pinned}
-                          onChange={(pinned) =>
-                            run({
-                              command: "slot_pin",
-                              context: slot.context,
-                              pinned,
-                            })
-                          }
-                        />
-                      </AppearanceEditor>
-                    )}
-                    {slot.plugin_disabled ? (
-                      <p className="warning">
-                        This plugin is disabled. Its settings and draft are
-                        preserved.{" "}
-                        <button
-                          type="button"
-                          onClick={() => setPanel("plugins")}
-                        >
-                          Enable plugin in Plugins
-                        </button>
-                      </p>
-                    ) : (
-                      slot.available === false && (
+                          {snapshot.device_model === "studio" && (
+                            <p className="hint">
+                              Studio LED and ring feedback is not supported.
+                            </p>
+                          )}
+                          <Check
+                            label="Pin on every page"
+                            checked={slot.pinned}
+                            onChange={(pinned) =>
+                              run({
+                                command: "slot_pin",
+                                context: slot.context,
+                                pinned,
+                              })
+                            }
+                          />
+                        </>
+                      ) : (
+                        <>
+                          {slot.controller === "Encoder" &&
+                            hasEncoderDisplay(snapshot) && (
+                              <div className="encoder-appearance-controls">
+                                <button
+                                  type="button"
+                                  disabled={readonly || saving || editBusy}
+                                  onClick={() => {
+                                    if (
+                                      savedOnly(
+                                        slot.context,
+                                        "customizing its background",
+                                      )
+                                    )
+                                      setCropEdit({
+                                        context: slot.context,
+                                        device: currentDevice,
+                                        expected:
+                                          slot.raw.Encoder?.background ?? null,
+                                        frame: 0,
+                                      });
+                                  }}
+                                >
+                                  Customize background…
+                                </button>
+                                <button
+                                  type="button"
+                                  disabled={
+                                    readonly ||
+                                    saving ||
+                                    editBusy ||
+                                    !slot.raw.Encoder?.background
+                                  }
+                                  onClick={() =>
+                                    void run({
+                                      command: "encoder_appearance",
+                                      context: slot.context,
+                                      field: "background",
+                                      expected:
+                                        slot.raw.Encoder?.background ?? null,
+                                      value: null,
+                                    })
+                                  }
+                                >
+                                  Remove background
+                                </button>
+                                <label>
+                                  <input
+                                    type="checkbox"
+                                    disabled={readonly || saving || editBusy}
+                                    checked={
+                                      slot.raw.Encoder?.IconVisible !== false
+                                    }
+                                    onChange={(e) =>
+                                      void run({
+                                        command: "encoder_appearance",
+                                        context: slot.context,
+                                        field: "IconVisible",
+                                        expected:
+                                          slot.raw.Encoder?.IconVisible ?? null,
+                                        value: e.target.checked,
+                                      })
+                                    }
+                                  />{" "}
+                                  Show feedback icon
+                                </label>
+                              </div>
+                            )}
+                          <AppearanceEditor
+                            key={`appearance:${snapshot.device}:${snapshot.device_model}:${slot.context}`}
+                            slot={slot}
+                            device={currentDevice}
+                            draft={draft}
+                            userTitleEnabled={
+                              action?.user_title_enabled !== false
+                            }
+                            fallback={<ActionIcon action={action} />}
+                            onError={onError}
+                            onEdit={(state, patch, base) =>
+                              setDrafts((previous) => ({
+                                ...previous,
+                                [slot.context]: editAppearance(
+                                  previous[slot.context] ??
+                                    reconcileDraft(undefined, slot),
+                                  slot,
+                                  state,
+                                  patch,
+                                  base,
+                                ),
+                              }))
+                            }
+                            onSelectState={(state) =>
+                              setDrafts((previous) => ({
+                                ...previous,
+                                [slot.context]: {
+                                  ...previous[slot.context],
+                                  appearanceState: state,
+                                },
+                              }))
+                            }
+                            onRefreshState={() =>
+                              setDrafts((previous) => ({
+                                ...previous,
+                                [slot.context]: {
+                                  ...previous[slot.context],
+                                  appearanceExpectedState: slot.state,
+                                  revision: previous[slot.context].revision + 1,
+                                },
+                              }))
+                            }
+                          >
+                            <Check
+                              label="Pin on every page"
+                              checked={slot.pinned}
+                              onChange={(pinned) =>
+                                run({
+                                  command: "slot_pin",
+                                  context: slot.context,
+                                  pinned,
+                                })
+                              }
+                            />
+                          </AppearanceEditor>
+                        </>
+                      )}
+                      {slot.plugin_disabled ? (
                         <p className="warning">
-                          This action's plugin is unavailable. Your assignment
-                          and settings are preserved. Reinstall the plugin in
-                          Plugins, or restart it if it is already installed.{" "}
+                          This plugin is disabled. Its settings and draft are
+                          preserved.{" "}
                           <button
                             type="button"
                             onClick={() => setPanel("plugins")}
                           >
-                            Open Plugins
+                            Enable plugin in Plugins
                           </button>
                         </p>
-                      )
-                    )}
-                    {draft.dirty && draft.source !== sourceOf(slot) && (
-                      <p className="warning">
-                        The plugin changed this action while you were editing.
-                        Your draft is kept; saving applies your changes.
-                      </p>
-                    )}
-                    {snapshot.library.folder_depth > 0 &&
-                      ![
-                        "com.elgato.streamdeck.profile.openchild",
-                        "com.elgato.streamdeck.page.next",
-                        "com.elgato.streamdeck.page.previous",
-                        "com.elgato.streamdeck.page.goto",
-                        "com.elgato.streamdeck.page.indicator",
-                      ].includes(slot.uuid) && (
-                        <FolderExit
-                          key={`folder-exit:${slot.context}`}
-                          resetCount={
-                            snapshot.slots.filter(
-                              (s) =>
-                                !s.pinned &&
-                                s.context !== slot.context &&
-                                s.raw.AutoExit != null,
-                            ).length
-                          }
-                          onReset={async () => {
-                            if (
-                              snapshot.slots.some((s) => hasUnsaved(s.context))
-                            ) {
-                              onError(
-                                new Error(
-                                  "Save or revert this folder's action drafts before resetting overrides.",
-                                ),
-                              );
-                              return;
-                            }
-                            if (
-                              await run({
-                                command: "folder_exit_reset",
-                                context: slot.context,
-                                page: snapshot.library.active_page,
-                                confirm: true,
-                              })
-                            )
-                              setNotice(
-                                "Action overrides reset to the folder default",
-                              );
-                          }}
-                          raw={draft.raw}
-                          parent={
-                            snapshot.slots.find(
-                              (s) =>
-                                s.uuid ===
-                                "com.elgato.streamdeck.profile.backtoparent",
-                            )?.raw
-                          }
-                          back={
-                            slot.uuid ===
-                            "com.elgato.streamdeck.profile.backtoparent"
-                          }
-                          onChange={(update) =>
-                            setDrafts((previous) => {
-                              const latest =
-                                previous[slot.context] ??
-                                reconcileDraft(undefined, slot);
-                              return {
-                                ...previous,
-                                [slot.context]: editDraft(latest, {
-                                  raw: update(latest.raw),
-                                }),
-                              };
-                            })
-                          }
-                        />
+                      ) : (
+                        slot.available === false && (
+                          <p className="warning">
+                            This action's plugin is unavailable. Your assignment
+                            and settings are preserved. Reinstall the plugin in
+                            Plugins, or restart it if it is already installed.{" "}
+                            <button
+                              type="button"
+                              onClick={() => setPanel("plugins")}
+                            >
+                              Open Plugins
+                            </button>
+                          </p>
+                        )
                       )}
+                      {draft.dirty && draft.source !== sourceOf(slot) && (
+                        <p className="warning">
+                          The plugin changed this action while you were editing.
+                          Your draft is kept; saving applies your changes.
+                        </p>
+                      )}
+                      {snapshot.library.folder_depth > 0 &&
+                        ![
+                          "com.elgato.streamdeck.profile.openchild",
+                          "com.elgato.streamdeck.page.next",
+                          "com.elgato.streamdeck.page.previous",
+                          "com.elgato.streamdeck.page.goto",
+                          "com.elgato.streamdeck.page.indicator",
+                        ].includes(slot.uuid) && (
+                          <FolderExit
+                            key={`folder-exit:${slot.context}`}
+                            resetCount={
+                              snapshot.slots.filter(
+                                (s) =>
+                                  !s.pinned &&
+                                  s.context !== slot.context &&
+                                  s.raw.AutoExit != null,
+                              ).length
+                            }
+                            onReset={async () => {
+                              if (
+                                snapshot.slots.some((s) =>
+                                  hasUnsaved(s.context),
+                                )
+                              ) {
+                                onError(
+                                  new Error(
+                                    "Save or revert this folder's action drafts before resetting overrides.",
+                                  ),
+                                );
+                                return;
+                              }
+                              if (
+                                await run({
+                                  command: "folder_exit_reset",
+                                  context: slot.context,
+                                  page: snapshot.library.active_page,
+                                  confirm: true,
+                                })
+                              )
+                                setNotice(
+                                  "Action overrides reset to the folder default",
+                                );
+                            }}
+                            raw={draft.raw}
+                            parent={
+                              snapshot.slots.find(
+                                (s) =>
+                                  s.uuid ===
+                                  "com.elgato.streamdeck.profile.backtoparent",
+                              )?.raw
+                            }
+                            back={
+                              slot.uuid ===
+                              "com.elgato.streamdeck.profile.backtoparent"
+                            }
+                            onChange={(update) =>
+                              setDrafts((previous) => {
+                                const latest =
+                                  previous[slot.context] ??
+                                  reconcileDraft(undefined, slot);
+                                return {
+                                  ...previous,
+                                  [slot.context]: editDraft(latest, {
+                                    raw: update(latest.raw),
+                                  }),
+                                };
+                              })
+                            }
+                          />
+                        )}
+                    </fieldset>
                     {isContainer(slot.uuid) ? (
                       <Sequence
+                        typingStatus={snapshot.typing_status}
+                        readOnly={readonly}
+                        clipboard={snapshot.clipboard}
+                        clipboardRun={containerClipboard}
+                        clipboardReady={
+                          !hasUnsaved(slot.context) && !saving && !editBusy
+                        }
                         folderPages={folderPages}
                         encoderDisplay={hasEncoderDisplay(snapshot)}
                         device={currentDevice}
@@ -1568,21 +2009,28 @@ export default function App() {
                         onError={onError}
                       />
                     ) : (
-                      <SettingsFields
-                        folderPages={folderPages}
-                        device={currentDevice}
-                        mixer={snapshot.mixer?.config}
-                        editorKey={slot.context}
-                        key={slot.context}
-                        uuid={slot.uuid}
-                        controller={slot.controller}
-                        settings={draft.settings}
-                        onChange={(settings) => change({ settings })}
-                        outputs={snapshot.audio_outputs}
-                        onError={onError}
-                      />
+                      <fieldset
+                        disabled={readonly}
+                        className="inspector-edit-fields"
+                      >
+                        <SettingsFields
+                          folderPages={folderPages}
+                          device={currentDevice}
+                          mixer={snapshot.mixer?.config}
+                          editorKey={slot.context}
+                          key={slot.context}
+                          uuid={slot.uuid}
+                          controller={slot.controller}
+                          settings={draft.settings}
+                          onChange={(settings) => change({ settings })}
+                          outputs={snapshot.audio_outputs}
+                          onError={onError}
+                        />
+                      </fieldset>
                     )}
                   </fieldset>
+                  {slot.uuid === "com.deckforge.system.command" && <CommandOutput key={slot.context} slot={slot} device={currentDevice} />}
+                  {slot.uuid === "com.elgato.streamdeck.system.text" && draft.settings?.isTypingMode === true && <TypingAccess status={snapshot.typing_status} onError={onError} />}
                   <footer className="inspector-footer">
                     <div className="row">
                       <button
@@ -1835,7 +2283,8 @@ export default function App() {
           <button onClick={() => setPanel("logs")}>Activity log</button>
         </div>
       </footer>
-      {panel && (
+      {panel === "icons" && <IconLibrary onClose={() => setPanel(null)} />}
+      {panel && panel !== "icons" && (
         <Modal
           wide={panel === "plugins" || panel === "logs" || panel === "mixer"}
           className={panel === "mixer" ? "mixer-dialog" : undefined}
@@ -1873,6 +2322,54 @@ export default function App() {
             </pre>
           )}
         </Modal>
+      )}
+      {snapshot.pending_action_file && <ActionFileChooser pending={snapshot.pending_action_file}
+        choice={actionFileChoice?.id === snapshot.pending_action_file.id ? actionFileChoice : { id: snapshot.pending_action_file.id, root: 0, query: "" }}
+        deviceName={snapshot.devices?.find((d) => d.id === snapshot.pending_action_file?.device)?.name || snapshot.pending_action_file.device}
+        actions={snapshot.actions} busy={editBusy || saving} error={error}
+        onChange={(choice) => { setActionFileChoice(choice); setError(""); }}
+        onChoose={() => void finishActionFile()} onClose={() => void finishActionFile(true)} />}
+      {smartEdit && (
+        <SmartProfiles
+          draft={smartEdit}
+          status={snapshot.smart_profiles}
+          busy={smartBusy}
+          error={error}
+          onChange={setSmartEdit}
+          onError={onError}
+          onClose={() => setSmartEdit(null)}
+          onSave={async () => {
+            const edit = smartEdit;
+            setSmartBusy(true);
+            try {
+              if (
+                await run(
+                  {
+                    command: "smart_config",
+                    settings: edit.settings,
+                    expected: edit.expected,
+                  },
+                  edit.device,
+                )
+              ) {
+                setSmartEdit(null);
+                setNotice("Smart Profile settings saved");
+              }
+            } finally {
+              setSmartBusy(false);
+            }
+          }}
+        />
+      )}
+      {cropEdit && (
+        <ImageCropper
+          edit={cropEdit}
+          onChange={setCropEdit}
+          onClose={() => setCropEdit(null)}
+          onSaved={() =>
+            void request<Snapshot>("snapshot").then(accept).catch(onError)
+          }
+        />
       )}
       {copyProfile && (
         <ProfileCopyDialog

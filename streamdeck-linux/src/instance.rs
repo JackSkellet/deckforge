@@ -31,6 +31,7 @@ use tokio::{
 const LIMIT: usize = 16 * 1024;
 const TIMEOUT: Duration = Duration::from_secs(1);
 type Callback = Arc<dyn Fn(Command) -> Result<Value> + Send + Sync>;
+type FileCallback = Arc<dyn Fn(&Path) -> Result<Value> + Send + Sync>;
 type LinkCallback = Arc<dyn Fn(&str) -> Result<Value> + Send + Sync>;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -57,10 +58,17 @@ struct LinkMessage {
     uri: String,
 }
 #[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FileMessage {
+    state: String,
+    file: PathBuf,
+}
+#[derive(Serialize, Deserialize)]
 #[serde(untagged)]
 enum Request {
     Window(Message),
     Link(LinkMessage),
+    File(FileMessage),
 }
 
 #[derive(Serialize, Deserialize)]
@@ -93,6 +101,17 @@ pub fn request_deep_link(state: &Path, uri: &str) -> Result<Option<Value>> {
     })?;
     request_message(state, move |state| {
         Request::Link(LinkMessage { state, uri })
+    })
+}
+
+pub fn request_open_file(state: &Path, path: &Path) -> Result<Option<Value>> {
+    let file = crate::file_open::parse(path.to_str().context("File path must be UTF-8")?)?;
+    line(&FileMessage {
+        state: "0".repeat(64),
+        file: file.clone(),
+    })?;
+    request_message(state, move |state| {
+        Request::File(FileMessage { state, file })
     })
 }
 
@@ -148,6 +167,20 @@ pub fn spawn_with_deep_links(
     callback: Callback,
     link_callback: LinkCallback,
 ) -> Result<Server> {
+    spawn_with_files(
+        state,
+        callback,
+        link_callback,
+        Arc::new(|_| bail!("This editor does not support desktop files; restart Deckforge")),
+    )
+}
+
+pub fn spawn_with_files(
+    state: &Path,
+    callback: Callback,
+    link_callback: LinkCallback,
+    file_callback: FileCallback,
+) -> Result<Server> {
     let endpoint = Endpoint::new(
         &state
             .canonicalize()
@@ -192,6 +225,7 @@ pub fn spawn_with_deep_links(
                 endpoint.identity,
                 callback,
                 link_callback,
+                file_callback,
                 stopped,
             ));
         })?;
@@ -429,6 +463,7 @@ async fn exchange(
     identity: &str,
     callback: &Callback,
     link_callback: &LinkCallback,
+    file_callback: &FileCallback,
 ) -> Result<()> {
     ensure!(
         stream.peer_cred()?.uid() == uid(),
@@ -440,10 +475,17 @@ async fn exchange(
         let state = match &message {
             Request::Window(message) => &message.state,
             Request::Link(message) => &message.state,
+            Request::File(message) => &message.state,
         };
         ensure!(state == identity, "Instance state identity mismatch");
         match message {
             Request::Window(message) => callback(message.command),
+            Request::File(message) => {
+                let path = crate::file_open::parse(
+                    message.file.to_str().context("File path must be UTF-8")?,
+                )?;
+                file_callback(&path)
+            }
             Request::Link(message) => {
                 crate::deep_link::DeepLink::parse(&message.uri)?;
                 link_callback(&message.uri)
@@ -467,6 +509,7 @@ async fn serve(
     identity: String,
     callback: Callback,
     link_callback: LinkCallback,
+    file_callback: FileCallback,
     mut stop: oneshot::Receiver<()>,
 ) {
     let identity = Arc::new(identity);
@@ -481,7 +524,8 @@ async fn serve(
                     let identity = identity.clone();
                     let callback = callback.clone();
                     let link_callback = link_callback.clone();
-                    clients.spawn(async move { let _ = timeout(TIMEOUT, exchange(stream, &identity, &callback, &link_callback)).await; });
+                    let file_callback = file_callback.clone();
+                    clients.spawn(async move { let _ = timeout(TIMEOUT, exchange(stream, &identity, &callback, &link_callback, &file_callback)).await; });
                 },
                 Ok(_) => {}, // Bound simultaneous clients even if a peer never sends a line.
                 Err(_) => tokio::time::sleep(Duration::from_millis(25)).await,
@@ -505,6 +549,33 @@ mod tests {
 
     fn callback() -> Callback {
         Arc::new(|command| Ok(json!({"command": command})))
+    }
+    #[test]
+    fn desktop_files_route_to_the_existing_owner_and_keep_window_protocol() {
+        let state = tempfile::tempdir().unwrap();
+        let path = state.path().join("shared % name.streamDeckAction");
+        fs::write(&path, b"fixture").unwrap();
+        let received = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = received.clone();
+        let _server = spawn_with_files(
+            state.path(),
+            callback(),
+            Arc::new(|_| Ok(Value::Null)),
+            Arc::new(move |path| {
+                sink.lock().unwrap().push(path.to_owned());
+                Ok(json!({"queued":true}))
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            request_open_file(state.path(), &path).unwrap(),
+            Some(json!({"queued":true}))
+        );
+        assert_eq!(*received.lock().unwrap(), vec![path]);
+        assert_eq!(
+            request(state.path(), Command::Status).unwrap(),
+            Some(json!({"command":"status"}))
+        );
     }
     fn endpoint(state: &Path) -> Endpoint {
         Endpoint::new(&state.canonicalize().unwrap(), true).unwrap()

@@ -4,8 +4,8 @@
 //! linux/input-event-codes.h, Qt's Key enum, Microsoft virtual-key documentation,
 //! and evidence/system-action-contracts.json from the original installer.
 //!
-//! Output is physical Linux key identity. This does not perform Unicode typing or
-//! translate the desktop's current XKB layout. Qt identity wins over platform-local
+//! Portable decoding yields physical Linux identities; logical Chord mapping resolves
+//! against the desktop map at press time. Qt identity wins over platform-local
 //! VKeyCode/NativeCode; those fields can contain macOS codes even in bundled profiles.
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::Value;
@@ -15,6 +15,10 @@ use std::{
     io::{self, Write},
     mem::{offset_of, size_of},
     os::{fd::AsRawFd, unix::fs::OpenOptionsExt},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -26,6 +30,8 @@ const KEY_LEFTSHIFT: u16 = 42;
 const KEY_LEFTALT: u16 = 56;
 const KEY_LEFTMETA: u16 = 125;
 const QT_UNKNOWN: i64 = 0x01ff_ffff;
+const SIDED_MODIFIERS: u32 = 0x1_0000;
+const MODIFIER_FIELDS: u32 = SIDED_MODIFIERS | 0x0fff;
 const LETTERS: [u16; 26] = [
     30, 48, 46, 32, 18, 33, 34, 35, 23, 36, 37, 38, 50, 49, 24, 25, 16, 19, 31, 20, 22, 47, 17, 45,
     21, 44,
@@ -37,8 +43,68 @@ const FUNCTION_KEYS: [u16; 24] = [
     192, 193, 194,
 ];
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct Chord {
+    pub keys: Vec<u16>,
+    pub logical: bool,
+}
+impl From<Vec<u16>> for Chord {
+    fn from(keys: Vec<u16>) -> Self {
+        Self {
+            keys,
+            logical: false,
+        }
+    }
+}
+impl Chord {
+    pub fn is_empty(&self) -> bool {
+        self.keys.is_empty()
+    }
+    pub fn from_settings(keys: Vec<u16>, settings: &Value) -> Result<Self> {
+        let logical = match settings.get("linuxKeyMode") {
+            None => false,
+            Some(Value::String(mode)) if mode == "physical" => false,
+            Some(Value::String(mode)) if mode == "logical" => true,
+            _ => bail!("Choose physical keys or desktop layout mapping"),
+        };
+        Ok(Self { keys, logical })
+    }
+}
+pub fn imported_chord(settings: &Value, index: usize) -> Result<Chord> {
+    Chord::from_settings(
+        imported_hotkey(settings, index)?,
+        &settings["Hotkeys"][index],
+    )
+}
+
+/// Printable identities represented by the existing portable Qt-to-evdev table.
+/// Modifiers, keypad and nonprinting keys retain their explicit physical identity.
+pub(crate) fn printable_symbol(code: u16) -> Option<u32> {
+    if let Some(i) = LETTERS.iter().position(|&k| k == code) {
+        return Some(b'a' as u32 + i as u32);
+    }
+    if let Some(i) = DIGITS.iter().position(|&k| k == code) {
+        return Some(b'0' as u32 + i as u32);
+    }
+    Some(match code {
+        57 => 32,
+        40 => 39,
+        51 => 44,
+        12 => 45,
+        52 => 46,
+        53 => 47,
+        39 => 59,
+        13 => 61,
+        26 => 91,
+        43 => 92,
+        27 => 93,
+        41 => 96,
+        _ => return None,
+    })
+}
+
 /// Only actual keyboard keys supported by this module. No mouse/pointer buttons.
-fn supported(code: u16) -> bool {
+pub(crate) fn supported(code: u16) -> bool {
     matches!(code, 1..=83 | 86..=88 | 96..=100 | 102..=115 | 117 | 119 | 121 | 125..=127 | 138 | 163..=168 | 183..=194 | 207..=208)
 }
 
@@ -111,8 +177,36 @@ impl Ownership {
 pub struct Keyboard {
     device: Option<File>,
     ownership: Ownership,
+    cancelled: Arc<AtomicBool>,
 }
 impl Keyboard {
+    pub(crate) fn bind_cancellation(&mut self, cancelled: Arc<AtomicBool>) {
+        self.cancelled = cancelled;
+    }
+    pub fn press_chord(&mut self, chord: &Chord) -> Result<u64> {
+        ensure!(
+            !self.cancelled.load(Ordering::Acquire),
+            "Keyboard action cancelled"
+        );
+        if chord.logical && chord.keys.iter().any(|&k| printable_symbol(k).is_some()) {
+            let keys = crate::keyboard_layout::resolve(&chord.keys, &self.cancelled)?;
+            self.press(&keys)
+        } else {
+            self.press(&chord.keys)
+        }
+    }
+    pub fn send_chord(&mut self, chord: &Chord) -> Result<()> {
+        let token = self.press_chord(chord)?;
+        self.release(token)
+    }
+    #[cfg(test)]
+    pub(crate) fn with_test_writer(device: File) -> Self {
+        Self {
+            device: Some(device),
+            ownership: Ownership::default(),
+            cancelled: Arc::new(AtomicBool::new(false)),
+        }
+    }
     /// Creates the keyboard and waits one second for userspace discovery, as in
     /// the kernel example. Call from the input worker, never under the host mutex.
     /// The grace period is not proof that a compositor has attached to the device.
@@ -159,6 +253,7 @@ impl Keyboard {
         let keyboard = Self {
             device: Some(device),
             ownership: Ownership::default(),
+            cancelled: Arc::new(AtomicBool::new(false)),
         };
         thread::sleep(Duration::from_secs(1));
         Ok(keyboard)
@@ -314,49 +409,44 @@ pub fn imported_hotkey(settings: &Value, index: usize) -> Result<Vec<u16>> {
     let qt = integer(hotkey, "QTKeyCode")?;
     let vk = integer(hotkey, "VKeyCode")?;
     let native = integer(hotkey, "NativeCode")?;
-    let flags = match hotkey.get("KeyModifiers") {
-        None => 0,
-        Some(value) => modifier_mask(value)?,
-    };
+    let flags = effective_modifiers(hotkey)?;
     let mut modifiers = Vec::new();
-    for (name, bit, key) in [
-        ("KeyCtrl", 2, KEY_LEFTCTRL),
-        ("KeyShift", 1, KEY_LEFTSHIFT),
-        ("KeyOption", 4, KEY_LEFTALT),
-        ("KeyCmd", 8, KEY_LEFTMETA),
+    for (bit, left, right) in [
+        (2, KEY_LEFTCTRL, 97),
+        (1, KEY_LEFTSHIFT, 54),
+        (4, KEY_LEFTALT, 100),
+        (8, KEY_LEFTMETA, 126),
     ] {
-        let enabled = match hotkey.get(name) {
-            Some(value) => {
-                let enabled = value
-                    .as_bool()
-                    .with_context(|| format!("{name} must be a boolean"))?;
-                if hotkey.get("KeyModifiers").is_some() {
-                    ensure!(
-                        enabled == (flags & bit != 0),
-                        "{name} contradicts KeyModifiers"
-                    );
-                }
-                enabled
-            }
-            None => flags & bit != 0,
+        // Original bit 16 selects the side-specific table. Without it the
+        // captured side bits are metadata; execution uses the generic low bits.
+        let sided = flags & SIDED_MODIFIERS != 0;
+        let selected = if sided {
+            flags & (bit << 4 | bit << 8) != 0
+        } else {
+            flags & bit != 0
         };
-        if enabled {
-            modifiers.push(key);
+        if selected {
+            if !sided || flags & (bit << 4) != 0 {
+                modifiers.push(left);
+            }
+            if sided && flags & (bit << 8) != 0 {
+                modifiers.push(right);
+            }
         }
     }
     if qt.is_none() || qt == Some(QT_UNKNOWN) || qt == Some(-1) {
         let absent = matches!(vk, None | Some(-1) | Some(0))
             && matches!(native, None | Some(-1) | Some(0) | Some(146));
         ensure!(
-            absent && flags & !0xf == 0,
+            absent && flags & !MODIFIER_FIELDS == 0,
             "Hotkey has no portable Qt identity; platform-local key codes need an explicit mapping"
         );
         // The original dial/system branch permits an unknown Qt key with a
-        // nonempty modifier record. Only the four recovered low bits are mapped.
+        // nonempty modifier record, including the original side-specific mode.
         return Ok(modifiers);
     }
     let qt = qt.unwrap();
-    let identity_flags = flags & !0xf;
+    let identity_flags = flags & !MODIFIER_FIELDS;
     let key = match identity_flags {
         0 => qt_key(qt)?,
         0x4000 | 0x24000 => {
@@ -375,7 +465,7 @@ pub fn imported_hotkey(settings: &Value, index: usize) -> Result<Vec<u16>> {
         },
         _ => bail!("Unsupported imported key identity flags {identity_flags:#x}"),
     };
-    if qt == 0x0100_0002 && !modifiers.contains(&KEY_LEFTSHIFT) {
+    if qt == 0x0100_0002 && !modifiers.contains(&KEY_LEFTSHIFT) && !modifiers.contains(&54) {
         modifiers.push(KEY_LEFTSHIFT);
     }
     if !modifiers.contains(&key) {
@@ -392,6 +482,38 @@ fn integer(value: &Value, field: &str) -> Result<Option<i64>> {
                 .with_context(|| format!("{field} must be an integer"))
         })
         .transpose()
+}
+/// Original loader uses 0x2000 (including an absent mask) to select legacy
+/// boolean fields. A modern mask is authoritative; old booleans are dormant data.
+pub(crate) fn effective_modifiers(hotkey: &Value) -> Result<u32> {
+    let flags = hotkey
+        .get("KeyModifiers")
+        .map(modifier_mask)
+        .transpose()?
+        .unwrap_or(0x2000);
+    if flags != 0x2000 {
+        return Ok(flags);
+    }
+    let mut flags = 0;
+    for (name, bit) in [
+        ("KeyShift", 1),
+        ("KeyCtrl", 2),
+        ("KeyOption", 4),
+        ("KeyCmd", 8),
+    ] {
+        let enabled = hotkey
+            .get(name)
+            .map(|v| {
+                v.as_bool()
+                    .with_context(|| format!("{name} must be a boolean"))
+            })
+            .transpose()?
+            .unwrap_or(false);
+        if enabled {
+            flags |= bit;
+        }
+    }
+    Ok(flags)
 }
 fn modifier_mask(value: &Value) -> Result<u32> {
     if let Some(number) = value.as_u64().filter(|&n| n <= u32::MAX as u64) {
@@ -551,6 +673,83 @@ mod tests {
         assert!(imported_hotkey(&hotkey(QT_UNKNOWN, -1, 146, 0x4002), 0).is_err());
     }
     #[test]
+    fn original_side_mode_distinguishes_right_and_both_modifiers() {
+        for (bit, left, right) in [(2, 29, 97), (1, 42, 54), (4, 56, 100), (8, 125, 126)] {
+            assert_eq!(
+                imported_hotkey(&hotkey(65, -1, -1, 0x10000 | bit | bit << 8), 0).unwrap(),
+                vec![right, 30]
+            );
+            assert_eq!(
+                imported_hotkey(
+                    &hotkey(QT_UNKNOWN, -1, -1, 0x10000 | bit | bit << 4 | bit << 8),
+                    0
+                )
+                .unwrap(),
+                vec![left, right]
+            );
+            // Captured side bits do not enable sided execution without bit 16.
+            assert_eq!(
+                imported_hotkey(&hotkey(65, -1, -1, bit | bit << 8), 0).unwrap(),
+                vec![left, 30]
+            );
+        }
+        assert_eq!(
+            imported_hotkey(&hotkey(0x0100_0002, -1, -1, 0x10101), 0).unwrap(),
+            vec![54, 15]
+        );
+        assert_eq!(
+            imported_hotkey(&hotkey(55, -1, 103, 0x14202), 0).unwrap(),
+            vec![97, 71]
+        );
+        assert!(imported_hotkey(&hotkey(65, -1, -1, 0x11000), 0).is_err());
+    }
+
+    #[test]
+    #[ignore = "Requires owned private KWin fixture; writes packets only, never uinput"]
+    fn sided_hotkeys_on_private_wayland() -> Result<()> {
+        let root = std::path::PathBuf::from(std::env::var("DECKFORGE_PRIVATE_CLIPBOARD_TEST")?);
+        ensure!(
+            root.starts_with("/tmp")
+                && root
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with("deckforge-focused-"),
+            "Private fixture required"
+        );
+        ensure!(
+            std::env::var("XDG_RUNTIME_DIR")? == root.join("runtime").to_string_lossy(),
+            "Private runtime required"
+        );
+        let settings: Value =
+            serde_json::from_slice(&std::fs::read(root.join("hotkey-request.json"))?)?;
+        let keys = imported_chord(&settings, 0)?;
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(root.join("keys.bin"))?;
+        let mut keyboard = Keyboard::with_test_writer(file);
+        let started = Instant::now();
+        let token = keyboard.press_chord(&keys)?;
+        std::fs::write(
+            root.join("logical-resolution.json"),
+            serde_json::to_vec(
+                &json!({"micros":started.elapsed().as_micros(),"physical_keys":keyboard.ownership.press_order}),
+            )?,
+        )?;
+        if settings["waitForRelease"] == true {
+            std::fs::write(root.join("logical-held"), b"ready")?;
+            let deadline = Instant::now() + Duration::from_secs(4);
+            while !root.join("logical-release").exists() {
+                ensure!(Instant::now() < deadline, "Private held-key test timed out");
+                thread::sleep(Duration::from_millis(5));
+            }
+        }
+        thread::sleep(Duration::from_millis(50));
+        keyboard.release(token)?;
+        Ok(())
+    }
+    #[test]
     fn signed_masks_keep_their_bits_and_media_keys_are_supported() {
         let mut settings = hotkey(46, -1, 190, 0x8000_0000);
         settings["Hotkeys"][0]["KeyModifiers"] = json!(-2147483648i64);
@@ -567,7 +766,7 @@ mod tests {
         }
     }
     #[test]
-    fn unknowns_and_contradictions_do_not_become_shortcuts() {
+    fn unknown_key_identities_are_rejected_and_modern_masks_are_authoritative() {
         for settings in [
             hotkey(55, -1, 104, 0x4000),
             hotkey(55, -1, 103, 0x4001_0000),
@@ -578,8 +777,30 @@ mod tests {
         }
         let mut settings = hotkey(65, 65, 65, 2);
         settings["Hotkeys"][0]["KeyCtrl"] = json!(false);
-        assert!(imported_hotkey(&settings, 0).is_err());
+        assert_eq!(imported_hotkey(&settings, 0).unwrap(), vec![29, 30]);
         assert!(imported_hotkey(&hotkey(65, 65, 65, 0), 1).is_err());
+    }
+    #[test]
+    fn legacy_marker_reads_booleans_but_modern_masks_ignore_them() {
+        let mut settings = json!({"Hotkeys":[{"QTKeyCode":65,"NativeCode":-1,"KeyModifiers":8192,"KeyCtrl":true,"KeyShift":true}]});
+        assert_eq!(imported_hotkey(&settings, 0).unwrap(), vec![29, 42, 30]);
+        settings["Hotkeys"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("KeyModifiers");
+        assert_eq!(imported_hotkey(&settings, 0).unwrap(), vec![29, 42, 30]);
+        settings["Hotkeys"][0]["KeyModifiers"] = json!(0);
+        settings["Hotkeys"][0]["KeyCtrl"] = json!("dormant");
+        assert_eq!(imported_hotkey(&settings, 0).unwrap(), vec![30]);
+        settings["Hotkeys"][0]["KeyModifiers"] = json!(0x10202);
+        assert_eq!(imported_hotkey(&settings, 0).unwrap(), vec![97, 30]);
+        settings["Hotkeys"][0]["KeyModifiers"] = json!(8192);
+        assert!(imported_hotkey(&settings, 0).is_err());
+        settings["Hotkeys"][0]["KeyCtrl"] = json!(true);
+        settings["Hotkeys"][0]["QTKeyCode"] = json!(QT_UNKNOWN);
+        assert_eq!(imported_hotkey(&settings, 0).unwrap(), vec![29, 42]);
+        settings["Hotkeys"][0]["KeyModifiers"] = json!("8192");
+        assert!(imported_hotkey(&settings, 0).is_err());
     }
     #[test]
     fn selected_array_entry_is_not_a_sequence_and_f24_is_available() {
@@ -672,6 +893,7 @@ mod tests {
         let mut keyboard = Keyboard {
             device: Some(writer()),
             ownership: Ownership::default(),
+            cancelled: Arc::new(AtomicBool::new(false)),
         };
         assert!(keyboard.press(&[KEY_LEFTCTRL, 194]).is_err());
         assert!(keyboard.device.is_none());
@@ -680,6 +902,7 @@ mod tests {
         let mut keyboard = Keyboard {
             device: Some(writer()),
             ownership: Ownership::default(),
+            cancelled: Arc::new(AtomicBool::new(false)),
         };
         let (token, _) = keyboard.ownership.acquire(&[KEY_LEFTSHIFT, 194]).unwrap();
         assert!(keyboard.release(token).is_err());

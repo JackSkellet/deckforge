@@ -30,10 +30,13 @@ pub struct Trigger {
     pub raw: Value,
 }
 pub fn parse(raw: &Value) -> Result<Trigger> {
+    parse_for(raw, UUID)
+}
+pub fn parse_for(raw: &Value, container: &str) -> Result<Trigger> {
     ensure!(raw.is_object(), "Action Trigger must be an object");
     if let Some(uuid) = raw.get("UUID") {
         ensure!(
-            uuid.as_str() == Some(UUID),
+            uuid.as_str() == Some(container),
             "Action Trigger UUID does not match its container"
         );
     }
@@ -74,15 +77,29 @@ pub fn parse(raw: &Value) -> Result<Trigger> {
         }
         ensure!(uuid.len() <= 1024, "Action Trigger child UUID is too long");
         let mut budget = 4096usize;
-        reject_recursion(action, 0, &mut budget)?;
+        reject_recursion(action, 0, &mut budget, container)?;
         let id = match action.get("ActionID") {
-            None => format!("trigger:{index}:missing"),
+            None => format!(
+                "{}:{index}:missing",
+                if container == UUID {
+                    "trigger"
+                } else {
+                    "logic"
+                }
+            ),
             Some(value) => {
                 let id = value
                     .as_str()
                     .filter(|id| !id.is_empty() && id.len() <= 1024)
                     .context("Action Trigger child ActionID must be nonempty text")?;
-                format!("trigger:{index}:id:{id}")
+                format!(
+                    "{}:{index}:id:{id}",
+                    if container == UUID {
+                        "trigger"
+                    } else {
+                        "logic"
+                    }
+                )
             }
         };
         if let Some(settings) = action.get("Settings") {
@@ -120,14 +137,19 @@ pub fn parse(raw: &Value) -> Result<Trigger> {
 /// Inspect only reserved Actions trees, not arbitrary plugin Settings/metadata.
 /// Multi Action and unknown key containers remain raw for their respective host
 /// handlers, but cannot hide recursion into this adaptor or an encoder Dial Stack.
-fn reject_recursion(action: &Value, depth: usize, budget: &mut usize) -> Result<()> {
+fn reject_recursion(
+    action: &Value,
+    depth: usize,
+    budget: &mut usize,
+    container: &str,
+) -> Result<()> {
     ensure!(
         depth <= 16 && *budget > 0,
         "Action Trigger nested action tree exceeds validation bounds"
     );
     *budget -= 1;
     ensure!(
-        !matches!(action["UUID"].as_str(), Some(UUID | STACK)),
+        !matches!(action["UUID"].as_str(), Some(UUID | STACK)) && action["UUID"] != container,
         "Nested Action Triggers and Dial Stacks are unsupported"
     );
     if let Some(actions) = action.get("Actions") {
@@ -136,7 +158,7 @@ fn reject_recursion(action: &Value, depth: usize, budget: &mut usize) -> Result<
             .context("Nested Actions must be an array")?;
         for action in actions {
             ensure!(action.is_object(), "Nested action records must be objects");
-            reject_recursion(action, depth + 1, budget)?;
+            reject_recursion(action, depth + 1, budget, container)?;
         }
     }
     Ok(())

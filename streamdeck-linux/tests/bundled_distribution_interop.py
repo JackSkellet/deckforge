@@ -40,7 +40,7 @@ def main():
             archive.extractall(root,filter='data')
         distribution=next(root.glob('deckforge-linux-*'))
         hashes=json.loads((distribution/'SHA256SUMS.json').read_text())
-        assert set(hashes)=={'deckforge','assets/deckforge.svg','scripts/install-desktop.py','LICENSE','README.md','bundled-plugins/discord-for-deckforge.streamDeckPlugin'}
+        assert set(hashes)=={'deckforge','assets/deckforge.svg','assets/deckforge.png','assets/deckforge-mime.xml','scripts/install-desktop.py','LICENSE','README.md','bundled-plugins/discord-for-deckforge.streamDeckPlugin'}
         for name,digest in hashes.items():assert hashlib.sha256((distribution/name).read_bytes()).hexdigest()==digest
         with zipfile.ZipFile(distribution/'bundled-plugins/discord-for-deckforge.streamDeckPlugin') as package:
             assert not any('auth.json' in name or 'plugin-data/' in name or 'session.json' in name for name in package.namelist())

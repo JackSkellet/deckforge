@@ -49,6 +49,8 @@ def main():
         'bundled-plugins/discord-for-deckforge.streamDeckPlugin': (package.read_bytes(), 0o644),
         'scripts/install-desktop.py': ((PROJECT / 'scripts/install-desktop.py').read_bytes(), 0o755),
         'assets/deckforge.svg': ((PROJECT / 'assets/deckforge.svg').read_bytes(), 0o644),
+        'assets/deckforge-mime.xml': ((PROJECT / 'assets/deckforge-mime.xml').read_bytes(), 0o644),
+        'assets/deckforge.png': ((PROJECT / 'assets/deckforge.png').read_bytes(), 0o644),
         'LICENSE': ((PROJECT.parent / 'LICENSE').read_bytes(), 0o644),
         'README.md': (b'''# Deckforge for Linux
 

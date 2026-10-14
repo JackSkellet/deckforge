@@ -49,6 +49,10 @@ export function ProfileCopyDialog({
           there; this editor stays on its current device.
         </p>
         <p className="hint">The original profile stays unchanged.</p>
+        <p className="hint">
+          Application bindings are included. The destination’s
+          automatic-switching and default-profile preferences stay unchanged.
+        </p>
         {targets.length === 0 ? (
           <p className="warning" role="status">
             No other compatible devices are associated with this profile.

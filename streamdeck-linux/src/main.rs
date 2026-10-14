@@ -1,14 +1,19 @@
+mod action_defaults;
 mod action_icons;
 mod action_library;
 mod action_trigger;
 mod action_wheel;
 mod appearance;
+mod application_artwork;
 mod application_monitor;
 mod audio_output;
+mod background_movie;
 mod brightness;
 mod bundled_plugins;
 mod deep_link;
 mod desktop;
+mod desktop_action_file;
+mod desktop_file_drop;
 mod desktop_web;
 mod device_model;
 mod device_registry;
@@ -16,11 +21,18 @@ mod device_session;
 mod dial_stack;
 mod external_url;
 mod feedback;
+mod file_open;
+mod focus_monitor;
 mod folder_countdown;
-mod key_animation;
 mod hardware;
 mod host;
+mod icon_pack;
+mod icon_pack_watch;
+mod image_crop;
 mod instance;
+mod key_animation;
+mod key_logic;
+mod keyboard_layout;
 mod layout;
 mod marketplace;
 mod mixer;
@@ -38,14 +50,25 @@ mod render;
 mod resources;
 mod screensaver;
 mod session_activity;
+mod shared_action;
 mod soundboard;
 mod soundboard_editor;
 mod stack_editor;
 mod startup;
 mod system_actions;
+mod system_app;
+mod system_app_window;
+mod system_clipboard;
+mod system_close;
+mod system_command;
+mod system_dial;
 mod system_editor;
 mod system_keyboard;
+mod system_mouse;
+mod system_process;
 mod system_resume;
+mod system_typing;
+mod system_x11_window;
 mod tray;
 mod trigger_editor;
 mod volume;
@@ -65,8 +88,8 @@ use std::{
 #[derive(Parser)]
 #[command(version, about = "Independent Rust Linux host for Stream Deck")]
 struct Args {
-    /// Plugin callback opened by the desktop URI handler.
-    #[arg(value_name = "STREAMDECK_URI")]
+    /// Plugin callback or local Stream Deck action/profile opened by the desktop.
+    #[arg(value_name = "URI_OR_FILE")]
     uri: Option<String>,
     #[command(subcommand)]
     command: Option<Command>,
@@ -74,6 +97,16 @@ struct Args {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Inspect, install or list inert icon packs without launching the host.
+    IconPack {
+        #[arg(value_parser = ["inspect", "install", "list"])]
+        operation: String,
+        path: PathBuf,
+        #[arg(long)]
+        destination: Option<PathBuf>,
+        #[arg(long)]
+        reference_app: Option<PathBuf>,
+    },
     /// Isolated Marketplace session browser. Only the host starts this helper.
     #[command(hide = true)]
     MarketplaceBrowser {
@@ -122,6 +155,14 @@ enum Command {
         #[arg(long)]
         simulate: bool,
     },
+    /// Read-only focus observer diagnostics; does not switch profiles or windows.
+    #[command(hide = true)]
+    FocusProbe {
+        #[arg(long, default_value_t = 3, value_parser = clap::value_parser!(u64).range(1..=30))]
+        seconds: u64,
+        #[arg(long)]
+        events: bool,
+    },
     /// Enumerate supported Stream Deck devices without changing them.
     Devices,
     /// Read firmware and input events; never changes displays.
@@ -168,6 +209,9 @@ enum Command {
 
 #[derive(clap::Args, Default)]
 struct DesktopArgs {
+    /// Open a local Stream Deck action, profile, plugin or icon-pack path/file URI.
+    #[arg(long, conflicts_with = "uri")]
+    open: Option<String>,
     /// Deliver a streamdeck:// plugin callback to this application state.
     #[arg(long)]
     uri: Option<String>,
@@ -222,7 +266,11 @@ fn activate_instance(
     state: &std::path::Path,
     activation: instance::Command,
     uri: Option<&str>,
+    file: Option<&std::path::Path>,
 ) -> Result<bool> {
+    if let Some(file) = file {
+        return Ok(instance::request_open_file(state, file)?.is_some());
+    }
     Ok(match uri {
         Some(uri) => instance::request_deep_link(state, uri)?,
         None => instance::request(state, activation)?,
@@ -241,6 +289,29 @@ fn main() -> Result<()> {
         (Some(_), Some(_)) => anyhow::bail!("Use a standalone plugin URI or desktop --uri"),
     };
     match command {
+        Command::IconPack {
+            operation,
+            path,
+            destination,
+            reference_app,
+        } => {
+            let value = match operation.as_str() {
+                "inspect" => {
+                    serde_json::to_value(icon_pack::load(&path, reference_app.as_deref())?)?
+                }
+                "install" => serde_json::to_value(icon_pack::install(
+                    &path,
+                    &destination
+                        .ok_or_else(|| anyhow::anyhow!("--destination is required for install"))?,
+                    reference_app.as_deref(),
+                )?)?,
+                "list" => {
+                    serde_json::to_value(icon_pack::catalog(&path, reference_app.as_deref())?)?
+                }
+                _ => unreachable!(),
+            };
+            println!("{}", serde_json::to_string_pretty(&value)?);
+        }
         Command::MarketplaceBrowser {
             profile,
             operation,
@@ -294,6 +365,20 @@ fn main() -> Result<()> {
             println!("{}", serde_json::to_string(&status)?);
         }
         Command::Desktop(mut options) => {
+            if options.uri.as_ref().is_some_and(|s| {
+                !s.split_once("://")
+                    .is_some_and(|(scheme, _)| scheme.eq_ignore_ascii_case("streamdeck"))
+            }) {
+                options.open = options.uri.take();
+            }
+            let file = options.open.as_deref().map(file_open::parse).transpose()?;
+            if file.is_some() {
+                options.background = false;
+            }
+            anyhow::ensure!(
+                file.is_none() || !options.legacy_editor,
+                "Desktop file opening requires the native TypeScript editor"
+            );
             if let Some(uri) = &options.uri {
                 let link = deep_link::DeepLink::parse(uri)?;
                 anyhow::ensure!(
@@ -309,7 +394,7 @@ fn main() -> Result<()> {
             } else {
                 instance::Command::Show
             };
-            if activate_instance(&state, activation, options.uri.as_deref())? {
+            if activate_instance(&state, activation, options.uri.as_deref(), file.as_deref())? {
                 println!("Existing Deckforge instance activated");
                 return Ok(());
             }
@@ -329,7 +414,12 @@ fn main() -> Result<()> {
                     // its window endpoint is ready. Never remove that lock.
                     for _ in 0..10 {
                         std::thread::sleep(Duration::from_millis(100));
-                        if activate_instance(&state, activation, options.uri.as_deref())? {
+                        if activate_instance(
+                            &state,
+                            activation,
+                            options.uri.as_deref(),
+                            file.as_deref(),
+                        )? {
                             println!("Existing Deckforge instance activated");
                             return Ok(());
                         }
@@ -344,7 +434,13 @@ fn main() -> Result<()> {
                 // status/activity UI. Keep that UI available for recovery.
                 eprintln!("Plugin callback could not be delivered; see the application status");
             }
+            if options.legacy_editor
+                && let Some(path) = &file
+            {
+                let _ = running.controller.open_desktop_file(path);
+            }
             if options.legacy_editor {
+                running.controller.smart_editor_visible(true);
                 anyhow::ensure!(
                     running.controller.snapshot()["device_model"] == "plus",
                     "The legacy editor supports Plus only; launch without --legacy-editor for other models"
@@ -356,16 +452,51 @@ fn main() -> Result<()> {
                     &state,
                     options.background,
                     include_str!("../frontend/dist/index.html"),
+                    file.as_deref(),
                 )?;
             }
             drop(running);
         }
+        Command::FocusProbe { seconds, events } => {
+            use std::io::Write;
+            let observer = focus_monitor::Worker::new();
+            let name = observer.script_name().to_owned();
+            let end = Instant::now() + Duration::from_secs(seconds);
+            let mut revision = None;
+            while Instant::now() < end {
+                let snapshot = observer.snapshot();
+                if events && revision != Some(snapshot.revision) {
+                    println!(
+                        "{}",
+                        serde_json::to_string(
+                            &serde_json::json!({"script":name,"snapshot":snapshot})
+                        )?
+                    );
+                    std::io::stdout().flush()?;
+                    revision = Some(snapshot.revision);
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            let snapshot = observer.snapshot();
+            drop(observer);
+            let report = serde_json::json!({"script":name,"snapshot":snapshot,"stopped":true});
+            println!(
+                "{}",
+                if events {
+                    serde_json::to_string(&report)?
+                } else {
+                    serde_json::to_string_pretty(&report)?
+                }
+            );
+            anyhow::ensure!(snapshot.error.is_none(), "Focus observer is unavailable");
+        }
         Command::Devices => {
             for d in hardware::Deck::enumerate()? {
                 println!(
-                    "{} · {} · 0fd9:{:04x} · {}",
+                    "{} · {} · {:04x}:{:04x} · {}",
                     d.product.as_deref().unwrap_or(d.model.name()),
                     d.serial.as_deref().unwrap_or("unknown serial"),
+                    d.vendor_id,
                     d.product_id,
                     d.path
                 );
@@ -428,6 +559,44 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod cli_tests {
     use super::*;
+
+    #[test]
+    fn desktop_file_entry_accepts_standalone_uri_and_isolated_open_option() {
+        let file = "file:///tmp/shared%20action.streamDeckAction";
+        assert_eq!(
+            Args::try_parse_from(["deckforge", file])
+                .unwrap()
+                .uri
+                .as_deref(),
+            Some(file)
+        );
+        let args = Args::try_parse_from([
+            "deckforge",
+            "desktop",
+            "--open",
+            file,
+            "--state",
+            "/tmp/private-state",
+            "--simulate",
+        ])
+        .unwrap();
+        let Some(Command::Desktop(options)) = args.command else {
+            panic!("desktop expected")
+        };
+        assert_eq!(options.open.as_deref(), Some(file));
+        assert!(options.simulate);
+        assert!(
+            Args::try_parse_from([
+                "deckforge",
+                "desktop",
+                "--open",
+                file,
+                "--uri",
+                "streamdeck://plugins/message/example/x"
+            ])
+            .is_err()
+        );
+    }
 
     #[test]
     fn desktop_scheme_handler_accepts_bare_uri_and_explicit_isolated_options() {

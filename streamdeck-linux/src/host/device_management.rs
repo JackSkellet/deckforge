@@ -79,8 +79,12 @@ impl Host {
         self.library
             .folder_paths
             .retain(|profile, _| !profile_ids.contains(profile));
+        let smart = self.smart_profiles.remove(&scope);
         let save = self.library.validate().and_then(|()| self.persist());
         if let Err(error) = save {
+            if let Some(config) = smart {
+                self.smart_profiles.insert(scope.clone(), config);
+            }
             if empty_workspace {
                 removed.swap(self);
             } else {

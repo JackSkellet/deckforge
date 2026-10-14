@@ -56,6 +56,7 @@ it("uses exact supported geometry for every descriptor, including display-only N
     ["plus", 8, 4],
     ["plus-xl", 36, 6],
     ["studio", 32, 2],
+    ["galleon", 12, 4],
     ["neo", 8, 0],
     ["pedal", 3, 0],
   ] as const) {
@@ -399,6 +400,9 @@ it("renders Studio rectangular keys and screenless dials with keyboard assignmen
     rows: 2,
     keys: 32,
     dials: 2,
+    physical_dials: 2,
+    encoder_columns: 2,
+    encoder_rows: 1,
     key_width: 144,
     key_height: 112,
     strip_width: 0,
@@ -595,3 +599,52 @@ it.each(["plus", "studio"])(
     ).toBe(lcdBefore);
   },
 );
+
+it("Galleon separates the four 2D widgets from two physical dials", async () => {
+  setup("galleon");
+  render(<App />);
+  await screen.findByRole("button", { name: /^Key 12:/ });
+  expect(
+    screen.getAllByRole("button", { name: /^Dial action [1-4]:/ }),
+  ).toHaveLength(4);
+  const grid = document.querySelector<HTMLElement>(".dial-grid")!;
+  expect(grid.style.gridTemplateColumns).toBe("repeat(2,minmax(0,1fr))");
+  expect(document.querySelectorAll(".galleon-dials > span")).toHaveLength(2);
+  expect(document.querySelectorAll(".dial-knob")).toHaveLength(0);
+  const descriptor = fixtureDevice("galleon");
+  expect(descriptor.geometry.physical_dials).toBe(2);
+  expect(descriptor.capabilities.transport_supported).toBe(true);
+  expect(descriptor.capabilities.touchscreen).toBe(false);
+});
+it("Galleon simulator buttons issue complete operations without a held UI input", async () => {
+  const descriptor = fixtureDevice("galleon"),
+    input = vi.fn(),
+    user = userEvent.setup();
+  const snapshot = {
+    device: "galleon-test",
+    device_model: "galleon",
+    device_name: descriptor.name,
+    device_geometry: descriptor.geometry,
+    device_capabilities: descriptor.capabilities,
+    encoder_routes: [0, 3],
+  } as unknown as Snapshot;
+  render(
+    <DeviceCanvas
+      snapshot={snapshot}
+      renderSlot={() => null}
+      onPage={vi.fn()}
+      onDialInput={input}
+    />,
+  );
+  await user.click(screen.getByRole("button", { name: "Press left dial" }));
+  expect(input).toHaveBeenLastCalledWith(0, "click", undefined);
+  await user.click(
+    screen.getByRole("button", { name: "Switch left dial row" }),
+  );
+  expect(input).toHaveBeenLastCalledWith(0, "next", undefined);
+  await user.click(
+    screen.getByRole("button", { name: "Turn right dial right" }),
+  );
+  expect(input).toHaveBeenLastCalledWith(1, "dialRotate", 1);
+  expect(input).toHaveBeenCalledTimes(3);
+});

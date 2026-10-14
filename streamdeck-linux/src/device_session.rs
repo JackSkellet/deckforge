@@ -130,11 +130,15 @@ trait Transport {
     fn read_packet(&mut self, timeout_ms: i32, decode: bool) -> Result<Option<Vec<InputEvent>>>;
     fn write(&mut self, index: usize, image: &DynamicImage) -> Result<()>;
     fn write_lcd(&mut self, image: &DynamicImage) -> Result<()>;
+    fn clear_lcd(&mut self) -> Result<()>;
     fn sleep_seconds(&mut self) -> Result<u32>;
     fn set_brightness(&mut self, brightness: u8) -> Result<()>;
     fn set_sleep_seconds(&mut self, seconds: u32) -> Result<()>;
 }
 impl Transport for Deck {
+    fn clear_lcd(&mut self) -> Result<()> {
+        self.clear_lcd_background()
+    }
     fn model(&self) -> Model {
         Deck::model(self)
     }
@@ -146,6 +150,8 @@ impl Transport for Deck {
             crate::brightness::hid_value(brightness)?
         } else if self.model() == Model::Studio {
             crate::hardware::studio_brightness_value(brightness)?
+        } else if self.model() == Model::Galleon {
+            crate::hardware::galleon_brightness_value(brightness)?
         } else if self.model() == Model::Classic2017 {
             self.legacy_brightness_value(brightness)?
         } else {
@@ -242,6 +248,7 @@ struct Session<T> {
     control_cursor: usize,
     saver: Option<Saver>,
     saver_sent: Option<Arc<DynamicImage>>,
+    background_dirty: bool,
     closed_generation: Option<u64>,
     draining: Option<u64>,
     wake_notification: bool,
@@ -282,6 +289,7 @@ impl<T: Transport> Session<T> {
             control_cursor: 0,
             saver: None,
             saver_sent: None,
+            background_dirty: matches!(model, Model::Plus | Model::Galleon),
             closed_generation: None,
             draining: None,
             wake_notification: false,
@@ -350,9 +358,7 @@ impl<T: Transport> Session<T> {
             {
                 (usize::from(index), image)
             }
-            Draw::Strip(image)
-                if self.model.capabilities().strip && self.model.capabilities().touchscreen =>
-            {
+            Draw::Strip(image) if self.model.capabilities().strip && self.model != Model::Neo => {
                 (usize::from(self.model.key_count()), image)
             }
             Draw::Infobar(image) if self.model == Model::Neo => {
@@ -494,6 +500,7 @@ impl<T: Transport> Session<T> {
         self.device = None;
         self.sent.fill(None);
         self.saver_sent = None;
+        self.background_dirty = matches!(self.model, Model::Plus | Model::Galleon);
         self.attempted_brightness = None;
         self.timer.attempted = None;
         if !self.timer.owned {
@@ -653,6 +660,7 @@ impl<T: Transport> Session<T> {
             self.saver = None;
             self.saver_sent = None;
             self.sent.fill(None);
+            self.background_dirty = matches!(self.model, Model::Plus | Model::Galleon);
         }
     }
     fn display_dirty(&self) -> bool {
@@ -741,6 +749,12 @@ impl<T: Transport> Session<T> {
         let Some((device, _)) = self.device.as_mut() else {
             return Ok(Written::None);
         };
+        // Key and strip transfers only replace their own rectangles. Clear
+        // leftover boot/screensaver pixels once before replaying normal images.
+        if self.background_dirty {
+            device.clear_lcd()?;
+            self.background_dirty = false;
+        }
         let image = self.desired[index].as_ref().unwrap();
         device.write(index, image)?;
         self.sent[index] = Some(image.clone());
@@ -858,6 +872,7 @@ mod tests {
     #[derive(Default)]
     struct Calls {
         writes: Vec<(usize, u8)>,
+        clears_before_write: Vec<usize>,
         reads: usize,
         features: Vec<(u8, u32)>,
         sleep_queries: usize,
@@ -878,6 +893,13 @@ mod tests {
         on_sleep_set: Option<Box<dyn FnMut(u32) + Send>>,
     }
     impl Transport for Fake {
+        fn clear_lcd(&mut self) -> Result<()> {
+            ensure!(!self.write_error, "clear failed");
+            let mut calls = self.calls.lock().unwrap();
+            let count = calls.writes.len();
+            calls.clears_before_write.push(count);
+            Ok(())
+        }
         fn model(&self) -> Model {
             self.model
         }
@@ -960,6 +982,52 @@ mod tests {
     }
     fn never(_: Option<&str>) -> Result<(Fake, String)> {
         panic!("unexpected reconnect")
+    }
+
+    #[test]
+    fn plus_and_galleon_clear_lcd_residue_before_normal_frames_on_start_wake_and_reconnect() {
+        for model in [Model::Plus, Model::Galleon] {
+            let (mut deck, calls) = fake("A");
+            deck.model = model;
+            let mut session = Session::new(Some((deck, "1".into())), None);
+            session.cache(Draw::Key(0, frame(4)));
+            session.tick(Duration::ZERO, &mut never);
+            assert_eq!(calls.lock().unwrap().clears_before_write, [0]);
+            session.cache(Draw::Key(0, frame(5)));
+            session.tick(Duration::ZERO, &mut never);
+            assert_eq!(calls.lock().unwrap().clears_before_write, [0]);
+            session.cache(saver(1, 200, true));
+            session.tick(Duration::ZERO, &mut never);
+            session.cache(clear_saver(1));
+            session.tick(Duration::ZERO, &mut never);
+            assert_eq!(calls.lock().unwrap().clears_before_write, [0, 3]);
+            assert_eq!(calls.lock().unwrap().writes.last(), Some(&(0, 5)));
+            session.disconnect(Duration::ZERO, anyhow::anyhow!("test unplug"));
+            let (mut deck, next) = fake("A");
+            deck.model = model;
+            let mut replacement = Some(deck);
+            session.tick(RETRY, &mut |_| {
+                Ok((replacement.take().unwrap(), "1".into()))
+            });
+            assert_eq!(next.lock().unwrap().clears_before_write, [0]);
+            assert_eq!(next.lock().unwrap().writes, [(0, 5)]);
+        }
+    }
+
+    #[test]
+    fn active_saver_and_other_models_do_not_clear_the_lcd() {
+        let (deck, calls) = fake("A");
+        let mut session = Session::new(Some((deck, "1".into())), None);
+        session.cache(Draw::Key(0, frame(4)));
+        session.cache(saver(1, 200, true));
+        session.tick(Duration::ZERO, &mut never);
+        assert!(calls.lock().unwrap().clears_before_write.is_empty());
+        let (mut deck, calls) = fake("B");
+        deck.model = Model::Xl;
+        let mut session = Session::new(Some((deck, "1".into())), None);
+        session.cache(Draw::Key(0, frame(4)));
+        session.tick(Duration::ZERO, &mut never);
+        assert!(calls.lock().unwrap().clears_before_write.is_empty());
     }
 
     #[test]
@@ -1942,6 +2010,10 @@ mod tests {
             fn write_lcd(&mut self, _: &DynamicImage) -> Result<()> {
                 self.counts.writes.fetch_add(1, Ordering::SeqCst);
                 anyhow::bail!("probe forbids all LCD writes")
+            }
+            fn clear_lcd(&mut self) -> Result<()> {
+                self.counts.writes.fetch_add(1, Ordering::SeqCst);
+                anyhow::bail!("probe forbids LCD clearing")
             }
             fn write(&mut self, _: usize, _: &DynamicImage) -> Result<()> {
                 self.counts.writes.fetch_add(1, Ordering::SeqCst);

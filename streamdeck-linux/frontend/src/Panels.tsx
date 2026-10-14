@@ -26,7 +26,9 @@ export function Modal({
   onClose,
   wide = false,
   className,
+  closeDisabled = false,
 }: {
+  closeDisabled?: boolean;
   title: string;
   children: ReactNode;
   onClose: () => void;
@@ -51,12 +53,16 @@ export function Modal({
       className={`${wide ? "wide" : ""} ${className ?? ""}`}
       onCancel={(e) => {
         e.preventDefault();
-        onClose();
+        if (!closeDisabled) onClose();
       }}
     >
       <header className="dialog-header">
         <h2 id={titleId}>{title}</h2>
-        <button aria-label={`Close ${title}`} onClick={onClose}>
+        <button
+          aria-label={`Close ${title}`}
+          onClick={onClose}
+          disabled={closeDisabled}
+        >
           ×
         </button>
       </header>
@@ -514,7 +520,9 @@ export function Preferences({
             </>
           ) : (
             <p className="hint">
-              This device has no display brightness control.
+              {snapshot.device_capabilities?.transport_supported === false
+                ? "Brightness control is not implemented for this model yet."
+                : "This device has no display brightness control."}
             </p>
           )}
           {snapshot.device_capabilities?.transport_supported === false && (

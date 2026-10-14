@@ -1,8 +1,10 @@
 import { useEffect, useId, useState, type ReactNode } from "react";
-import { pick, command } from "./bridge";
+import { pick, command, request } from "./bridge";
 import { clone, type RecordValue, type Controller } from "./model";
 import { getTextDraft, setTextDraft } from "./transient";
 import type { MixerConfig } from "./Mixer";
+import { ApplicationIcon, ApplicationPicker, type Application } from "./ApplicationPicker";
+import { CommandEnvironment } from "./CommandEnvironment";
 export function Field({
   label,
   children,
@@ -18,6 +20,111 @@ export function Field({
       {children}
       {hint && <small>{hint}</small>}
     </label>
+  );
+}
+function OpenApplication({
+  settings,
+  onChange,
+  onError,
+}: {
+  settings: RecordValue;
+  onChange: (value: RecordValue) => void;
+  onError: (error: unknown) => void;
+}) {
+  const [apps, setApps] = useState<Application[] | null>(null);
+  const [search, setSearch] = useState("");
+  const manual = (exec: string) =>
+    onChange({
+      ...settings,
+      exec,
+      source: "",
+      bundle_id: "",
+      bundle_path: "",
+      is_bundle: false,
+    });
+  return (
+    <>
+      <Field label="Application executable">
+        <input
+          value={settings.exec ?? ""}
+          onChange={(e) => manual(e.target.value)}
+        />
+      </Field>
+      <div className="row">
+        <button
+          type="button"
+          onClick={() =>
+            request("application_catalog").then(setApps).catch(onError)
+          }
+        >
+          Browse applications…
+        </button>
+        <button
+          type="button"
+          onClick={() =>
+            pick("file")
+              .then((path) => {
+                if (path) manual(path);
+              })
+              .catch(onError)
+          }
+        >
+          Choose executable…
+        </button>
+      </div>
+      {apps && (
+        <>
+          <Field label="Search applications">
+            <input value={search} onChange={(e) => setSearch(e.target.value)} />
+          </Field>
+          <ApplicationPicker applications={apps} search={search} value={settings.source ?? ""}
+            onSelect={(app) => onChange({
+              ...settings, exec: app.executable, source: app.desktop,
+              bundle_id: app.desktop, bundle_path: app.desktop,
+              is_bundle: true, app_name: app.name,
+            })} />
+        </>
+      )}
+      {typeof settings.source === "string" && settings.source.endsWith(".desktop") && (
+        <p className="hint application-selection">
+          <ApplicationIcon desktop={settings.source} name={settings.app_name || "Application"} />
+          Using {settings.app_name || settings.source}'s desktop launcher.
+        </p>
+      )}
+      <Field
+        label="Arguments"
+        hint={typeof settings.source === "string" && settings.source.endsWith(".desktop")
+          ? "Extra launch arguments. Running apps are matched using the desktop launcher's fixed arguments. Shell substitutions are not evaluated."
+          : "Quote arguments containing spaces. These also identify running apps for activation and held Close. Shell substitutions are not evaluated."}
+      >
+        <input
+          value={settings.args ?? ""}
+          onChange={(e) => onChange({ ...settings, args: e.target.value })}
+        />
+      </Field>
+      <Check
+        label="Bring running application to front"
+        checked={settings.bring_to_front ?? true}
+        onChange={(v) => onChange({ ...settings, bring_to_front: v })}
+      />
+      <Field label="When held">
+        <select
+          value={settings.long_press ?? "quit"}
+          onChange={(e) =>
+            onChange({ ...settings, long_press: e.target.value })
+          }
+        >
+          <option value="quit">Close application</option>
+          <option value="force_kill">Force close</option>
+          <option value="none">Do nothing</option>
+        </select>
+      </Field>
+      <p className="hint">
+        Hold for half a second. Window activation supports KDE; other desktops
+        need an application with D-Bus activation. Windows and macOS
+        applications need a Linux replacement.
+      </p>
+    </>
   );
 }
 export function NumberField({
@@ -311,10 +418,14 @@ function Hotkeys({
   settings,
   set,
   controller,
+  toggle = false,
+  clearable = true,
 }: {
   settings: RecordValue;
   set: (key: string, value: any) => void;
   controller: Controller;
+  toggle?: boolean;
+  clearable?: boolean;
 }) {
   if (settings.Hotkeys != null && !Array.isArray(settings.Hotkeys))
     return (
@@ -325,16 +436,25 @@ function Hotkeys({
   const entries = settings.Hotkeys ?? [];
   return (
     <>
-      {(controller === "Encoder"
-        ? ["Turn left", "Turn right", "Press or tap"]
-        : ["Shortcut"]
+      {(toggle
+        ? ["First shortcut", "Second shortcut"]
+        : controller === "Encoder"
+          ? ["Turn left", "Turn right", "Press or tap"]
+          : ["Shortcut"]
       ).map((label, index) => {
         const chord = entries[index] ?? {};
         if (typeof chord !== "object" || chord === null || Array.isArray(chord))
           return (
             <p key={index}>Imported shortcut requires advanced settings.</p>
           );
-        const identityFlags = (chord.KeyModifiers ?? 0) & ~0xf;
+        const legacy = chord.KeyModifiers === undefined || chord.KeyModifiers === 0x2000;
+        const flags = legacy
+          ? modifiers.reduce((value, [field, , bit]) => value | (chord[field] === true ? bit : 0), 0)
+          : chord.KeyModifiers;
+        const sided = !!(flags & 0x10000);
+        const identityFlags = flags & ~0x10fff;
+        const enabled = (bit: number) =>
+          !!(flags & (sided ? (bit << 4) | (bit << 8) : bit));
         const selected = keys.findIndex(
           (k) =>
             k[1] === chord.QTKeyCode &&
@@ -357,18 +477,37 @@ function Hotkeys({
         return (
           <fieldset key={index}>
             <legend>{label}</legend>
+            <SelectField label="Key mapping" value={chord.linuxKeyMode ?? "physical"}
+              options={[["physical", "Physical key positions"], ["logical", "Follow desktop layout"]]}
+              onChange={(value) => update({linuxKeyMode:value})} />
+            {chord.linuxKeyMode === "logical" && <p className="hint">Matches the selected character in the active X11 or KDE Wayland layout. Releases use the original pressed key even if the layout changes. Keypad and nonprinting keys keep their physical identity.</p>}
+            <Check label="Choose modifier sides" checked={sided} onChange={(value) => {
+              let nextFlags = flags & ~0x10fff;
+              const patch: RecordValue = {};
+              for (const [field, , bit] of modifiers) {
+                patch[field] = enabled(bit);
+                if (patch[field]) nextFlags |= bit | (value ? bit << 4 : 0);
+              }
+              update({ ...patch, KeyModifiers: nextFlags | (value ? 0x10000 : 0) });
+            }} />
             <div className="row">
               {modifiers.map(([field, name, bit]) => (
-                <Check
+                sided ? <SelectField key={field} label={`${name} side`}
+                  value={(flags & (bit << 4) ? 1 : 0) | (flags & (bit << 8) ? 2 : 0)}
+                  options={[[0, "Off"], [1, "Left"], [2, name === "Alt" ? "Right / AltGr" : "Right"], [3, "Both"]]}
+                  onChange={(value) => {
+                    const side = Number(value);
+                    update({ [field]: side !== 0, KeyModifiers: (flags & ~(bit | (bit << 4) | (bit << 8))) | (side ? bit : 0) | (side & 1 ? bit << 4 : 0) | (side & 2 ? bit << 8 : 0) });
+                  }} /> : <Check
                   key={field}
                   label={name}
-                  checked={chord[field] ?? !!((chord.KeyModifiers ?? 0) & bit)}
+                  checked={enabled(bit)}
                   onChange={(value) =>
                     update({
                       [field]: value,
                       KeyModifiers: value
-                        ? (chord.KeyModifiers ?? 0) | bit
-                        : (chord.KeyModifiers ?? 0) & ~bit,
+                        ? flags | bit
+                        : flags & ~bit,
                     })
                   }
                 />
@@ -394,18 +533,18 @@ function Hotkeys({
                 const patch: RecordValue = {
                   QTKeyCode: key?.[1] ?? 0x01ffffff,
                   VKeyCode: key?.[2] ?? -1,
-                  KeyModifiers: key?.[3] ?? 0,
+                  KeyModifiers: (key?.[3] ?? 0) | (flags & 0x10ff0),
                 };
                 if (key?.[4] !== undefined) patch.NativeCode = key[4];
                 for (const [field, , bit] of modifiers) {
                   patch[field] =
-                    chord[field] ?? !!((chord.KeyModifiers ?? 0) & bit);
+                    enabled(bit);
                   if (patch[field]) patch.KeyModifiers |= bit;
                 }
                 update(patch, true);
               }}
             />
-            <button
+            {clearable && <button
               type="button"
               onClick={() =>
                 update(
@@ -423,7 +562,7 @@ function Hotkeys({
               }
             >
               Clear {label.toLowerCase()}
-            </button>
+            </button>}
           </fieldset>
         );
       })}
@@ -690,6 +829,73 @@ export function SettingsFields({
       </>
     );
   }
+  if (uuid === "com.deckforge.system.clipboard") {
+    for (const key of ["operation", "text", "terminal_shortcuts", "linuxKeyMode"]) handled.add(key);
+    const operation = settings.operation ?? "copy_text";
+    special = <>
+      {select("operation", "Clipboard operation", [["copy_text", "Copy saved text"], ["copy", "Copy selection"], ["cut", "Cut selection"], ["paste", "Paste clipboard"]], "copy_text")}
+      {operation === "copy_text" ? <>
+        <Field label="Clipboard text"><textarea rows={5} value={settings.text ?? ""} onChange={(event) => set("text", event.target.value)} /></Field>
+        <p className="hint">Copies this text when pressed. Replaces the desktop clipboard without typing or pasting.</p>
+      </> : <>
+        {(operation === "copy" || operation === "paste") && check("terminal_shortcuts", "Terminal shortcuts (Ctrl+Shift)", false)}
+        {select("linuxKeyMode", "Shortcut key mapping", [["physical", "Physical key positions"], ["logical", "Follow desktop layout (X11 / KDE Wayland)"]], "physical")}
+        {operation === "cut" && settings.terminal_shortcuts === true && <button type="button" onClick={() => set("terminal_shortcuts", false)}>Use standard Cut shortcut</button>}
+        <p className="hint">Sends {operation === "cut" ? "Ctrl+X" : `Ctrl+${settings.terminal_shortcuts === true ? "Shift+" : ""}${operation === "copy" ? "C" : "V"}`} to the focused application. Uses the desktop clipboard.</p>
+      </>}
+    </>;
+  }
+  if (uuid === "com.deckforge.system.command") {
+    for (const key of ["mode", "program", "args", "script", "directory", "terminal", "terminal_program", "terminal_args", "output", "timeout_seconds", "environment"]) handled.add(key);
+    special = <>
+      {select("mode", "Command mode", [["program", "Program and arguments"], ["shell", "Shell script"]], "program")}
+      {settings.mode === "shell" ? <>
+        <Field label="Shell script"><textarea rows={5} value={settings.script ?? ""} onChange={(event) => set("script", event.target.value)} /></Field>
+        <p className="hint">Runs with /bin/sh. Supports pipes, variables, and redirection.</p>
+      </> : <>
+        {text("program", "Program", "Executable name or absolute Linux path.")}
+        {choose("program", "file", "Choose program…")}
+        {text("args", "Arguments", "Quote arguments containing spaces. Variables and shell expressions are passed literally.")}
+      </>}
+      {text("directory", "Working directory", "Leave empty to use your home folder.")}
+      {choose("directory", "directory", "Choose working folder…")}
+      <CommandEnvironment value={settings.environment} onChange={(rows) => set("environment", rows)} />
+      {check("terminal", "Run in terminal window", false)}
+      {settings.terminal === true ? <>
+        {text("terminal_program", "Terminal program", "Defaults to Konsole. Enter another installed terminal if needed.")}
+        {text("terminal_args", "Terminal arguments", "Arguments before the command. Konsole: --separate --hold -e")}
+        <p className="hint">The command and its arguments follow these terminal arguments. Konsole keeps the window open after completion.</p>
+      </> : <>
+        {select("output", "Command output", [["discard", "Discard output"], ["show", "Show result"], ["clipboard", "Copy successful output to clipboard"]], "discard")}
+        {settings.output === "show" || settings.output === "clipboard" ? <>
+          {num("timeout_seconds", "Timeout (seconds)", 30, 1, 3600, 1)}
+          <p className="hint">Captures stdout and stderr. Stop ends the command and its process group. Captured commands stop when Deckforge quits. Results stay in memory.</p>
+          {settings.output === "clipboard" && <p className="hint">Copies complete successful UTF-8 stdout, up to 1 MiB. Errors, timeouts and oversized output leave the clipboard unchanged.</p>}
+        </> : <p className="hint">Runs without capturing output or a timeout. Use shell redirection to save output. The command continues if Deckforge closes.</p>}
+      </>}
+    </>;
+  }
+  if (uuid.endsWith(".system.openapp")) {
+    for (const key of [
+      "exec",
+      "source",
+      "app_name",
+      "args",
+      "bring_to_front",
+      "long_press",
+      "bundle_id",
+      "bundle_path",
+      "is_bundle",
+    ])
+      handled.add(key);
+    special = (
+      <OpenApplication
+        settings={settings}
+        onChange={onChange}
+        onError={onError}
+      />
+    );
+  }
   if (uuid.endsWith(".system.open"))
     special = (
       <>
@@ -700,16 +906,124 @@ export function SettingsFields({
         </div>
       </>
     );
-  if (uuid.endsWith(".system.hotkey")) {
+  if (uuid.endsWith(".system.close")) {
+    handled.add("linuxCloseMethod");
+    special = (
+      <>
+        {text("path", "Application executable")}
+        {choose("path", "file", "Choose application…")}
+        {text("linuxMatchArgs", "Match arguments", "Optional exact argument prefix. Quote values containing spaces; no shell expansion.")}
+        {check("forceQuit", "Force close", false)}
+        {settings.forceQuit !== true && select("linuxCloseMethod", "Close behavior", [["windows", "Close windows only"], ["terminate", "Send SIGTERM"], ["automatic", "Close windows; stop background processes"]], "automatic")}
+        <p className="hint">{settings.forceQuit === true ? "Immediately kills matching processes without a save prompt." : settings.linuxCloseMethod === "terminate" ? "Sends SIGTERM to matching processes. Applications may exit without a save prompt." : (settings.linuxCloseMethod ?? "automatic") === "automatic" ? "On X11 or KDE Wayland, asks windows to close. Sends SIGTERM only if no matching windows are found; desktop errors never trigger a signal fallback." : "Asks matching windows to close so applications can prompt to save. Window closing requires a local X11 window manager or KDE Wayland. Choose Send SIGTERM explicitly for background processes."}</p>
+      </>
+    );
+  }
+  if (uuid.endsWith(".system.mouse-wheel"))
+    special = (
+      <p className="hint">
+        Turn to scroll vertically. Hold the dial while turning to scroll
+        horizontally. Uses your desktop's scroll settings.
+      </p>
+    );
+  if (uuid.endsWith(".system.timer"))
+    special = (
+      <>
+        {num("duration", "Duration (seconds)", 30, 1, 604800, 1)}
+        {select(
+          "actionIdx",
+          "Alarm sound",
+          [
+            [0, "Tone 1"],
+            [1, "Tone 2"],
+            [2, "Tone 3"],
+            [3, "Tone 4"],
+            [4, "Custom sound"],
+            [6, "Silent"],
+          ],
+          0,
+        )}
+        {settings.actionIdx === 4 && (
+          <>
+            {text("lastUserFile", "Sound file")}
+            {choose("lastUserFile", "file", "Choose sound…")}
+          </>
+        )}
+        {settings.actionIdx !== 6 &&
+          num("linuxAlarmVolume", "Alarm volume (%)", 50, 0, 100, 1)}
+        <p className="hint">
+          Press to start the countdown. Press again to cancel. Built-in sounds
+          use Deckforge tones.
+        </p>
+      </>
+    );
+  if (uuid.endsWith(".system.text")) {
+    handled.add("pastedText");
+    handled.add("isTypingMode");
+    handled.add("Hotkey");
+    handled.add("linuxKeyMode");
+    const customPaste = settings.Hotkey !== null && typeof settings.Hotkey === "object" && !Array.isArray(settings.Hotkey);
+    const mode = settings.isTypingMode === true ? "typing" : settings.isTypingMode === false || settings.isTypingMode === undefined ? "paste" : "invalid";
+    special = (
+      <>
+        <Field label="Text mode"><select value={mode} aria-invalid={mode === "invalid" || undefined} aria-describedby={mode === "invalid" ? `${id}-text-mode-error` : undefined} onChange={(event) => set("isTypingMode", event.target.value === "typing")}>
+          {mode === "invalid" && <option value="invalid" disabled>Unsupported saved mode</option>}
+          <option value="paste">Paste from clipboard</option><option value="typing">Type without clipboard</option>
+        </select></Field>
+        <Field label="Text">
+          <textarea
+            value={settings.pastedText ?? ""}
+            rows={5}
+            onChange={(event) => set("pastedText", event.target.value)}
+          />
+        </Field>
+        {check("isSendingEnter", "Send Enter after text", false)}
+        {mode === "invalid" && <p id={`${id}-text-mode-error`} className="warning">The saved text mode is not a boolean. Choose a mode to replace it.</p>}
+        {mode === "paste" && <>
+          <p className="hint">Pastes Unicode text using the clipboard and the selected shortcut. This replaces the clipboard contents.</p>
+          <details>
+            <summary>Paste shortcut</summary>
+            <Hotkeys settings={{Hotkeys:[customPaste ? settings.Hotkey : {QTKeyCode:86,VKeyCode:86,KeyModifiers:2,linuxKeyMode:settings.linuxKeyMode ?? "physical"}]}} controller="Keypad" clearable={false} set={(_key,value) => set("Hotkey",value[0])} />
+            {settings.Hotkey != null && !customPaste && <p className="warning">The saved custom shortcut is not an object. Standard Ctrl+V is used until you replace it.</p>}
+            {settings.Hotkey !== undefined && <button type="button" onClick={() => {const next={...settings};delete next.Hotkey;onChange(next);}}>Reset paste shortcut</button>}
+            <p className="hint">For terminals, choose Ctrl+Shift+V. Reset or an empty shortcut uses Ctrl+V.</p>
+          </details>
+        </>}
+        {settings.isTypingMode === true && (
+          <>
+            <p className="hint">Types into the focused application without changing the clipboard. Enable keyboard access for this app session, then focus your destination before pressing the key.</p>
+          </>
+        )}
+      </>
+    );
+  }
+  if (
+    uuid.endsWith(".system.hotkey") ||
+    uuid.endsWith(".system.hotkeyswitch")
+  ) {
     handled.add("Hotkeys");
     handled.add("Coalesce");
     special = (
       <>
-        <Hotkeys settings={settings} set={set} controller={controller} />
+        <Hotkeys
+          settings={settings}
+          set={set}
+          controller={controller}
+          toggle={uuid.endsWith(".system.hotkeyswitch")}
+        />
         <p className="hint">
-          Shortcuts use Linux key positions. An empty shortcut sends no keys.
-          Imported Coalesce is retained but has no separate runtime behavior.
+          Key mapping selects physical positions or the desktop layout. An empty shortcut sends no keys.
         </p>
+        {controller === "Encoder" && uuid.endsWith(".system.hotkey") && (
+          <>
+            {check("Coalesce", "Limit queued dial shortcuts", true)}
+            <p className="hint">
+              Keep up to three shortcuts queued, or five when disabled.
+              Reversing direction replaces pending turns. Taps use the same
+              queue.
+            </p>
+          </>
+        )}
       </>
     );
   }

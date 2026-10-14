@@ -470,7 +470,7 @@ fn read_journal(parent: &File) -> Result<Journal> {
     component(&record.candidate)?;
     Ok(record)
 }
-fn exchange(a: &File, a_name: &str, b: &File, b_name: &str) -> Result<()> {
+pub(crate) fn exchange(a: &File, a_name: &str, b: &File, b_name: &str) -> Result<()> {
     let a_name = CString::new(component(a_name)?)?;
     let b_name = CString::new(component(b_name)?)?;
     // SAFETY: live parent FDs and validated names. Linux performs the directory
@@ -486,7 +486,7 @@ fn exchange(a: &File, a_name: &str, b: &File, b_name: &str) -> Result<()> {
     };
     ensure!(
         result == 0,
-        "Atomic plugin exchange failed: {}",
+        "Atomic directory exchange failed: {}",
         std::io::Error::last_os_error()
     );
     Ok(())

@@ -165,6 +165,7 @@ impl Host {
         }
     }
     pub(super) fn release_device_holds(&mut self) {
+        self.encoder_routing.disconnected();
         // Completed clicks and their asynchronous actions remain active offline.
         // Only physical ownership is lost when the USB transport disappears.
         self.disconnect_trigger_buttons();
@@ -204,7 +205,7 @@ impl Host {
             }
             Event::Input(input) => {
                 if self.connected {
-                    self.input(input)?;
+                    self.physical_input(input)?;
                 }
             }
             Event::Retry { reason } => {
@@ -221,6 +222,7 @@ impl Host {
                         json!({"event":"deviceDidDisconnect","device":self.device}),
                     );
                     self.release_device_holds();
+                    self.encoder_marker_layer()?;
                     self.log(format!(
                         "USB disconnected: {reason}. Reconnecting automatically."
                     ));
@@ -232,6 +234,10 @@ impl Host {
                 firmware,
                 model,
             } => {
+                if model != self.model || serial != self.device {
+                    self.history.clear("Device identity or layout changed");
+                }
+
                 ensure!(
                     self.device_scope(&serial)
                         .is_none_or(|scope| scope == self.scope),

@@ -59,6 +59,8 @@ pub(super) struct DeviceRuntime {
     pub controls_error: Option<String>,
     saver: screensaver::Runtime,
     brightness_repeats: HashMap<String, (u8, Duration)>,
+    open_app_holds: HashMap<String, (Duration, crate::system_app::Config)>,
+    timers: timer::Runtime,
     badges: HashMap<String, feedback::Badge>,
     trigger_descriptions: HashMap<String, Value>,
     triggers: trigger::Runtime,
@@ -76,6 +78,8 @@ pub(super) struct DeviceRuntime {
     multi: crate::multi::Scheduler,
     pub inspectors: HashMap<String, Inspector>,
     dial_pressed: Vec<bool>,
+    encoder_routing: encoder_routes::Runtime,
+    controller_backgrounds: controller_background::Runtime,
     sensor_pressed: Vec<bool>,
     held: HashMap<HeldControl, String>,
     released: HashSet<HeldControl>,
@@ -101,6 +105,8 @@ impl DeviceRuntime {
             controls_error: None,
             saver: Default::default(),
             brightness_repeats: HashMap::new(),
+            open_app_holds: HashMap::new(),
+            timers: Default::default(),
             badges: HashMap::new(),
             trigger_descriptions: HashMap::new(),
             triggers: Default::default(),
@@ -118,6 +124,8 @@ impl DeviceRuntime {
             multi: crate::multi::Scheduler::new(),
             inspectors: HashMap::new(),
             dial_pressed: vec![false; model.dial_count() as usize],
+            encoder_routing: encoder_routes::Runtime::default(),
+            controller_backgrounds: controller_background::Runtime::default(),
             sensor_pressed: vec![false; model.sensor_count() as usize],
             held: HashMap::new(),
             released: HashSet::new(),
@@ -153,6 +161,8 @@ impl DeviceRuntime {
             controls_error,
             saver,
             brightness_repeats,
+            open_app_holds,
+            timers,
             badges,
             trigger_descriptions,
             triggers,
@@ -170,6 +180,8 @@ impl DeviceRuntime {
             multi,
             inspectors,
             dial_pressed,
+            encoder_routing,
+            controller_backgrounds,
             sensor_pressed,
             held,
             released
@@ -448,9 +460,8 @@ impl Host {
         );
         let mut copy = library::copied_profile(source, &name, &self.actions)?;
         copy.device = target.into();
-        let id = copy.id.clone();
-        self.library.profiles.push(copy);
-        self.with_device(target, |host| host.select_profile(&id, None))
+        let binding = self.smart_config().bindings.get(profile).cloned();
+        self.with_device(target, |host| host.publish_profile_copy(copy, binding))
     }
     pub(super) fn startup_device_selection(
         &mut self,

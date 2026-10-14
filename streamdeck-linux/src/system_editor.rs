@@ -7,11 +7,51 @@ use serde_json::{Value, json};
 const WEBSITE: &str = "com.elgato.streamdeck.system.website";
 const OPEN: &str = "com.elgato.streamdeck.system.open";
 const HOTKEY: &str = "com.elgato.streamdeck.system.hotkey";
+const HOTKEY_SWITCH: &str = "com.elgato.streamdeck.system.hotkeyswitch";
 const MEDIA: &str = "com.elgato.streamdeck.system.multimedia";
 
 /// None leaves configuration to the generic editor. Some(false) is a supported
 /// editor with no changes; merely displaying imported settings never rewrites them.
 pub fn edit(ui: &mut egui::Ui, uuid: &str, controller: &str, settings: &mut Value) -> Option<bool> {
+    if uuid == HOTKEY_SWITCH && controller == "Keypad" {
+        let mut changed = false;
+        for (index, label) in [(0, "First shortcut"), (1, "Second shortcut")] {
+            ui.push_id(index, |ui| {
+                ui.label(label);
+                changed |= hotkey_chord(ui, settings, index);
+            });
+        }
+        return Some(changed);
+    }
+    if uuid == crate::system_actions::CLOSE {
+        return Some(string_field(
+            ui,
+            settings,
+            "path",
+            "Application executable",
+            "/path/to/application",
+        ));
+    }
+    if uuid == crate::system_actions::TEXT {
+        let mut text = settings["pastedText"].as_str().unwrap_or("").to_owned();
+        let mut enter = settings["isSendingEnter"].as_bool().unwrap_or(false);
+        let mut changed = ui.text_edit_multiline(&mut text).changed();
+        changed |= ui.checkbox(&mut enter, "Send Enter after text").changed();
+        ui.weak(if settings["isTypingMode"] == true {
+            "Enable desktop typing in the native editor before using this action."
+        } else {
+            "Uses the clipboard and Ctrl+V in the focused application."
+        });
+        if settings["isTypingMode"] == true && ui.button("Use Linux paste mode").clicked() {
+            settings["isTypingMode"] = json!(false);
+            changed = true;
+        }
+        if changed {
+            settings["pastedText"] = json!(text);
+            settings["isSendingEnter"] = json!(enter);
+        }
+        return Some(changed);
+    }
     if uuid == crate::system_actions::SLEEP {
         if !settings.is_null() && !settings.is_object() {
             ui.weak("Use advanced settings for this imported configuration.");
@@ -319,6 +359,17 @@ fn hotkey(ui: &mut egui::Ui, controller: &str, settings: &mut Value) -> bool {
             });
         }
         ui.weak("Each dial gesture has its own shortcut. Additional imported entries are kept.");
+        let mut coalesce = settings["Coalesce"].as_bool().unwrap_or(true);
+        if ui
+            .checkbox(&mut coalesce, "Limit queued dial shortcuts")
+            .changed()
+        {
+            settings["Coalesce"] = json!(coalesce);
+            changed = true;
+        }
+        ui.weak(
+            "Queue up to three shortcuts, or five when disabled. Reversing replaces pending turns.",
+        );
     } else {
         changed = hotkey_chord(ui, settings, 0);
         ui.weak("This edits the first shortcut. Additional imported shortcuts are kept.");

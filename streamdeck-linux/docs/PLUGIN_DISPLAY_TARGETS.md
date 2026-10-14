@@ -95,8 +95,11 @@ The old test incorrectly used a Plus host and expected only three stacks. The
 importer retains a supported foreign-model profile without changing the active
 profile; that behavior was correct and required no production change.
 
-The Trigger workflow still reaches an unsupported-model import: its original
-"Galleon Default Windows" profile identifies its device as `GRETSCH`. This is
-not an established alias for Plus. The preceding generated-action workflows
-complete, but the full Trigger script is not claimed as passing. Supporting that
-device and its original fixture remains open.
+The Trigger workflow now passes all eleven original adaptor records. The
+"Galleon Default Windows" profile uses the distinct Galleon model `GRETSCH`,
+with lower-row encoder coordinates preserved. Each original fixture is tested
+on its declared model; foreign imports keep the active profile unchanged.
+
+Verification update, 14 October 2026: the Galleon profile/model gap is resolved.
+The complete Action Trigger and soundboard suites now pass on their fixtures'
+declared device models. See [Galleon support and remaining USB work](GALLEON.md).

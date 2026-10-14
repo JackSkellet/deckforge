@@ -68,6 +68,74 @@ and action behavior remain unverified.
 The existing native HTML contract, popup, official Counter inspector and
 unchanged shipped tutorial checks also pass with scoped asset loading.
 
+## Bluetooth Buddy 1.0.0.0 and Bluetooth for Linux
+
+On 14 October 2026 the installed original backend registered with Deckforge,
+but its log showed `fk-bt-helper.exe EACCES`. The shipped helper is a Windows
+PE executable. The JavaScript backend starts that executable unconditionally,
+so a connected plugin socket does not establish Bluetooth functionality.
+REA static evidence `ev_32c8c0d9f103de4e633cfee6b7c089797a0bdfafa859678cb5baf8162bd0940d`
+has partial graph coverage; the startup log and helper file type independently
+establish this failure.
+
+At the user's request, [Bluetooth for Linux](../plugins/bluetooth-compat/README.md)
+replaces the package with independent Node/Python code, a native settings panel,
+and original artwork. The four original action identities and their device/label
+settings are retained. BlueZ supplies paired devices, connection state, radio
+control and battery percentages when available. No Wine or vendor backend is
+used. The guarded installer retains the complete original package for rollback.
+
+Thirteen helper/installer tests and a real simulated-host integration test cover
+commands, failures, retries, device removal, stored settings, and owned child
+cleanup. All four settings panels pass actual native WebKit interaction and
+layout checks. Live read-only BlueZ checks found three paired devices and one
+connection; no device exposed a battery percentage. A real host running against
+BlueZ rendered the battery dial with an explicit unavailable value. These checks
+do not prove physical connect/disconnect, radio switching or battery reporting
+from another device. The vendor's custom color editor and animations are not
+part of this replacement. The installed replacement registered on the live
+Stream Deck Plus host after restart, with profiles and settings preserved.
+
+## Spotify 2.5.0.86 and Spotify for Linux
+
+The original JavaScript crashes during startup because its data-directory
+lookup only defines Windows and macOS. Its player-controller router also rejects
+Linux. REA static evidence
+`ev_0948c85a509259f419e8c0898a25a3d353a3b9c1421f1a84bd3dbf92ea3e4a17`
+has partial graph coverage; the observed startup exception confirms the first
+failure.
+
+[Spotify for Linux](../plugins/spotify-linux/README.md) is an explicitly labelled
+local derivative of the user's package. Its installer authenticates the original
+manifest and required files, retains the original directory, and adds an MPRIS
+controller. All 15 original action declarations and property inspectors remain.
+The repository distributes only the adaptation, not the vendor bundle.
+Deckforge's protected-package checks are unchanged.
+
+A real private D-Bus fixture verifies local playback, volume, shuffle, repeat,
+seek, metadata and URI controls. The original Playback action reaches that
+fixture through actual key events in the real USB-simulated host. Live read-only
+checks found Spotify running, stopped, without a current track. Actual music
+playback, account sign-in and cloud library/queue/Connect features remain
+unverified. The latter retain the original Spotify account/API requirements. The installed
+derivative also registered successfully on the live host after restart.
+
+## ChatGPT & Codex 1.0.0.8
+
+The original backend registered but rejected Linux in its desktop Unix-socket
+endpoint and Codex CLI discovery. The installed [Linux adaptation](../plugins/codex-linux/README.md)
+preserves socket ownership/permission checks and authenticates the original
+package before staging a local derivative. It adds Unix-socket selection, verified
+CLI discovery and xdg-open protocol launching.
+
+The shipped transport completed a real initialize handshake. Activity, Usage and
+Health actions rendered in an isolated host and a complete 217-chat catalogue
+arrived from the running desktop app. History negotiation fell back successfully
+from protocol version 2 to version 1. No prompt/approval/task mutations were sent.
+Voice/dictation state was reported unavailable and remains a separate platform
+boundary. REA JavaScript analysis was partial, with evidence
+`ev_3db7c51aae66f615022b84d3863c21cf781042a95ca3ad4c6df65619fd3fd589`.
+
 ## Remaining runtime work
 
 - More protected-package/reference versions beyond the verified 7.6 contract.

@@ -22,6 +22,7 @@ MODELS = {
     'neo': (4, 2, 0, 9, '20GBJ9901'),
     'pedal': (3, 1, 0, 5, '20GBF9901'),
     'studio': (16, 2, 2, 10, '20GBO9901'),
+    'galleon': (3, 4, 4, 12, 'GRETSCH'),
 }
 PLUGIN = 'com.deckforge.model-probe'
 ACTION = PLUGIN + '.action'
@@ -104,7 +105,22 @@ def main():
                     dial=next(s for s in host.state()['slots'] if s['controller']=='Encoder' and s['index']==dials-1)
                     host.post({'command':'input','event':'dialRotate','index':dials-1,'ticks':1})
                     event=wait(host,lambda:next((e for e in reversed(rows(proof)) if e['event']=='dialRotate' and e.get('context')==dial['context']),None))
-                    assert event['payload']['coordinates']=={'column':dials-1,'row':0}
+                    assert event['payload']['coordinates']==({'column':1,'row':1} if model=='galleon' else {'column':dials-1,'row':0})
+                    if model=='galleon':
+                        assert snap['device_geometry']['physical_dials']==2
+                        assert (snap['device_geometry']['encoder_columns'],snap['device_geometry']['encoder_rows'])==(2,2)
+                        assert Image.open(io.BytesIO(base64.b64decode(dial['preview']))).size==(320,160)
+                        assert Image.open(io.BytesIO(base64.b64decode(key['preview']))).size==(160,160)
+                        for unsupported in ('touchTap','touchLongTap','swipe'):
+                            host.post({'command':'input','event':unsupported,'index':0},expected=400)
+                        host.post({'command':'assign','controller':'Encoder','index':3,'uuid':'com.elgato.streamdeck.keys.adaptor'})
+                        parent=next(s for s in host.state()['slots'] if s['controller']=='Encoder' and s['index']==3)
+                        host.post({'command':'trigger_save','context':parent['context'],'raw':{'Actions':[{'Actions':[]},{'UUID':ACTION,'ActionID':'bottom-right-key','Settings':{}},{'Actions':[]}]}})
+                        child=next(s for s in host.state()['slots'] if s['controller']=='Encoder' and s['index']==3)['trigger_children'][1]
+                        host.post({'command':'input','event':'dialDown','index':3})
+                        host.post({'command':'input','event':'dialUp','index':3})
+                        nested=wait(host,lambda:next((e for e in reversed(rows(proof)) if e['event']=='keyUp' and e.get('context')==child['context']),None))
+                        assert nested['payload']['coordinates']=={'column':1,'row':1},nested
                     if model=='studio':
                         snap=host.wait(lambda s:any(x['controller']=='Encoder' and x['feedback'].get('value')==42 for x in s['slots']),'Studio feedback metadata retained without LCD layout')
                         encoder=next(x for x in snap['slots'] if x['controller']=='Encoder')
@@ -129,7 +145,7 @@ def main():
                 assert any(m.get('Device',{}).get('Model')==profile_model for m in manifests),manifests
                 assert any(f'{columns-1},{rows_count-1}' in c.get('Actions',{}) for m in manifests for c in m.get('Controllers',[]) if c['Type']=='Keypad')
                 if dials:
-                    assert any(f'{dials-1},0' in c.get('Actions',{}) for m in manifests for c in m.get('Controllers',[]) if c['Type']=='Encoder')
+                    assert any(('1,1' if model=='galleon' else f'{dials-1},0') in c.get('Actions',{}) for m in manifests for c in m.get('Controllers',[]) if c['Type']=='Encoder')
                 host.post({'command':'import_profile','path':str(export)})
                 assert any(s['controller']=='Keypad' and s['index']==index for s in host.state()['slots'])
             finally:
@@ -154,6 +170,6 @@ def main():
                 assert any(s['controller']=='Keypad' and s['index']==14 for s in snap['slots'])
             finally:host.stop()
     if args.report:args.report.write_text(json.dumps(report,indent=2)+'\n')
-    print('PASS: all nine model layouts, final key coordinates, dial limits, Neo feedback, screenless Studio encoders, export/import and persisted-model restart and 15-key cross-generation profiles; no USB.')
+    print('PASS: all ten model layouts, final key coordinates, dial limits, Neo feedback, screenless Studio encoders, Galleon 2D widgets/nested coordinates, export/import and persisted-model restart and 15-key cross-generation profiles; no USB.')
 
 if __name__=='__main__':main()

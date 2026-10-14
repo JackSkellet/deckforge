@@ -5,7 +5,9 @@ use super::*;
 #[derive(Clone, Copy)]
 pub(super) struct Display<'a> {
     pub hardware_plane: bool,
+    pub encoder_background: Option<&'a DynamicImage>,
     pub key_images: &'a key_images::Runtime,
+    pub application_artwork: &'a crate::application_artwork::Artwork,
     pub folder_progress: Option<&'a (String, u8)>,
     pub model: Model,
     pub renderer: &'a Renderer,
@@ -18,8 +20,52 @@ pub(super) struct Display<'a> {
     pub progress: &'a BTreeMap<String, u8>,
 }
 impl Display<'_> {
+    pub fn encoder_backdrop(&self, slot: &Slot) -> Option<DynamicImage> {
+        let custom = encoder_assets::image(slot, encoder_assets::BACKGROUND);
+        if custom.is_none()
+            && slot.uuid == crate::dial_stack::UUID
+            && let Some(child) = slot
+                .children
+                .first()
+                .and_then(|c| c.get(slot.active_stack_index()))
+        {
+            return self.encoder_backdrop(child);
+        }
+        let (column, row) = slot
+            .event_coordinates
+            .unwrap_or_else(|| self.model.encoder_coordinates(slot.index));
+        let index = library::position_index(self.model, "Encoder", column, row)?;
+        let (x, y) = self.model.encoder_origin(index);
+        let (width, height) = self.model.encoder_size();
+        let page = self
+            .encoder_background
+            .map(|image| image.crop_imm(x, y, width, height));
+        if let Some(custom) = custom {
+            let mut image = page.unwrap_or_else(|| {
+                DynamicImage::ImageRgb8(RgbImage::from_pixel(width, height, Rgb([0, 0, 0])))
+            });
+            image::imageops::overlay(
+                &mut image,
+                &custom.resize_exact(width, height, image::imageops::FilterType::Lanczos3),
+                0,
+                0,
+            );
+            Some(image)
+        } else {
+            page
+        }
+    }
+    fn application_visual(&self, slot: &Slot) -> Option<&crate::application_artwork::Visual> {
+        openapp::visual(self.application_artwork, slot)
+    }
     pub fn key_background<'b>(&'b self, slot: &'b Slot) -> Option<&'b DynamicImage> {
-        self.key_images.frame(&slot.context, self.hardware_plane).or(slot.background.as_ref())
+        self.key_images
+            .frame(&slot.context, self.hardware_plane)
+            .or_else(|| {
+                self.application_visual(slot)
+                    .and_then(|a| a.icon.as_deref())
+            })
+            .or(slot.background.as_ref())
     }
     /// Child models have their own editor images even when they share a physical
     /// parent. Render these separately; do not forward child badges to that key.
@@ -41,8 +87,17 @@ impl Display<'_> {
         if !self.actions.iter().any(|action| action.uuid == slot.uuid) {
             return png(&appearance::unavailable_picture(self.renderer, (72, 72)));
         }
-        if let Some(frame)=self.key_images.frame(&slot.context, false) {
-            return png(&frame.thumbnail(144,144));
+        if !appearance::custom_image(slot)
+            && !slot
+                .appearances
+                .get(&slot.state)
+                .is_some_and(|s| s.image_reset)
+            && let Some(image) = encoder_assets::image(slot, encoder_assets::ICON)
+        {
+            return png(&image.thumbnail(144, 144));
+        }
+        if let Some(frame) = self.key_images.frame(&slot.context, false) {
+            return png(&frame.thumbnail(144, 144));
         }
         if slot.uuid == crate::dial_stack::UUID {
             let index = slot.active_stack_index();
@@ -134,10 +189,7 @@ impl Display<'_> {
     pub fn picture(&self, slot: &mut Slot, warnings: &mut Vec<String>) -> Result<DynamicImage> {
         let mut picture = if !self.actions.iter().any(|action| action.uuid == slot.uuid) {
             let size = if slot.controller == "Encoder" {
-                (
-                    self.model.strip_width() / u32::from(self.model.dial_count()).max(1),
-                    self.model.strip_height(),
-                )
+                self.model.encoder_size()
             } else if slot.controller == "Neo" {
                 (232, 50)
             } else if self.model.key_width() == self.model.key_height() {
@@ -157,6 +209,7 @@ impl Display<'_> {
                 .map(|p| p.root.as_path());
             display::dial_image(self.renderer, slot, root, self.actions)?
         } else if slot.controller == "Encoder" {
+            let backdrop = self.encoder_backdrop(slot);
             let stacked = slot.uuid == crate::dial_stack::UUID;
             let index = slot.active_stack_index();
             let has_child = stacked
@@ -182,21 +235,25 @@ impl Display<'_> {
                 placeholder.layout_cache = None;
                 placeholder.feedback = json!({"title":"Unavailable"});
                 placeholder.background = None;
-                display::dial_image(self.renderer, &mut placeholder, None, self.actions)?
-            } else if target.uuid == crate::action_wheel::UUID {
-                wheel::picture(self, target)?
-            } else if target.uuid == crate::action_trigger::UUID {
-                trigger::picture(
+                display::dial_image_on(
                     self.renderer,
+                    &mut placeholder,
+                    None,
                     self.actions,
-                    target,
-                    self.badges,
-                    self.now,
-                    self.progress,
-                    Some((self.key_images, self.hardware_plane)),
+                    backdrop.as_ref(),
                 )?
+            } else if target.uuid == crate::action_wheel::UUID {
+                wheel::picture(self, target, backdrop.as_ref())?
+            } else if target.uuid == crate::action_trigger::UUID {
+                trigger::picture(self, target, backdrop.as_ref())?
             } else {
-                display::dial_image(self.renderer, target, root, self.actions)?
+                display::dial_image_on(
+                    self.renderer,
+                    target,
+                    root,
+                    self.actions,
+                    backdrop.as_ref(),
+                )?
             };
             warnings.append(&mut target.display_warnings);
             if has_child {
@@ -215,11 +272,17 @@ impl Display<'_> {
                 (120, 120)
             };
             let mut picture = self.renderer.key_styled_size(
-                &slot.title,
+                timer::title(slot),
                 self.key_background(slot),
                 &appearance::style(slot, self.actions),
                 size,
             );
+            if self
+                .application_visual(slot)
+                .is_some_and(|a| a.running == Some(true))
+            {
+                crate::application_artwork::mark(&mut picture);
+            }
             feedback::paint_key(
                 self.badges,
                 &mut picture,
@@ -229,6 +292,13 @@ impl Display<'_> {
             );
             picture
         };
+        if slot.controller == "Encoder" && self.model.capabilities().strip {
+            let (width, height) = self.model.encoder_size();
+            if picture.width() != width || picture.height() != height {
+                picture =
+                    picture.resize_exact(width, height, image::imageops::FilterType::Lanczos3);
+            }
+        }
         if slot.controller == "Encoder" {
             feedback::paint_dial(self.badges, &mut picture, slot, self.now);
         }
@@ -267,6 +337,41 @@ pub(super) fn has_hardware(slot: &Slot) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn galleon_composes_four_distinct_widgets_in_two_rows() {
+        let root = tempfile::tempdir().unwrap();
+        let mut host = super::super::tests::fixture(root.path());
+        host.model = Model::Galleon;
+        let template = host.slots[0].clone();
+        host.slots=(0..4).map(|index| {
+            let mut slot=template.clone();slot.model=Model::Galleon;slot.controller="Encoder".into();
+            slot.context=format!("widget-{index}");slot.index=index;slot.title=format!("Widget {index}");
+            slot.feedback=json!({"title":format!("Widget {index}"),"value":index*25,"indicator":index*25});
+            slot.layout="$B1".into();slot.layout_cache=None;slot
+        }).collect();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        host.hardware = Some(sender);
+        host.render().unwrap();
+        let frame = receiver
+            .try_iter()
+            .find_map(|draw| match draw {
+                Draw::Strip(image) => Some(image),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!((frame.width(), frame.height()), (720, 384));
+        let pictures: Vec<_> = host.slots.iter().map(|s| decode(&s.preview)).collect();
+        assert!(pictures.windows(2).all(|pair| pair[0] != pair[1]));
+        for (index, (x, y)) in [(24, 24), (376, 24), (24, 200), (376, 200)]
+            .into_iter()
+            .enumerate()
+        {
+            assert_eq!(
+                frame.crop_imm(x, y, 320, 160).to_rgba8(),
+                pictures[index].to_rgba8()
+            );
+        }
+    }
     use image::GenericImageView;
 
     fn solid(rgb: [u8; 3]) -> DynamicImage {
@@ -286,7 +391,7 @@ mod tests {
                 hardware: Some(appearance::PluginAppearance {
                     title: Some(String::new()),
                     pixels: Some(solid([255, 0, 0])),
-                        animation_source: None,
+                    animation_source: None,
                 }),
                 ..Default::default()
             },

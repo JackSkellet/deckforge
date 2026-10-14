@@ -63,6 +63,7 @@ pub fn run(profile: PathBuf, operation: String, variant: Option<uuid::Uuid>) -> 
     );
     let mut event_loop = EventLoopBuilder::<BrowserReply>::with_user_event().build();
     let window = WindowBuilder::new()
+        .with_window_icon(Some(crate::window::icon()?))
         .with_title("Deckforge · Sign in to Elgato Marketplace")
         .with_inner_size(LogicalSize::new(680.0, 800.0))
         .with_visible(operation == "login")

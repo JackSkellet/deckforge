@@ -166,12 +166,27 @@ impl Host {
         if !self.running {
             return;
         }
-        let needed = self.plugins.iter().any(|p| {
-            p.sender.is_some()
-                && applications(p, self.application_mappings.get(&p.id))
-                    .iter()
-                    .any(|a| !a.executable.is_empty())
-        });
+        let mut requests = Vec::new();
+        for device in self.device_ids() {
+            let _ = self.with_device(&device, |host| {
+                requests.extend(
+                    host.slots
+                        .iter()
+                        .flat_map(Slot::visible_flatten)
+                        .filter(|s| s.uuid == crate::system_app::UUID)
+                        .map(|s| (s.context.clone(), s.settings.clone())),
+                );
+                Ok(())
+            });
+        }
+        requests.truncate(512);
+        let needed = !requests.is_empty()
+            || self.plugins.iter().any(|p| {
+                p.sender.is_some()
+                    && applications(p, self.application_mappings.get(&p.id))
+                        .iter()
+                        .any(|a| !a.executable.is_empty())
+            });
         if !needed {
             self.application_monitor = None;
             // Removing the last subscription still balances its delivered state.
@@ -180,12 +195,33 @@ impl Host {
                 error: None,
             });
             self.application_error = None;
+            self.application_artwork.clear();
             return;
         }
         let worker = self
             .application_monitor
             .get_or_insert_with(crate::application_monitor::Worker::new);
-        if let Some(snapshot) = worker.snapshot() {
+        worker.watch_artwork(requests.clone());
+        let mut artwork = worker.artwork();
+        artwork.retain(|context, visual| {
+            requests
+                .iter()
+                .any(|(id, settings)| id == context && settings == &visual.settings)
+        });
+        let changed = artwork.len() != self.application_artwork.len()
+            || artwork.iter().any(|(context, visual)| {
+                self.application_artwork
+                    .get(context)
+                    .is_none_or(|old| !visual.same(old))
+            });
+        let snapshot = worker.snapshot();
+        self.application_artwork = artwork;
+        if changed {
+            for device in self.device_ids() {
+                let _ = self.with_device(&device, |host| host.render());
+            }
+        }
+        if let Some(snapshot) = snapshot {
             self.apply_application_snapshot(&snapshot);
         }
     }

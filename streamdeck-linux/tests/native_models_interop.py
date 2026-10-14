@@ -29,6 +29,20 @@ const stage=document.querySelector('.device-stage');
 const columns=getComputedStyle(document.querySelector('.key-grid')).gridTemplateColumns.split(' ').length;
 if(expected.model!=='pedal'&&columns!==expected.columns)throw Error('Wrong key grid columns: '+columns);
 if(expected.model==='pedal'&&stage.dataset.keyImages!=='false')throw Error('Pedal incorrectly advertises a display');
+let galleonGeometry=false;
+if(expected.model==='galleon'){
+ const grid=document.querySelector('.dial-grid');
+ if(getComputedStyle(grid).gridTemplateColumns.split(' ').length!==2||document.querySelectorAll('.galleon-dials > span').length!==2||document.querySelectorAll('.dial-knob').length)throw Error('Galleon logical and physical dials conflated');
+ const rects=dials().map(d=>d.getBoundingClientRect());
+ if(rects[0].y!==rects[1].y||rects[2].y!==rects[3].y||rects[2].y<=rects[0].y||rects[3].bottom>keys()[0].getBoundingClientRect().top)throw Error('Galleon widgets must be two rows above the keys');
+ await bridge.request('command',{command:'assign',controller:'Encoder',index:3,uuid:'com.elgato.streamdeck.system.hotkey'});
+ await until(()=>dials()[3].getAttribute('aria-label')?.includes('Hotkey'));
+ dials()[3].click();
+ await until(async()=>{const s=await bridge.request('ui_state_get');return s?.selected?.index===3&&s?.selected?.controller==='Encoder'});
+ const image=dials()[3].querySelector('img');await until(()=>image?.complete&&image.naturalWidth===320&&image.naturalHeight===160);
+ if(!initial.device_capabilities.transport_supported||initial.device_capabilities.touchscreen)throw Error('Galleon transport/touch capabilities incorrect');
+ keys()[last].click();galleonGeometry=true;
+}
 let neoNavigation=false;
 if(expected.model==='neo'){
  const left=()=>document.querySelector('.neo-sensor[aria-label="Previous page"]');
@@ -43,7 +57,7 @@ if(expected.model==='neo'){
  await until(async()=>{const s=await bridge.request('snapshot');return s.library.active_page===second&&!left()?.disabled&&right()?.disabled});
  left().click();await until(()=>left()?.disabled&&!right()?.disabled);neoNavigation=true;
 }
-return {model:initial.device_model,device_name:initial.device_name,keys:keys().length,dials:dials().length,columns,last_key_selected:true,neo_navigation_verified:neoNavigation,viewport:[innerWidth,innerHeight],key_bounds:rects,usb_access:false};
+return {model:initial.device_model,device_name:initial.device_name,keys:keys().length,dials:dials().length,columns,last_key_selected:true,neo_navigation_verified:neoNavigation,galleon_geometry_verified:galleonGeometry,viewport:[innerWidth,innerHeight],key_bounds:rects,usb_access:false};
 '''
 
 def main():

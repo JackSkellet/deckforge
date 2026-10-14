@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
+  <mime-type type="application/x-streamdeck-action">
+    <comment>Stream Deck action</comment>
+    <sub-class-of type="application/zip"/>
+    <glob pattern="*.streamDeckAction" weight="80"/>
+    <icon name="deckforge"/>
+  </mime-type>
+  <mime-type type="application/x-streamdeck-profile">
+    <comment>Stream Deck profile</comment>
+    <sub-class-of type="application/zip"/>
+    <glob pattern="*.streamDeckProfile" weight="80"/>
+    <icon name="deckforge"/>
+  </mime-type>
+  <mime-type type="application/x-streamdeck-plugin">
+    <comment>Stream Deck plugin</comment>
+    <sub-class-of type="application/zip"/>
+    <glob pattern="*.streamDeckPlugin" weight="80"/>
+    <icon name="deckforge"/>
+  </mime-type>
+  <mime-type type="application/x-streamdeck-iconpack">
+    <comment>Stream Deck icon pack</comment>
+    <sub-class-of type="application/zip"/>
+    <glob pattern="*.streamDeckIconPack" weight="80"/>
+    <icon name="deckforge"/>
+  </mime-type>
+</mime-info>

@@ -230,6 +230,7 @@ describe("desktop interactions", () => {
       expect(request).toHaveBeenCalledWith("command", {
         device: "test",
         command: "appearance",
+        history_group: expect.stringMatching(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i),
         context: "counter-1",
         expected_state: 0,
         state: 0,
@@ -646,6 +647,7 @@ describe("desktop interactions", () => {
       expect(request).toHaveBeenCalledWith("command", {
         device: "test",
         command: "settings_patch",
+        history_group: expect.stringMatching(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i),
         context: "counter-1",
         base: { count: 7, incrementBy: 1, Future: { keep: true } },
         settings: { count: 7, incrementBy: 5, Future: { keep: true } },
@@ -672,6 +674,7 @@ describe("desktop interactions", () => {
       expect(request).toHaveBeenCalledWith("command", {
         device: "test",
         command: "settings_patch",
+        history_group: expect.stringMatching(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i),
         context: "counter-1",
         base: {
           count: 8,

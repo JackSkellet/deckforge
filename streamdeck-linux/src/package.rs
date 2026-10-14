@@ -23,7 +23,8 @@ pub(crate) fn read_manifest(bytes: &[u8]) -> Result<Value> {
         !bytes.starts_with(b"ELGATO"),
         "This plugin has an Elgato-protected manifest. In Plugins, import the supported Elgato installer under Protected Elgato packages, then retry. Command-line installs can use --reference-app with the original application."
     );
-    serde_json::from_slice(bytes).context("Invalid plugin manifest JSON")
+    serde_json::from_slice(bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(bytes))
+        .context("Invalid plugin manifest JSON")
 }
 
 // Authentication alone is not file-integrity verification. Only the archive and
@@ -61,7 +62,7 @@ pub(crate) fn read_installed_manifest(root: &Path, reference: Option<&Path>) -> 
     }
     Ok(manifest)
 }
-fn open_plugin_file(root: &fs::File, path: &str) -> Result<fs::File> {
+pub(crate) fn open_plugin_file(root: &fs::File, path: &str) -> Result<fs::File> {
     let mut directory = root.try_clone()?;
     let parts = path.split('/').collect::<Vec<_>>();
     ensure!(
@@ -138,9 +139,9 @@ const MAX_ENTRIES: usize = 10_000;
 const MAX_FILE: u64 = 32 * 1024 * 1024;
 const MAX_TOTAL: usize = 128 * 1024 * 1024;
 
-struct Entry {
-    bytes: Option<Vec<u8>>,
-    executable: bool,
+pub(crate) struct Entry {
+    pub bytes: Option<Vec<u8>>,
+    pub executable: bool,
 }
 
 /// Validate, stage and atomically install a .streamDeckPlugin ZIP. Existing plugins
@@ -193,7 +194,7 @@ pub fn install_with_reference(
     Ok(target)
 }
 
-fn reject_symlinks(destination: &Path) -> Result<()> {
+pub(crate) fn reject_symlinks(destination: &Path) -> Result<()> {
     for path in destination.ancestors() {
         match fs::symlink_metadata(path) {
             Ok(metadata) => ensure!(
@@ -212,9 +213,46 @@ fn validated_archive(
     path: &Path,
     reference: Option<&Path>,
 ) -> Result<(String, BTreeMap<String, Entry>)> {
-    let mut zip = zip::ZipArchive::new(
-        fs::File::open(path).with_context(|| format!("Open {}", path.display()))?,
-    )?;
+    let (folder, entries) = read_archive_entries(path, ".sdPlugin")?;
+    let manifest = entries
+        .get(&format!("{folder}/manifest.json"))
+        .and_then(|e| e.bytes.as_ref())
+        .context("Plugin manifest.json missing")?;
+    let protected = manifest.starts_with(b"ELGATO");
+    let manifest = decode_manifest(manifest, reference)?;
+    let uuid = manifest["UUID"]
+        .as_str()
+        .context("Plugin manifest UUID missing")?;
+    ensure!(
+        folder == format!("{uuid}.sdPlugin"),
+        "Plugin manifest UUID does not match folder name"
+    );
+    if protected {
+        for file in crate::protected_manifest::required_files(&manifest)? {
+            let bytes = entries
+                .get(&format!("{folder}/{}", file.path))
+                .and_then(|e| e.bytes.as_deref())
+                .with_context(|| format!("Required plugin file missing: {}", file.path))?;
+            file.verify(bytes)?;
+        }
+    }
+    Ok((folder, entries))
+}
+
+pub(crate) fn read_archive_entries(
+    path: &Path,
+    extension: &str,
+) -> Result<(String, BTreeMap<String, Entry>)> {
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(path)
+        .with_context(|| format!("Open {}", path.display()))?;
+    ensure!(
+        file.metadata()?.is_file(),
+        "Package archive must be a regular file"
+    );
+    let mut zip = zip::ZipArchive::new(file)?;
     validate_central_directory(path, zip.central_directory_start())?;
     ensure!(
         zip.len() <= MAX_ENTRIES,
@@ -238,8 +276,8 @@ fn validated_archive(
         );
         let root = name.split('/').next().unwrap().to_owned();
         ensure!(
-            root.ends_with(".sdPlugin") && root != ".sdPlugin",
-            "Expected top-level .sdPlugin folder"
+            root.ends_with(extension) && root != extension,
+            "Expected top-level {extension} folder"
         );
         ensure!(
             name.contains('/') || file.is_dir(),
@@ -285,31 +323,9 @@ fn validated_archive(
     }
     ensure!(
         roots.len() == 1,
-        "Plugin archive must contain exactly one .sdPlugin folder"
+        "Package must contain exactly one {extension} folder"
     );
     let folder = roots.into_iter().next().unwrap();
-    let manifest = entries
-        .get(&format!("{folder}/manifest.json"))
-        .and_then(|e| e.bytes.as_ref())
-        .context("Plugin manifest.json missing")?;
-    let protected = manifest.starts_with(b"ELGATO");
-    let manifest = decode_manifest(manifest, reference)?;
-    let uuid = manifest["UUID"]
-        .as_str()
-        .context("Plugin manifest UUID missing")?;
-    ensure!(
-        folder == format!("{uuid}.sdPlugin"),
-        "Plugin manifest UUID does not match folder name"
-    );
-    if protected {
-        for file in crate::protected_manifest::required_files(&manifest)? {
-            let bytes = entries
-                .get(&format!("{folder}/{}", file.path))
-                .and_then(|e| e.bytes.as_deref())
-                .with_context(|| format!("Required plugin file missing: {}", file.path))?;
-            file.verify(bytes)?;
-        }
-    }
     for name in entries.keys() {
         let mut parent = Path::new(name).parent();
         while let Some(path) = parent {
@@ -329,7 +345,14 @@ fn validated_archive(
 // zip 2.x stores entries in a map and silently hides repeated names. Inspect only
 // central directory metadata before using its decompression/path APIs.
 pub(crate) fn validate_central_directory(path: &Path, offset: u64) -> Result<()> {
-    let mut file = fs::File::open(path)?;
+    let mut file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(path)?;
+    ensure!(
+        file.metadata()?.is_file(),
+        "Package archive must be a regular file"
+    );
     file.seek(SeekFrom::Start(offset))?;
     let mut names = HashSet::new();
     loop {

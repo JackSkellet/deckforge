@@ -296,12 +296,29 @@ impl Renderer {
         images: &HashMap<String, DynamicImage>,
         style: Option<&TitleStyle>,
     ) -> Result<DynamicImage> {
+        self.dial_layout_on(title, feedback, layout, images, style, None)
+    }
+    pub fn dial_layout_on(
+        &self,
+        title: &str,
+        feedback: &Value,
+        layout: &Value,
+        images: &HashMap<String, DynamicImage>,
+        style: Option<&TitleStyle>,
+        background: Option<&DynamicImage>,
+    ) -> Result<DynamicImage> {
         if let Some(style) = style {
             style.validate()?;
         }
         let items = crate::layout::resolved_items(layout, feedback)?;
         let (width, height) = crate::layout::canvas_size(layout);
         let mut canvas = RgbaImage::from_pixel(width, height, Rgba([0, 0, 0, 255]));
+        if let Some(background) = background {
+            let pixels = background
+                .resize_exact(width, height, image::imageops::FilterType::Lanczos3)
+                .to_rgba8();
+            image::imageops::overlay(&mut canvas, &pixels, 0, 0);
+        }
         for item in items {
             if item["enabled"].as_bool() == Some(false) {
                 continue;

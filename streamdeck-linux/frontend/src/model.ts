@@ -17,6 +17,7 @@ export interface Action {
   visible: boolean;
   multi_only: boolean;
   supported_in_multi: boolean;
+  supported_in_key_logic?: boolean;
   defaults: RecordValue;
   states: RecordValue[];
   icon?: string;
@@ -46,6 +47,7 @@ export interface AppearanceEdit {
   reset_image?: boolean;
 }
 export interface Slot {
+  command_run?: CommandRun | null;
   plugin_disabled?: boolean;
   appearance?: AppearanceInfo;
   state_count?: number;
@@ -70,7 +72,18 @@ export interface Slot {
   multi_children: Slot[][];
   trigger_description?: RecordValue;
 }
+export interface TypingStatus { phase: "disabled" | "requesting" | "ready" | "typing" | "stopping" | "error"; message: string }
+export interface CommandRun {
+  id: string;
+  state: "running" | "succeeded" | "failed" | "cancelled" | "timed_out";
+  message: string;
+  stdout_bytes: number;
+  stderr_bytes: number;
+  truncated: boolean;
+  can_copy: boolean;
+}
 export interface Profile {
+  app_identifier?: string | null;
   compatible?: boolean;
   device_name?: string;
   device_model?: string;
@@ -82,12 +95,38 @@ export interface Profile {
   pages: { id: string; name: string; folder: boolean }[];
 }
 export interface Clipboard {
+  root_context?: string;
   device?: string;
   name: string;
   uuid: string;
   controller: Controller;
   mode: "copy" | "cut";
   context: string;
+}
+export interface SmartBinding {
+  kind: "desktop_id" | "executable" | "window_class";
+  value: string;
+  name: string;
+}
+export interface SmartConfig {
+  enabled: boolean;
+  fallback: string | null;
+  bindings: Record<string, SmartBinding>;
+}
+export interface FocusApplication {
+  pid: number;
+  desktop_id: string;
+  window_class: string;
+  executable: string | null;
+}
+export interface SmartProfileStatus {
+  config: SmartConfig;
+  backend: string;
+  observing: boolean;
+  paused: boolean;
+  focus: FocusApplication | null;
+  recent: FocusApplication[];
+  error: string | null;
 }
 export interface DeviceRecord {
   profile_compatible?: boolean;
@@ -106,7 +145,21 @@ export interface PluginLanguageState {
   restart_required: boolean;
   options: { value: string; label: string }[];
 }
+export interface ActionFileRoot {
+  index: number; name: string; uuid: string; controller: string; page: string; page_name?: string; column: number; row: number;
+}
+export interface PendingActionFile {
+  id: string; device: string;
+  destination: { controller: Controller; index: number; expected_target: string | null; expected_profile: string; expected_page: string } | null;
+  info: { path: string; source_hash: string; roots: ActionFileRoot[] };
+}
+export interface ActionFileChoice { id: string; root: number; query: string; }
 export interface Snapshot {
+  pending_action_file?: PendingActionFile | null;
+  icon_library?: { revision: number; error: string | null };
+  history?: { revision: number; undo: string | null; redo: string | null; note: string | null; contexts?: string[] };
+  smart_profiles?: SmartProfileStatus;
+  file_open?: { id: string; error: boolean; message: string };
   marketplace?: MarketplaceState;
   plugin_language?: PluginLanguageState;
   multi_action_feedback?: boolean;
@@ -116,6 +169,11 @@ export interface Snapshot {
   device_model?: string;
   device_name?: string;
   device_geometry?: DeviceGeometry;
+  encoder_background_tiles?: string[] | null;
+  encoder_background_configured?: boolean;
+  encoder_background?: string | null;
+  encoder_markers?: string | null;
+  encoder_routes?: (number | null)[];
   device_model_name?: string;
   device_custom_name?: string | null;
   device_capabilities?: DeviceCapabilities;
@@ -145,6 +203,7 @@ export interface Snapshot {
   logs: string[];
   reference_app?: string;
   system_status?: string;
+  typing_status?: TypingStatus;
   [key: string]: any;
 }
 
@@ -331,10 +390,11 @@ export const MULTI = "com.elgato.streamdeck.multiactions.";
 export const STACK = "com.elgato.streamdeck.dial.stack";
 export const WHEEL = "com.elgato.streamdeck.keys.stack";
 export const TRIGGER = "com.elgato.streamdeck.keys.adaptor";
+export const LOGIC = "com.elgato.streamdeck.keys.logic";
 export const isMulti = (id: string) =>
   [MULTI + "routine", MULTI + "routine2", MULTI + "random"].includes(id);
 export const isContainer = (id: string) =>
-  isMulti(id) || id === STACK || id === TRIGGER || id === WHEEL;
+  isMulti(id) || id === STACK || id === TRIGGER || id === WHEEL || id === LOGIC;
 export function allowed(action: Action, controller: Controller) {
   return (
     action.visible !== false &&
@@ -345,6 +405,13 @@ export function allowed(action: Action, controller: Controller) {
 }
 export function childAllowed(action: Action, parent: string) {
   if (action.enabled === false) return false;
+  if (parent === LOGIC)
+    return (
+      action.controllers.includes("Keypad") &&
+      action.supported_in_key_logic !== false &&
+      !action.multi_only &&
+      ![STACK, TRIGGER, WHEEL, LOGIC].includes(action.uuid)
+    );
   if (parent === STACK)
     return action.controllers.includes("Encoder") && action.uuid !== STACK;
   if (parent === WHEEL && action.multi_only) return false;
@@ -374,7 +441,7 @@ export function newChild(action: Action): RecordValue {
   };
   if (isMulti(action.uuid)) raw.Actions = [{ Actions: [] }, { Actions: [] }];
   if (action.uuid === WHEEL) raw.Actions = [];
-  if (action.uuid === TRIGGER)
+  if (action.uuid === TRIGGER || action.uuid === LOGIC)
     raw.Actions = [{ Actions: [] }, { Actions: [] }, { Actions: [] }];
   return raw;
 }
@@ -442,9 +509,11 @@ export function saveRequests(
           ? "stack_save"
           : slot.uuid === WHEEL
             ? "wheel_save"
-            : slot.uuid === TRIGGER
-              ? "trigger_save"
-              : "multi_save",
+            : slot.uuid === LOGIC
+              ? "logic_save"
+              : slot.uuid === TRIGGER
+                ? "trigger_save"
+                : "multi_save",
       context: slot.context,
       raw: draft.raw,
       ...(wheelBase ? { base: wheelBase } : {}),

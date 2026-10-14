@@ -34,7 +34,12 @@ impl Host {
                     .map(|p| (a.uuid.clone(), p.root.clone()))
             })
             .collect();
-        let files = build_profile_files(profile, &self.library.active_page, &roots)?;
+        let mut files = build_profile_files(profile, &self.library.active_page, &roots)?;
+        smart_profiles::archive::write(
+            &mut files,
+            &profile.id,
+            self.smart_config().bindings.get(&profile.id),
+        )?;
         let backup = write_archive(path, &files)?;
         self.log(format!(
             "Exported profile to {}{}",
@@ -103,7 +108,8 @@ pub(super) fn build_profile_files(
                     .as_object()
                     .is_some_and(|r| !r.is_empty())
         });
-    let wrapped = transferred_resources
+    let wrapped = profile.raw["Device"]["Model"] == "Fake/Storage"
+        || transferred_resources
         || added_resources
         || added_audio
         || source
@@ -188,6 +194,27 @@ pub(super) fn build_profile_files(
                 } else {
                     insert_unique(&mut files, target, data.to_vec())?;
                 }
+            }
+        }
+        if let Some(origin) = &page.background_source {
+            let source = profile::load_bundle(&origin.source)?;
+            let source_page = source
+                .pages
+                .iter()
+                .find(|p| p.manifest_path() == origin.manifest)
+                .context("Background source page missing")?;
+            if let Some(path) = page.raw["Controllers"]
+                .as_array()
+                .and_then(|c| c.iter().find(|c| c["Type"] == "Encoder"))
+                .and_then(|c| c["Background"].as_str())
+                .filter(|p| !p.is_empty())
+            {
+                safe_export_path(path)?;
+                insert_unique(
+                    &mut files,
+                    format!("{page_root}{path}"),
+                    source_page.asset(path)?,
+                )?;
             }
         }
         let mut raw = page.raw.clone();
@@ -407,7 +434,10 @@ fn clear_managed_positions(actions: &mut Value, controller: &str, model: Model) 
             };
             !match controller {
                 "Keypad" => column < u32::from(model.columns()) && row < u32::from(model.rows()),
-                "Encoder" => column < u32::from(model.dial_count()) && row == 0,
+                "Encoder" => {
+                    column < u32::from(model.encoder_columns())
+                        && row < u32::from(model.encoder_rows())
+                }
                 "Neo" => model == Model::Neo && column == 1 && row == 0,
                 _ => false,
             }
@@ -422,7 +452,10 @@ fn managed_position(slot: &Slot) -> Result<String> {
             slot.index % slot.model.columns(),
             slot.index / slot.model.columns()
         )),
-        "Encoder" if slot.index < slot.model.dial_count() => Ok(format!("{},0", slot.index)),
+        "Encoder" if slot.index < slot.model.dial_count() => {
+            let (col, row) = slot.model.encoder_coordinates(slot.index);
+            Ok(format!("{col},{row}"))
+        }
         "Neo" if slot.model == Model::Neo && slot.index == 1 => Ok("1,0".into()),
         _ => bail!("Invalid managed slot {} {}", slot.controller, slot.index),
     }
@@ -448,8 +481,10 @@ fn export_action_at(
 ) -> Result<Value> {
     ensure!(depth <= 8, "Container nesting exceeds eight export levels");
     let mut raw = slot.raw.clone();
-    let native = raw.as_object().is_none_or(|map| map.is_empty());
-    if native {
+    // Imported action records always contain UUID. Local appearance edits can
+    // make a new action's raw metadata nonempty before its first export.
+    let native = raw.get("UUID").is_none();
+    if !raw.is_object() {
         raw = json!({});
     }
     let origin = slot
@@ -502,6 +537,39 @@ fn export_action_at(
                     insert_unique(files, direct, bytes.to_vec())?;
                 }
             }
+        }
+    }
+    if slot.controller == "Encoder"
+        && let Some((origin, bundle)) = slot.asset_source.as_ref().zip(origin.as_ref())
+        && let Some(page) = bundle
+            .pages
+            .iter()
+            .find(|p| p.manifest_path() == origin.manifest)
+    {
+        for field in ["background", "Icon"] {
+            if let Some(path) = raw["Encoder"][field].as_str().filter(|p| !p.is_empty())
+                && let Ok(bytes) = page.asset(path)
+            {
+                let extension = Path::new(path)
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("bin");
+                let relative = format!("Images/encoder-{}-{field}.{extension}", slot.context);
+                insert_unique(files, format!("{page_root}{relative}"), bytes)?;
+                raw["Encoder"][field] = json!(relative);
+            }
+        }
+    }
+    if slot.controller == "Encoder" {
+        for (field, data) in &slot.encoder_overrides {
+            ensure!(
+                matches!(field.as_str(), "background" | "Icon"),
+                "Unknown Encoder asset override"
+            );
+            let bytes = STANDARD.decode(data)?;
+            let relative = format!("Images/encoder-owned-{}-{field}.png", slot.context);
+            insert_unique(files, format!("{page_root}{relative}"), bytes)?;
+            raw["Encoder"][field] = json!(relative);
         }
     }
     let mut states = slot.states.as_array().cloned().unwrap_or_default();
@@ -605,7 +673,11 @@ fn export_action_at(
     if native || raw.get("States").is_some() || !states.is_empty() {
         raw["States"] = json!(states);
     }
-    if slot.uuid == crate::action_trigger::UUID && !slot.children.is_empty() {
+    if matches!(
+        slot.uuid.as_str(),
+        crate::action_trigger::UUID | crate::key_logic::UUID
+    ) && !slot.children.is_empty()
+    {
         ensure!(
             slot.children.len() == 3,
             "Action Trigger runtime must retain three positions"
@@ -687,6 +759,13 @@ fn export_action_at(
             groups[branch]["Actions"] = json!(exported);
         }
     }
+    // Include raw-only children on inactive pages. Existing Linux records without
+    // a mode paste; make that behavior portable without changing the saved graph.
+    crate::action_defaults::materialize_action(
+        &mut raw,
+        crate::action_defaults::Defaults::Linux,
+        depth,
+    );
     Ok(raw)
 }
 
@@ -1003,7 +1082,10 @@ mod resource_budget_tests {
     }
 }
 
-fn write_archive(path: &Path, files: &BTreeMap<String, Vec<u8>>) -> Result<Option<PathBuf>> {
+pub(super) fn write_archive(
+    path: &Path,
+    files: &BTreeMap<String, Vec<u8>>,
+) -> Result<Option<PathBuf>> {
     let parent = path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -1123,6 +1205,7 @@ mod tests {
                     raw: page.page_raw.clone(),
                     asset_source: None,
                     source_manifest: Some(page.manifest_path()),
+                    background_source: None,
                     manifest_path: page
                         .manifest_path()
                         .strip_prefix(&source_root)
@@ -1335,6 +1418,65 @@ mod tests {
     #[test]
     #[ignore = "requires Elgato 7.6 installer artifacts; DECKFORGE_ELGATO_RAW overrides their directory"]
     fn installer_profiles_roundtrip_all_pages_and_every_asset_byte() {
+        // This fixture helper models an already-saved runtime, not a new import.
+        // Check the one permitted canonical addition, then compare all other raw
+        // fields exactly. Unknown plugin payloads are never exempted.
+        fn remove_added_mode(before: &Value, after: &mut Value, depth: usize) {
+            if depth > 8 {
+                return;
+            }
+            let id = before["UUID"].as_str().unwrap_or("");
+            if id == crate::system_actions::TEXT {
+                if let Some(settings) = before["Settings"].as_object()
+                    && !settings.contains_key("isTypingMode")
+                    && settings.get("pastedText").is_none_or(Value::is_string)
+                {
+                    assert_eq!(
+                        after["Settings"]["isTypingMode"], false,
+                        "Legacy runtime must export its paste behavior"
+                    );
+                    after["Settings"]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("isTypingMode");
+                }
+            } else if id == crate::system_actions::CLOSE {
+                if let Some(settings) = before["Settings"].as_object()
+                    && !settings.contains_key("linuxCloseMethod")
+                {
+                    assert_eq!(after["Settings"]["linuxCloseMethod"], "automatic");
+                    after["Settings"]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("linuxCloseMethod");
+                }
+            } else if multiaction::container(id) {
+                if let Some(groups) = before["Actions"].as_array() {
+                    for (group, original) in groups.iter().enumerate() {
+                        if let Some(children) = original["Actions"].as_array() {
+                            for (index, child) in children.iter().enumerate() {
+                                remove_added_mode(
+                                    child,
+                                    &mut after["Actions"][group]["Actions"][index],
+                                    depth + 1,
+                                );
+                            }
+                        }
+                    }
+                }
+            } else if matches!(
+                id,
+                crate::action_trigger::UUID
+                    | crate::key_logic::UUID
+                    | crate::dial_stack::UUID
+                    | crate::action_wheel::UUID
+            ) && let Some(children) = before["Actions"].as_array()
+            {
+                for (index, child) in children.iter().enumerate() {
+                    remove_added_mode(child, &mut after["Actions"][index], depth + 1);
+                }
+            }
+        }
         let root = std::env::var_os("DECKFORGE_ELGATO_RAW")
             .map(PathBuf::from)
             .unwrap_or_else(|| {
@@ -1368,7 +1510,18 @@ mod tests {
                                 && s.row == action.row
                         })
                         .unwrap();
-                    assert_eq!(restored_action.raw, action.raw);
+                    let mut comparable = restored_action.raw.clone();
+                    if library::position_index(
+                        profile.model,
+                        &action.controller,
+                        action.column,
+                        action.row,
+                    )
+                    .is_some()
+                    {
+                        remove_added_mode(&action.raw, &mut comparable, 0);
+                    }
+                    assert_eq!(comparable, action.raw);
                 }
             }
             let exported_files: BTreeMap<_, _> = after.files().collect();
@@ -1616,6 +1769,7 @@ mod tests {
                 slots: vec![],
                 raw: json!({"Controllers":[]}),
                 source_manifest: None,
+                background_source: None,
                 asset_source: None,
                 manifest_path: format!(
                     "Profiles/{}/manifest.json",
