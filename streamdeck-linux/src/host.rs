@@ -1730,7 +1730,7 @@ async fn root(
     Html(include_str!("ui.html").replace("__TOKEN__", &token)).into_response()
 }
 fn slot_snapshot(host: &Host, s: &Slot) -> Value {
-    json!({"appearance":appearance::snapshot(s,&host.actions),"state_count":appearance::count(s,&host.actions),"plugin_disabled":host.action_plugin_disabled(&s.uuid),"available":host.actions.iter().any(|a|a.uuid==s.uuid)&&!host.action_plugin_disabled(&s.uuid),"pinned":s.pinned,"context":s.context,"controller":s.controller,"index":s.index,"uuid":s.uuid,"name":host.presented_slot_name(s),"state_names":host.state_names(s),"settings":s.settings,"resources":s.resources.clone().unwrap_or_default(),"title":s.title,"state":s.state,"feedback":s.feedback,"layout":s.layout,"preview":s.preview,"software_icon":s.software_icon,"raw":s.raw,
+    json!({"appearance":appearance::snapshot(s,&host.actions),"state_count":appearance::count(s,&host.actions),"plugin_disabled":host.action_plugin_disabled(&s.uuid),"available":host.actions.iter().any(|a|a.uuid==s.uuid)&&!host.action_plugin_disabled(&s.uuid),"pinned":s.pinned,"pin_excluded_pages":library::pin_exclusions(s),"context":s.context,"controller":s.controller,"index":s.index,"uuid":s.uuid,"name":host.presented_slot_name(s),"state_names":host.state_names(s),"settings":s.settings,"resources":s.resources.clone().unwrap_or_default(),"title":s.title,"state":s.state,"feedback":s.feedback,"layout":s.layout,"preview":s.preview,"software_icon":s.software_icon,"raw":s.raw,
         "trigger_description":host.trigger_description(s),
         "application_running":host.application_artwork.get(&s.context).filter(|a|a.settings==s.settings && s.uuid==crate::system_app::UUID).and_then(|a|a.running),
         "command_run":if s.uuid == crate::system_command::UUID {host.system_actions.as_ref().and_then(|worker|worker.command_results.summary(&s.context))} else {None},
@@ -2049,6 +2049,7 @@ fn apply_control_local(host: &mut Host, r: Value) -> Result<()> {
             | "page_step"
             | "folder_back"
             | "slot_pin"
+            | "slot_pin_exclusions"
             | "folder_create"
     ) {
         return host.library_command(&r);
@@ -4137,6 +4138,75 @@ mod tests {
         })
         .unwrap();
         assert!(rx.try_recv().is_err());
+    }
+    #[test]
+    fn pin_exclusions_hide_only_selected_pages_and_release_inputs() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut host = fixture(temp.path());
+        let first = host.library.active_page.clone();
+        host.library_command(&json!({"command":"slot_pin","context":"test.context","pinned":true}))
+            .unwrap();
+        host.library_command(&json!({"command":"page_create","name":"Other"}))
+            .unwrap();
+        let other = host.library.active_page.clone();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        host.plugins[0].sender = Some(tx);
+        host.input(InputEvent::Key {
+            index: 0,
+            pressed: true,
+        })
+        .unwrap();
+        assert_eq!(rx.try_recv().unwrap()["event"], "keyDown");
+        host.library_command(&json!({"command":"slot_pin_exclusions","context":"test.context","expected":[],"excluded_pages":[other]})).unwrap();
+        assert!(host.slots.is_empty());
+        assert_eq!(rx.try_recv().unwrap()["event"], "keyUp");
+        assert_eq!(rx.try_recv().unwrap()["event"], "willDisappear");
+        host.library_command(&json!({"command":"page_select","id":first}))
+            .unwrap();
+        assert_eq!(host.slots[0].context, "test.context");
+        let restored: library::Library =
+            serde_json::from_value(serde_json::to_value(&host.library).unwrap()).unwrap();
+        assert_eq!(
+            library::pin_exclusions(restored.slot("test.context").unwrap()),
+            json!([other])
+        );
+        let pins = host.library.current().unwrap().pin_page.clone();
+        host.library_command(&json!({"command":"page_select","id":pins}))
+            .unwrap();
+        assert_eq!(host.slots[0].context, "test.context");
+        for pages in [json!(["missing"]), json!([pins]), json!([other, other])] {
+            assert!(host.library_command(&json!({"command":"slot_pin_exclusions","context":"test.context","expected":[other],"excluded_pages":pages})).is_err());
+        }
+        assert!(host.library_command(&json!({"command":"slot_pin_exclusions","context":"test.context","expected":[],"excluded_pages":[]})).is_err());
+        host.library_command(&json!({"command":"page_delete","id":other}))
+            .unwrap();
+        assert_eq!(
+            library::pin_exclusions(host.library.slot("test.context").unwrap()),
+            json!([])
+        );
+    }
+    #[test]
+    fn pin_exclusions_are_remapped_when_copying_profiles() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut host = fixture(temp.path());
+        host.library_command(&json!({"command":"slot_pin","context":"test.context","pinned":true}))
+            .unwrap();
+        host.library_command(&json!({"command":"page_create","name":"Excluded"}))
+            .unwrap();
+        let excluded = host.library.active_page.clone();
+        host.library_command(&json!({"command":"slot_pin_exclusions","context":"test.context","expected":[],"excluded_pages":[excluded]})).unwrap();
+        let original = host.library.active_profile.clone();
+        host.library_command(&json!({"command":"profile_duplicate","id":original,"name":"Copy"}))
+            .unwrap();
+        let profile = host.library.current().unwrap();
+        let copied = profile.pages.iter().find(|p| p.name == "Excluded").unwrap();
+        let pins = profile
+            .pages
+            .iter()
+            .find(|p| p.id == profile.pin_page)
+            .unwrap();
+        assert_ne!(copied.id, excluded);
+        assert_eq!(library::pin_exclusions(&pins.slots[0]), json!([copied.id]));
     }
     #[test]
     fn pinned_button_keeps_its_press_ownership_when_page_changes() {

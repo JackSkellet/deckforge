@@ -405,3 +405,32 @@ fn appearance_restore_notifies_the_edited_state_even_when_another_state_is_visib
     assert_eq!(changes[0]["payload"]["state"], 1);
     assert_eq!(host.slots[0].state, 0);
 }
+
+#[test]
+fn pinned_page_exclusions_undo_and_redo_restore_visibility() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut host = fixture(dir.path());
+    let context = host.slots[0].context.clone();
+    let page = host.library.active_page.clone();
+    command(
+        &mut host,
+        json!({"command":"slot_pin","context":context,"pinned":true}),
+    );
+    command(
+        &mut host,
+        json!({"command":"slot_pin_exclusions","context":context,"expected":[],"excluded_pages":[page]}),
+    );
+    assert!(!host.slots.iter().any(|s| s.context == context));
+    reverse(&mut host, true).unwrap();
+    assert!(host.slots.iter().any(|s| s.context == context));
+    assert_eq!(
+        library::pin_exclusions(host.library.slot(&context).unwrap()),
+        json!([])
+    );
+    reverse(&mut host, false).unwrap();
+    assert!(!host.slots.iter().any(|s| s.context == context));
+    assert_eq!(
+        library::pin_exclusions(host.library.slot(&context).unwrap()),
+        json!([page])
+    );
+}

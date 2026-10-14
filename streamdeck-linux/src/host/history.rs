@@ -130,6 +130,7 @@ pub(super) fn label(command: &str) -> Option<&'static str> {
         "slot_transfer" => "Move or copy action",
         "slot_import" => "Import action",
         "slot_pin" => "Pin action",
+        "slot_pin_exclusions" => "Edit pinned page visibility",
         "folder_create" => "Create folder",
         "folder_exit" | "folder_exit_reset" => "Edit folder exit",
         "multi_save" | "stack_save" | "trigger_save" | "logic_save" | "wheel_save" => {

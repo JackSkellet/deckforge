@@ -1,3 +1,4 @@
+import { PinOptions } from "./PinOptions";
 import {
   useCallback,
   useEffect,
@@ -1588,7 +1589,7 @@ export default function App() {
             )}
             {snapshot.library.active_page === profile?.pin_page && (
               <div className="stage-label">
-                Pinned actions · appear on every page
+                Pinned actions · edit page visibility
               </div>
             )}
             <DeviceCanvas
@@ -1743,17 +1744,7 @@ export default function App() {
                               Studio LED and ring feedback is not supported.
                             </p>
                           )}
-                          <Check
-                            label="Pin on every page"
-                            checked={slot.pinned}
-                            onChange={(pinned) =>
-                              run({
-                                command: "slot_pin",
-                                context: slot.context,
-                                pinned,
-                              })
-                            }
-                          />
+                          <PinOptions slot={slot} pages={profile?.pages ?? []} run={run} />
                         </>
                       ) : (
                         <>
@@ -1867,17 +1858,7 @@ export default function App() {
                               }))
                             }
                           >
-                            <Check
-                              label="Pin on every page"
-                              checked={slot.pinned}
-                              onChange={(pinned) =>
-                                run({
-                                  command: "slot_pin",
-                                  context: slot.context,
-                                  pinned,
-                                })
-                              }
-                            />
+                            <PinOptions slot={slot} pages={profile?.pages ?? []} run={run} />
                           </AppearanceEditor>
                         </>
                       )}
