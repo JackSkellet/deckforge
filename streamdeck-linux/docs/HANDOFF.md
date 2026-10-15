@@ -1,35 +1,79 @@
 # Deckforge continuation handoff
 
-## Publication and paste scheduling in progress, 15 October 2026
+## Latest increment: responsive paste and GitHub publication, 15 October 2026
 
-User explicitly requested pushing changes to GitHub. Verified origin is
- git@github.com:JackSkellet/deckforge.git. Current branch codex/streamdeck-linux
-tracks origin/main; no corresponding remote topic branch existed at fetch.
-Remote main advanced by f3bc459 (per-page pinned-control exclusions), touching
-App.tsx/model.ts/host/library/desktop plus new PinOptions/tests. Preserve and merge
-that change before publishing the topic branch. CI remains workflow_dispatch only.
-Evidence and build/state output are gitignored; credential-pattern/large-file
-screen of241 candidate source files found no hits. No other workspace changes.
+User explicitly said "dont forget to push changes to github". GitHub publication
+is authorized for completed work in this goal. Verified origin remains
+ git@github.com:JackSkellet/deckforge.git; publish on codex/streamdeck-linux with
+normal non-force pushes. Preserve future remote changes. Current source commits
+include38bedd1 (all accumulated parity work,243files) and6dac970 (merge origin/main
+f3bc459 pinned-page exclusions plus Undo integration). The final documentation
+commit follows these. Remote tip verification is part of the publishing turn;
+check git refs/ls-remote when continuing. No PR created. CI remains manual-only
+workflow_dispatch and was not dispatched. Private evidence, builds and state are
+ignored; only project source/tests/docs/assets were staged. Credential-pattern and
+large-file checks found no hits. No other workspace changes were published.
 
-Current source adds interruptible Text paste settling to the existing worker.
-Clipboard FIFO is preserved, while owned key-up, dial releases/cancellation and
-command Stop bypass the wait. Newly deferred presses keep matching releases in
-order; queue overflow cannot leave an unstarted press without its release.
-Empty+Enter Text now clears/pastes empty text before Enter, per native evidence.
-Keyboard failure/shutdown suppress pending Enter. Dials do not begin new strokes
-while paste settles, but release active strokes. Production code compiled and
-strict Clippy passed. Private GTK/Konsole actual worker acceptance passed including
-priority/FIFO/deferred chord/empty Enter/shutdown. Full Rust:776pass,23ignored.
+Installed SHA `6ffb701c82dcbd3ca3625b43b2d0af44bc15f09e34865924028cbf74a7431c29`;
+.previous `4d9390c31dc694714114340e92a77f1f3765545b60574aeab3109fe67f1be075`.
+All2,388 state/plugin/icon-pack file hashes/modes unchanged. Runtime not restarted;
+save edits, fully Quit and reopen to load. Distribution archives still older.
+Install proof target/paste-scheduling/install.json. Final native SequenceDrag proof
+hash matches release/installed. Merged native PinOptions passed and screenshot was
+reviewed. No live build/test handles remain. Goal remains active with concrete
+progress this turn and no repeated blocker. No agents or other-chat messages.
 
-Full frontend initially found4 failures in App.test and PluginRemoval.test: three
-exact payload expectations lacked the existing undo history_group UUID; one global
-alert selector also matched an independent icon-catalog error in the minimal mock.
-Tests now assert UUID syntax without weakening payload checks and scope the removal
-failure alert to its named confirmation region. Focused two-file run passes.
-Rerun full frontend and build after merging upstream, then release/install/test,
-commit final docs and push. Latest installed binary still4d9390... from entry below.
-No live test handles remain at this checkpoint. Do not mark parity goal complete.
+Text paste now uses an interruptible150ms deadline instead of sleeping the System
+worker. Clipboard writes/new presses stay FIFO, but already-owned key-ups, dial
+releases/cancellation and captured-command Stop remain responsive. Pending Enter
+runs only after settling; shutdown/keyboard failure suppress it. New deferred
+presses retain their releases. Queue overflow reports errors and removes a matching
+unstarted press when its release cannot be queued. At most32 deferred jobs, in
+addition to the existing32-job channel. Captured-output completion polling waits
+until paste settles because it may write clipboard; cancellation still works.
 
+Empty Text with Enter now writes/pastes empty text before Enter (rather than keeping
+old clipboard). Empty-without-Enter validation unchanged. Native KA_Text validity
+0x140395cc0 and dispatch0x1403956b0 prove that case; task0x140252860 and manager
+0x140252390 show timer phases/FIFO. Manager has optional clipboard restoration with
+false configuration fallback, but no preference key/runtime config was established.
+Linux retains clipboard replacement and prior150ms settling duration; exact original
+phase timing and optional MIME restoration are not claimed complete. Native static
+evidence: ../evidence/text-typing/paste-scheduling-analysis.json. REA stays OPEN/HOT.
+
+Validation:
+-Private GTK/Konsole actual System worker with test packet writer/EIS: held Ctrl
+  release before paste completion, queued press/release ordering, clipboard FIFO
+  across copy/twoText, Unicode, empty Enter and shutdown suppressing Enter pass.
+  target/paste-scheduling/acceptance/proof.json records source/binary hashes; its
+  production sources were checked unchanged after merge. No real uinput/USB or
+  user clipboard touched. Existing terminal custom-shortcut acceptance passed.
+-4 dial tests include active release while waiting strokes stay paused without
+  a busy-spin deadline. Full merged Rust suite:778pass,23opt-in ignored; subsequent
+  focused pin-exclusion Undo/Redo integration test also passes.
+-Full merged frontend:263pass. TypeScript/Vite, release, strict locked all-target
+  Clippy and diff whitespace checks pass.
+-Native pin exclusions and Multi Action library drag/insertion/reorder/Save/restart
+  pass on final binary. Synthetic WebKit events, no physical drag/USB claim.
+
+Publication gates found4 stale frontend assertions:3 exact saved payload checks
+needed the existing undo history_group UUID (now checked with UUID regex), and the
+removal-error query needed its named confirmation region after an unrelated
+icon-catalog error added another alert to the minimal fixture. No product behavior
+or existing save assertions were weakened. Full test suite is now green.
+
+Remote f3bc459 introduced per-page exclusions while this branch contained earlier
+local changes. Resolved App.tsx by preserving current editor/drag/crop/appearance
+flows and adding PinOptions in both existing pin locations and the upstream stage
+label. Preserved history/icon/crop modules in host.rs; other upstream changes merged
+normally. Added slot_pin_exclusions to history labels and tested Undo/Redo restoring
+visibility. Incoming native pin exclusion test passes. Existing profiles untouched.
+
+Next work remains the full OS-first parity goal. Broader Wayland/window identity,
+remaining native action/reference gaps and audited non-OS gaps are still open;
+physical devices are user-validated and effects/screensaver/foreign-plugin backend
+work is deferred. Do not mark full parity complete or revive the disproven mandatory
+vendor OS action-graph MIME contract. Keep completed changes pushed as requested.
 
 ## Latest OS increment: application artwork and quoted launchers, 15 October 2026
 
