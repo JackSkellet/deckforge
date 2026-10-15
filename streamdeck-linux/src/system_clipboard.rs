@@ -98,3 +98,11 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "system_clipboard/mime_reference.rs"]
+mod mime_reference;
+
+#[cfg(test)]
+#[path = "system_clipboard/mime_wayland.rs"]
+mod mime_wayland;

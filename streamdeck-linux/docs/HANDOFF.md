@@ -1,5 +1,88 @@
 # Deckforge continuation handoff
 
+## Latest checkpoint: MIME capture groundwork; user requested pause, 15 October 2026
+
+User said "lets stop after that for the time being" while this checkpoint was
+being prepared for publication. Finish this checkpoint's normal GitHub push and
+remote verification, then mark the existing goal paused. Do not continue feature
+work until the user resumes. Full parity is not complete. The prior turn and this
+turn both made progress; there is no blocking streak. No subagents or other-chat
+messages. GitHub push remains authorized on verified JackSkellet/deckforge origin,
+branch codex/streamdeck-linux, without force. CI stays manual and was not dispatched.
+
+This increment adds only test-compiled clipboard capture groundwork, a private
+reference fixture and documentation. Production restoration remains DISABLED.
+Installed binary verified unchanged at
+`6ffb701c82dcbd3ca3625b43b2d0af44bc15f09e34865924028cbf74a7431c29`.
+No install, runtime restart, user clipboard access or saved-profile changes occurred.
+Last published prior checkpoint was6e54e09. Current publication tip can be verified
+from the branch/ref. Evidence/build artifacts remain ignored, not published.
+
+Native audit now identifies actual global configuration keys:
+- text_action_restore_clipboard_enabled: initializer0x14011db40 maps global
+  0x141a128d0; constructor0x1403956b0 supplies false fallback.
+- text_action_delay_ms_before_restore_clipboard: initializer0x14011dbb0 maps
+  0x141a128f0; constructor supplies250ms fallback.
+- Clone0x140373e00 copies HTML/color/image/text/URLs and remaining arbitrary formats.
+  This requires full MIME preservation, not just text. Manager0x140252390 restores
+  after its queue drains. No vendor runtime configuration was observed.
+- Other defined keys: text_action_paste_shortcut_enabled,
+  text_action_delay_ms_before_send_enter, text_action_delay_ms_between_pastes.
+  Their complete UI/runtime contracts were not newly traced.
+Evidence ../evidence/text-typing/clipboard-restore-analysis.json; original executable
+SHA2963df27b13f97e5736e3f931348d89d2f693109f3cb9dc3c9899300e35ea9e3 remains OPEN/HOT in
+REA. Never close/reimport it. No vendor executable ran.
+
+New src/system_clipboard/mime_wayland.rs is behind cfg(test). It connects to a local
+Wayland socket with500ms bound, performs2s setup and captures within3s. One
+unambiguous seat; inherited WAYLAND_SOCKET rejected to avoid sharing another
+client's protocol stream. ext-data-control preferred; wlr fallback binding included.
+Snapshot is tied to one offer and selection generation. Transfers use nonblocking
+read pipes and memory buffers,32formats/256-byte names/16MiB total. Selection
+changes reject the whole capture; timeout/cancellation discard partial data and
+normal subsequent capture recovers. Manager/seat failures stay latched. PRIMARY
+metadata is discarded; its contents are never requested. Per-offer invalid metadata
+prevents an oversized PRIMARY offer from breaking regular clipboard capture.
+
+New mime_reference.rs and tests/clipboard_mime_reference.py use owned virtual KWin,
+private bus/runtime/config/data/TMPDIR. Socket peer PID/UID checked before access.
+They prove exact text/HTML/file-URI/PNG/custom binary round-trip through temporary
+product set_text and a reference restore. Independent wl-clipboard-rs read calls
+mix old text and new HTML with identical format lists; new capture rejects that
+race. Count limits, PRIMARY isolation, empty selection, a stalled provider,
+cancellation and recovery pass. Stalling pauses only an owned child (SIGSTOP),
+with RAII kill/reap and runner SIGCONT/TERM cleanup of the owned process group.
+
+The real compositor advertises ext_data_control_manager_v1 only: ext runtime
+acceptance PASSED; wlr_capture=false and wlr_protocol=null in proof, not a fake
+success. X11 is not implemented. Prototype capture does not prove arbitrary provider
+internals immutable; a silent empty response cannot be distinguished from legitimate
+empty bytes. The16MiB guard exists but oversized-payload stress acceptance remains.
+
+wl-clipboard-rs0.9.3 is a direct dev dependency only, along with Wayland protocol
+bindings already present transitively. Its convenience writer is used only as a
+reference: it writes temporary files, and per-call readers use different offers.
+Do not use that combination as the production full-MIME lifecycle. PreparedCopy
+queues ownership until serving; fixture readiness now checks actual types/payload,
+not merely thread creation. Test artifacts: target/clipboard-mime-reference/.
+Proof records source/test-binary hashes, actual backend and production_restore_enabled=false.
+Latest test binary target/debug/deps/deckforge-e5842b18a61f7ea3. Real fixture passed,
+existing clipboard planner test passed, all tests compiled, strict locked all-target
+Clippy and formatting/diff checks passed. No frontend or release behavior changed.
+No live build/test handles remain at this checkpoint.
+
+When user resumes, finish the full restoration feature rather than declaring the
+capture prototype sufficient: add memory-only owned MIME serving with ownership-loss
+signals; integrate asynchronously with Text so capture never blocks held-key releases;
+retain original clipboard across consecutive pastes and restore only while still
+owning temporary text; preserve newer external copies; define bounded shutdown and
+failed-provider behavior; implement/validate X11 and wlr; add opt-in global setting
+and delay (off by default), native save/restart tests and oversized-payload checks.
+Keep clipboard contents out of profile/session/log files. Current capture code can
+be extended with retained manager/device proxies and data-source send/cancel events.
+Never enable restoration before its write/ownership lifecycle is verified.
+
+
 ## Latest increment: responsive paste and GitHub publication, 15 October 2026
 
 User explicitly said "dont forget to push changes to github". GitHub publication

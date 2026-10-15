@@ -165,9 +165,9 @@ Reference evidence: KA_Text validity0x140395cc0 accepts empty text only with Ent
 its dispatch0x1403956b0 creates text MIME data even then. ESDPasteTask0x140252860
 uses timer stages for clipboard, shortcut and Enter. ESDPasteManager0x140252390
 serializes tasks and includes an optional clipboard restoration path, with a false
-configuration fallback in the manager construction. No vendor preference key or
-runtime configuration was established; Deckforge retains its documented clipboard
-replacement policy. Evidence: ../evidence/text-typing/paste-scheduling-analysis.json.
+configuration fallback in the manager construction. The subsequent [restoration audit](CLIPBOARD_RESTORE.md) identifies the global
+configuration keys and full-MIME clone contract. Actual vendor runtime settings were
+not observed; Deckforge retains its documented clipboard replacement policy. Evidence: ../evidence/text-typing/paste-scheduling-analysis.json.
 The Linux settling duration is retained behavior, not a claim of exact vendor timing.
 
 The private focused GTK/Konsole test now checks key-up priority during a paste,

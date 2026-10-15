@@ -19,6 +19,8 @@ desktop keyboard portal, optionally followed by Enter. See [TEXT_TYPING.md](TEXT
 for typing permission, cancellation, native evidence and acceptance. The paste path and Clipboard action share the persistent arboard clipboard owner, with Wayland
 data-control and X11 support. A failed write clears the handle for the next retry.
 Clipboard retention after Deckforge exits depends on the desktop clipboard manager.
+Optional full-format restoration after Text remains under development; see
+[the reference and capture work](CLIPBOARD_RESTORE.md).
 Shortcut modes require the existing uinput keyboard setup and application focus.
 Text paste uses an interruptible settling deadline, preserving clipboard FIFO while
 held-key releases remain responsive; see [paste scheduling](TEXT_TYPING.md#paste-scheduling).
