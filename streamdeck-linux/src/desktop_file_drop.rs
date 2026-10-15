@@ -1,4 +1,4 @@
-//! Normalize Wry's GTK file drag events. GTK coordinates are widget logical
+//! Normalize native GTK file drag events. GTK coordinates are widget logical
 //! coordinates; only WebKit page zoom needs conversion to CSS coordinates.
 use serde_json::{Value, json};
 use wry::DragDropEvent;
@@ -53,6 +53,133 @@ pub fn payload(event: &DragDropEvent, zoom: f64) -> Value {
         }
     }
     result
+}
+
+/// WebKit uses GTK target-info 2 for its serialized custom drag data too. Wry's
+/// generic file handler treats every such payload as URIs and finishes the drag,
+/// stealing internal DOM moves. Claim only external, explicitly typed URI lists.
+pub fn connect(view: &webkit2gtk::WebView, handler: impl Fn(DragDropEvent) + 'static) {
+    use gtk::{gdk, prelude::*};
+    use std::{cell::RefCell, path::PathBuf, rc::Rc};
+    #[derive(Default)]
+    struct Drag {
+        context: Option<gdk::DragContext>,
+        paths: Option<Vec<PathBuf>>,
+        position: (i32, i32),
+        drop_time: Option<u32>,
+    }
+    fn external(view: &webkit2gtk::WebView, ctx: &gdk::DragContext) -> bool {
+        ctx.drag_get_source_widget().as_ref() != Some(view.upcast_ref::<gtk::Widget>())
+            && ctx
+                .list_targets()
+                .contains(&gdk::Atom::intern("text/uri-list"))
+    }
+    let drag = Rc::new(RefCell::new(Drag::default()));
+    let handler: Rc<dyn Fn(DragDropEvent)> = Rc::new(handler);
+    let state = drag.clone();
+    let notify = handler.clone();
+    view.connect_drag_motion(move |view, ctx, x, y, time| {
+        if !external(view, ctx) {
+            return false;
+        }
+        let mut state = state.borrow_mut();
+        let request = state.context.as_ref() != Some(ctx);
+        if request {
+            *state = Drag {
+                context: Some(ctx.clone()),
+                ..Default::default()
+            };
+        }
+        state.position = (x, y);
+        let entered = state.paths.is_some();
+        drop(state);
+        ctx.drag_status(gdk::DragAction::COPY, time);
+        if request {
+            view.drag_get_data(ctx, &gdk::Atom::intern("text/uri-list"), time);
+        }
+        if entered {
+            notify(DragDropEvent::Over { position: (x, y) });
+        }
+        true
+    });
+    let state = drag.clone();
+    let notify = handler.clone();
+    view.connect_drag_drop(move |view, ctx, x, y, time| {
+        if !external(view, ctx) {
+            return false;
+        }
+        let mut state = state.borrow_mut();
+        if state.context.as_ref() != Some(ctx) {
+            *state = Drag {
+                context: Some(ctx.clone()),
+                ..Default::default()
+            };
+        }
+        state.position = (x, y);
+        if let Some(paths) = state.paths.take() {
+            *state = Drag::default();
+            drop(state);
+            ctx.drag_finish(true, false, time);
+            notify(DragDropEvent::Drop {
+                paths,
+                position: (x, y),
+            });
+        } else {
+            state.drop_time = Some(time);
+            drop(state);
+            view.drag_get_data(ctx, &gdk::Atom::intern("text/uri-list"), time);
+        }
+        true
+    });
+    let state = drag.clone();
+    let notify = handler.clone();
+    view.connect_drag_data_received(move |view, ctx, _, _, data, _, _| {
+        if !external(view, ctx) || data.target() != gdk::Atom::intern("text/uri-list") {
+            return;
+        }
+        // This response belongs to our URI request, not WebKit's DOM handling.
+        view.stop_signal_emission_by_name("drag-data-received");
+        let mut state = state.borrow_mut();
+        if state.context.as_ref() != Some(ctx) {
+            return;
+        }
+        let paths = data
+            .uris()
+            .iter()
+            .map(|uri| {
+                url::Url::parse(uri)
+                    .ok()
+                    .and_then(|url| url.to_file_path().ok())
+                    .unwrap_or_else(|| PathBuf::from(uri.as_str()))
+            })
+            .collect::<Vec<_>>();
+        let position = state.position;
+        if let Some(time) = state.drop_time.take() {
+            *state = Drag::default();
+            drop(state);
+            ctx.drag_finish(true, false, time);
+            notify(DragDropEvent::Drop { paths, position });
+        } else {
+            state.paths = Some(paths.clone());
+            drop(state);
+            notify(DragDropEvent::Enter { paths, position });
+        }
+    });
+    view.connect_drag_leave(move |_, ctx, _| {
+        // GTK emits leave immediately before drop. Give drop its turn before
+        // clearing the cached external file, including asynchronous URI replies.
+        let state = drag.clone();
+        let notify = handler.clone();
+        let ctx = ctx.clone();
+        gtk::glib::idle_add_local_once(move || {
+            let mut state = state.borrow_mut();
+            if state.context.as_ref() == Some(&ctx) && state.drop_time.is_none() {
+                *state = Drag::default();
+                drop(state);
+                notify(DragDropEvent::Leave);
+            }
+        });
+    });
 }
 
 #[cfg(test)]

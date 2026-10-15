@@ -163,6 +163,7 @@ mod tests {
         host.inspectors.insert(
             "pi".into(),
             Inspector {
+                setup: None,
                 context: "test.context".into(),
                 plugin: 0,
                 child: None,

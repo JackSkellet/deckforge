@@ -737,6 +737,7 @@ mod tests {
                 h.inspectors.insert(
                     registration.into(),
                     Inspector {
+                        setup: None,
                         context: context.clone(),
                         plugin: 0,
                         child: None,

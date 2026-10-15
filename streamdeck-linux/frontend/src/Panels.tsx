@@ -3,6 +3,7 @@ import { request, pick } from "./bridge";
 import { Field, Check, SelectField } from "./Fields";
 import type { Snapshot, RecordValue } from "./model";
 import { getFormDraft, setFormDraft } from "./transient";
+import { PluginSetup } from "./PluginSetup";
 import { PluginApplications } from "./PluginApplications";
 import { PluginLanguage } from "./PluginLanguage";
 import { ReferenceInstaller } from "./ReferenceInstaller";
@@ -230,6 +231,7 @@ export function Plugins({
                 </small>
               </div>
               <span
+                title="Connection between this plugin and Deckforge. External services have their own connection status."
                 className={
                   "status " + (p.enabled !== false && p.connected ? "good" : "")
                 }
@@ -354,6 +356,7 @@ export function Plugins({
                 </div>
               </section>
             )}
+            <PluginSetup plugin={p} run={run} busy={!!pluginBusy[p.id]} />
             <PluginUpdate
               plugin={p}
               actions={snapshot.actions ?? []}

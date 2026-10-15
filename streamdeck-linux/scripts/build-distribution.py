@@ -28,6 +28,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--skip-build', action='store_true', help='Use the existing host and Discord release binaries')
     parser.add_argument('--output', type=Path)
+    parser.add_argument('--with-obs-bridge', action='store_true', help='Include the GPL native OBS bridge and corresponding source, built against local OBS/Qt6')
     args = parser.parse_args()
     if not args.skip_build:
         subprocess.run(['npm', '--prefix', str(PROJECT / 'frontend'), 'ci'], check=True)
@@ -37,6 +38,8 @@ def main():
     if args.skip_build:
         build.append('--skip-build')
     subprocess.run(build, check=True)
+    if args.with_obs_bridge and not args.skip_build:
+        subprocess.run(['python3', str(PROJECT / 'scripts/build-obs-bridge.py')], check=True)
     binary = PROJECT / 'target/release/deckforge'
     plugin = PROJECT / 'plugins/discord/target/release/deckforge-discord'
     arch = architecture(binary)
@@ -76,6 +79,14 @@ Configuration and authorization remain in the user's private data directory.
 Source and compatibility limits: https://github.com/JackSkellet/deckforge
 ''', 0o644),
     }
+    if args.with_obs_bridge:
+        bridge = PROJECT / 'target/release/obs-bridge'
+        if not (bridge / 'source.tar.gz').is_file():
+            raise SystemExit('Build the OBS bridge first; complete corresponding source is required.')
+        for item in bridge.rglob('*'):
+            if item.is_file():
+                entries['obs-bridge/' + item.relative_to(bridge).as_posix()] = (item.read_bytes(), 0o644)
+        entries['docs/OBS_BRIDGE.md'] = ((PROJECT / 'docs/OBS_BRIDGE.md').read_bytes(), 0o644)
     manifest = {name: hashlib.sha256(data).hexdigest() for name, (data, _) in entries.items()}
     entries['SHA256SUMS.json'] = (json.dumps(manifest, indent=2).encode() + b'\n', 0o644)
     output.parent.mkdir(parents=True, exist_ok=True)

@@ -303,6 +303,20 @@ impl Host {
     }
     pub(super) fn context_device(&self, context: &str) -> Option<String> {
         if self
+            .inspectors
+            .values()
+            .any(|i| i.setup.is_some() && i.context == context)
+        {
+            return Some(self.device.clone());
+        }
+        if let Some(state) = self.other_devices.values().find(|s| {
+            s.inspectors
+                .values()
+                .any(|i| i.setup.is_some() && i.context == context)
+        }) {
+            return Some(state.device.clone());
+        }
+        if self
             .slots
             .iter()
             .any(|slot| slot.flatten().iter().any(|slot| slot.context == context))

@@ -62,6 +62,7 @@ mod mixer;
 mod mixer_actions;
 mod multiaction;
 mod openapp;
+mod plugin_setup;
 mod plugins;
 mod reference;
 mod removal;
@@ -1541,6 +1542,10 @@ impl Host {
             self.notify_global_settings(plugin_index, None, false);
             return Ok(());
         }
+        if self.setup_plugin_message(plugin_index, &message)? {
+            return Ok(());
+        }
+        let plugin = &self.plugins[plugin_index];
         let active = self.visible_slot(context).is_some();
         let Some(original) = self.slot_any(context).cloned() else {
             if self
@@ -1937,6 +1942,7 @@ fn apply_control_inner(host: &mut Host, r: Value) -> Result<()> {
             | "smart_preview"
             | "system_wake"
             | "plugin_applications"
+            | "plugin_setup"
             | "plugin_language"
             | "multi_action_feedback"
             | "plugin_enabled"
@@ -2098,6 +2104,7 @@ fn apply_control_local(host: &mut Host, r: Value) -> Result<()> {
         "export_profile" => host.export_profile(Path::new(
             r["path"].as_str().context("Export path missing")?,
         )),
+        "plugin_setup" => host.open_plugin_setup(&r),
         "open_inspector" => {
             host.open_inspector(r["context"].as_str().context("Missing action context")?)
         }
@@ -2453,6 +2460,7 @@ async fn socket_session(socket: WebSocket, state: Shared) {
                     for slot in host.slots.iter().flat_map(Slot::visible_flatten) {
                         if host.actions.iter().any(|a|a.uuid==slot.uuid&&a.plugin==id) {host.emit(slot,"willAppear",json!({}));}
                     }
+                    host.replay_plugin_setup(index);
                     Ok(())
                 });
                 if let Err(error) = result {
@@ -2480,7 +2488,12 @@ async fn socket_session(socket: WebSocket, state: Shared) {
                     anyhow::ensure!(inspector.sender.is_none(), "Inspector already connected");
                     inspector.sender = Some(sender);
                     let context = inspector.context.clone();
-                    if let Some(slot) = host.visible_slot(&context) {
+                    if let Some(slot) = host
+                        .inspectors
+                        .get(registration)
+                        .and_then(|i| i.setup.as_ref())
+                        .or_else(|| host.visible_slot(&context))
+                    {
                         host.emit(slot, "propertyInspectorDidAppear", json!({}));
                     }
                     host.log(format!("Property inspector connected: {context}"));
@@ -3753,6 +3766,7 @@ mod tests {
         host.inspectors.insert(
             "stack-pi".into(),
             Inspector {
+                setup: None,
                 context: selected.clone(),
                 plugin: 0,
                 child: None,
@@ -3941,6 +3955,7 @@ mod tests {
         host.inspectors.insert(
             "inspector-token".into(),
             Inspector {
+                setup: None,
                 context: "test.context".into(),
                 plugin: 0,
                 child: None,
@@ -3977,6 +3992,7 @@ mod tests {
         host.inspectors.insert(
             "pi".into(),
             Inspector {
+                setup: None,
                 context: "test.context".into(),
                 plugin: 0,
                 child: None,
@@ -3998,6 +4014,7 @@ mod tests {
         host.inspectors.insert(
             "pi".into(),
             Inspector {
+                setup: None,
                 context: "test.context".into(),
                 plugin: 0,
                 child: None,
@@ -4007,6 +4024,7 @@ mod tests {
         host.inspectors.insert(
             "other".into(),
             Inspector {
+                setup: None,
                 context: "other.context".into(),
                 plugin: 0,
                 child: None,
@@ -4047,6 +4065,7 @@ mod tests {
         host.inspectors.insert(
             "failed".into(),
             Inspector {
+                setup: None,
                 context: "test.context".into(),
                 plugin: 0,
                 child: Some(child),

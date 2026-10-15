@@ -215,6 +215,7 @@ mod tests {
             h.inspectors.insert(
                 "inspector-a".into(),
                 Inspector {
+                    setup: None,
                     context: context_a.clone(),
                     plugin: 0,
                     child: None,

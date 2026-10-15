@@ -2,6 +2,8 @@
 use super::*;
 
 pub(super) struct Inspector {
+    /// Temporary setup action. Never placed in a profile or rendered to hardware.
+    pub setup: Option<Slot>,
     pub context: String,
     pub plugin: usize,
     pub child: Option<Child>,
@@ -69,7 +71,13 @@ impl Host {
         }
         let slot = self
             .visible_slot(context)
+            .cloned()
             .context("Action no longer exists")?;
+        self.launch_inspector(slot, false)
+    }
+
+    pub(super) fn launch_inspector(&mut self, slot: Slot, setup: bool) -> Result<()> {
+        let context = slot.context.clone();
         let action = self
             .actions
             .iter()
@@ -91,7 +99,7 @@ impl Host {
             .context("This plugin has no property inspector")?;
         let html = safe_file(&plugin.root, path)?;
         let info = registration_info(plugin, &self.registration_devices(), self.language);
-        let action_info = json!({"action":slot.uuid,"context":slot.context,"device":self.device,"payload":action_payload(slot)});
+        let action_info = json!({"action":slot.uuid,"context":slot.context,"device":self.device,"payload":action_payload(&slot)});
         let registration = uuid::Uuid::new_v4().to_string();
         let directory = self
             .state_path
@@ -108,10 +116,14 @@ impl Host {
             true,
             directory,
         )?;
-        self.close_inspectors(Some(context));
+        self.close_inspectors(Some(&context));
+        if setup {
+            self.emit(&slot, "willAppear", json!({}));
+        }
         self.inspectors.insert(
             registration,
             Inspector {
+                setup: setup.then_some(slot),
                 context: context.to_owned(),
                 plugin: plugin_index,
                 child: Some(child),
@@ -149,9 +161,22 @@ impl Host {
         }
         if let Some(inspector) = self.inspectors.remove(registration) {
             if inspector.sender.is_some()
-                && let Some(slot) = self.visible_slot(&inspector.context)
+                && let Some(slot) = inspector
+                    .setup
+                    .as_ref()
+                    .or_else(|| self.visible_slot(&inspector.context))
             {
                 self.emit(slot, "propertyInspectorDidDisappear", json!({}));
+            }
+            if let Some(slot) = &inspector.setup {
+                self.emit(slot, "willDisappear", json!({}));
+                self.retired.push_back((
+                    slot.context.clone(),
+                    self.plugins[inspector.plugin].id.clone(),
+                ));
+                while self.retired.len() > 256 {
+                    self.retired.pop_front();
+                }
             }
             self.log(format!(
                 "Property inspector closed for {}",
@@ -229,7 +254,12 @@ impl Host {
             Some("setResources") => Some("Edit plugin resources"),
             _ => None,
         };
-        if let Some(label) = label {
+        if let Some(label) = label
+            && self
+                .inspectors
+                .get(registration)
+                .is_none_or(|i| i.setup.is_none())
+        {
             return self.history_edit(label, None, |host| {
                 host.inspector_message_inner(registration, message)
             });
@@ -255,8 +285,11 @@ impl Host {
             .sender
             .clone()
             .context("Inspector not registered")?;
-        let mut slot = self
-            .visible_slot(&context)
+        let setup = inspector.setup.is_some();
+        let mut slot = inspector
+            .setup
+            .as_ref()
+            .or_else(|| self.visible_slot(&context))
             .cloned()
             .context("Inspector action no longer exists")?;
         let event = message["event"].as_str().context("Missing event")?;
@@ -291,6 +324,7 @@ impl Host {
                 let _ = sender.send(self.resources_event(&slot, message.get("id")));
             }
             "setResources" => {
+                anyhow::ensure!(!setup, "Assign an action before editing its resources");
                 self.editable_context(&context)?;
                 let changed = self.set_resources(&slot, payload)?;
                 self.emit(&changed, "didReceiveResources", json!({}));
@@ -299,13 +333,19 @@ impl Host {
                 let _ = sender.send(self.settings_event(&slot, message.get("id")));
             }
             "setSettings" => {
-                self.editable_context(&context)?;
+                if !setup {
+                    self.editable_context(&context)?;
+                }
                 if !payload.is_object() {
                     bail!("Settings must be an object");
                 }
                 slot.settings = payload;
-                self.store_slot(slot.clone());
-                self.persist()?;
+                if setup {
+                    self.inspectors.get_mut(registration).unwrap().setup = Some(slot.clone());
+                } else {
+                    self.store_slot(slot.clone());
+                    self.persist()?;
+                }
                 self.emit(&slot, "didReceiveSettings", json!({}));
                 self.notify_inspectors(
                     &context,
@@ -366,6 +406,7 @@ mod multi_device_tests {
         host.inspectors.insert(
             "pi-a".into(),
             Inspector {
+                setup: None,
                 context: a.clone(),
                 plugin: 0,
                 child: None,
@@ -381,6 +422,7 @@ mod multi_device_tests {
                 h.inspectors.insert(
                     "pi-b".into(),
                     Inspector {
+                        setup: None,
                         context: b.clone(),
                         plugin: 0,
                         child: None,

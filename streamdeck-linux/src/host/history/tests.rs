@@ -273,6 +273,7 @@ fn inspector_resource_edits_are_recorded_and_both_sides_receive_restoration() {
     host.inspectors.insert(
         "pi".into(),
         Inspector {
+            setup: None,
             context: context.clone(),
             plugin: 0,
             child: None,

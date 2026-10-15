@@ -1,5 +1,63 @@
 # Deckforge continuation handoff
 
+## Latest checkpoint: native drag repair, plugin setup and Linux OBS, 15 October 2026
+
+The user requested these focused fixes after pausing the broader parity work and
+explicitly approved Linux OBS support. No active goal exists; do not resume the
+broader parity/clipboard restoration project without a new request. GitHub push
+is authorized to JackSkellet/deckforge, codex/streamdeck-linux; CI remains manual.
+
+- Fixed native GTK file-drop interception of internal WebKit control drags. Wry
+  treats target-info 2 as files even for serialized DOM drags and finishes the
+  drag before its callback. The replacement claims only external text/uri-list
+  drags and leaves internal DOM drags to WebKit. Actual pointer tests cover move,
+  occupied-slot swap, Ctrl-copy and external file import on an owned Xvfb.
+- Plugins now offers Configure and a choice of the plugin's own property
+  inspectors. Temporary setup actions have balanced lifecycle events, isolated
+  settings/message routing, no hardware rendering or profile assignment, and
+  reconnect replay. Global settings persist; per-action selections in setup are
+  temporary. Existing assigned-action inspectors and device scoping remain intact.
+- Built the GPL upstream OBS bridge at fcddcde567bdeafd235829d4fe8519894b158e29
+  against native OBS 32.2.1 / Qt 6.12. A small Linux CMake wrapper supplies missing
+  upstream build files and corrects the optional frontend-library .so probe.
+  Bridge packages include complete source, submodules, licenses and checksums.
+  Native install/check is available in Plugins > OBS Studio > Configure and via
+  `deckforge obs-bridge [--install]`. Flatpak OBS is not covered by this installer.
+- Added explicit native `obs` defaults for the official plugin's obs64.exe and
+  com.obsproject.obs-studio subscriptions. The real HTML backend otherwise never
+  receives applicationDidLaunch and remains at Waiting for OBS even with a
+  reachable bridge. User mapping overrides, including blank values, take priority.
+
+Installed executable SHA256:
+`1dd221f1b9955023f6312a7fc9840587067b47ee0e01fbd19e080c11b15c0929`.
+Previous executable retained at ~/.local/bin/deckforge.previous with SHA256
+`6ffb701c82dcbd3ca3625b43b2d0af44bc15f09e34865924028cbf74a7431c29`.
+Native OBS module installed at
+`~/.config/obs-studio/plugins/StreamDeckPlugin/bin/64bit/StreamDeckPlugin.so`,
+SHA256 `48e1c262d3523379f6ea2232fa75a6cd88f0e8c81dcdf6ff7f27fd7c77f9e73a`.
+2388 saved profile/plugin/icon files and modes verified unchanged. No running
+user application was restarted, no OBS scene/output changed. User must fully
+quit/reopen Deckforge and OBS to activate the installed changes.
+
+Verification: targeted setup, bridge installation, OBS mapping and 12 existing
+inspector/lifecycle tests; six frontend setup/lifecycle tests; frontend build;
+Clippy all-targets with warnings denied; release build. Native evidence is under
+`target/control-drag/final-setup`, `target/plugin-setup-interop`, and
+`target/obs-interop`. The latter uses private OBS config, Xvfb and an isolated
+network namespace: unchanged official protocol classes connected, enumerated
+scenes, switched/restored two private empty scenes; Deckforge's read-only bridge
+check returned OBS 32.2.1. The full installed protected plugin also connected in
+native WebKit, and Plugins > Configure opened its original Scene inspector.
+The inspected screenshot showed scene controls with no Waiting for OBS overlay.
+This does not validate every OBS action, unrelated plugin login, Flatpak, or USB.
+Optional bridge distribution archive and every included checksum were verified.
+See docs/OBS_BRIDGE.md for setup/build details.
+
+Investigation boundary: headless library-card OS drag did not finish in Xvfb even
+with all native file-drop hooks disabled. This was not caused by the control-drag
+fix, was not changed, and is not claimed as verified by the new pointer fixture.
+Existing synthetic native file routing tests also passed during the drag repair.
+
 ## Latest checkpoint: MIME capture groundwork; user requested pause, 15 October 2026
 
 User said "lets stop after that for the time being" while this checkpoint was

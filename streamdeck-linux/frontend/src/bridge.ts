@@ -78,6 +78,7 @@ const globalCommands = new Set([
   "install_plugin",
   "restart_plugin",
   "plugin_applications",
+  "plugin_setup",
   "plugin_language",
   "plugin_enabled",
   "uninstall_plugin",

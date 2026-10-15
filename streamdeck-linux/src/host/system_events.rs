@@ -74,6 +74,7 @@ mod tests {
         host.inspectors.insert(
             "fixture-pi".into(),
             Inspector {
+                setup: None,
                 context: host.slots[0].context.clone(),
                 plugin: 0,
                 child: None,

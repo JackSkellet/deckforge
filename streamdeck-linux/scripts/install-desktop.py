@@ -100,6 +100,13 @@ def main():
         if package:
             atomic_copy(package, data / "deckforge/bundled-plugins" / package_name, 0o644)
             print("Included Discord package installed; existing plugins and private credentials preserved.")
+    bridge = source.parent / "obs-bridge"
+    if (bridge / "build.json").is_file():
+        # Stage only; the user installs into OBS from Plugins > Configure.
+        for item in bridge.rglob("*"):
+            if item.is_file():
+                atomic_copy(item, data / "deckforge/obs-bridge" / item.relative_to(bridge), 0o644)
+        print("Linux OBS bridge package staged for Plugins > Configure.")
     atomic_copy(source, executable, 0o755)
     atomic_copy(root / "assets/deckforge.png", icon, 0o644)
     atomic_copy(root / "assets/deckforge.svg", data / "icons/hicolor/scalable/apps/deckforge.svg", 0o644)

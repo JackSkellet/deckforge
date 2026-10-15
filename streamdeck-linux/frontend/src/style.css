@@ -3335,3 +3335,9 @@ dialog.mixer-dialog {
 .sequence-drag { border: 0; background: transparent; color: #91aaa9; padding: 10px 6px; cursor: grab; }
 .sequence-drag:active { cursor: grabbing; }
 .sequence-select { min-width: 0; }
+
+.plugin-setup { margin: 12px 0; }
+.plugin-setup-content { margin-top: 12px; padding: 12px; border: 1px solid var(--border); border-radius: 6px; }
+.plugin-setup-content h4 { margin: 8px 0; }
+.plugin-setup-content label { display: flex; align-items: center; gap: 8px; }
+.plugin-setup-content select { max-width: 320px; }

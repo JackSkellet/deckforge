@@ -1,5 +1,6 @@
 //! Per-plugin application subscriptions. Windows/macOS names require explicit
-//! Linux executable mappings; no guessed suffix removal or process launching.
+//! Linux executable mappings; known OBS identifiers have an explicit native default.
+//! No guessed suffix removal or process launching.
 use super::*;
 use crate::application_monitor::{Process, Snapshot};
 use std::collections::BTreeSet;
@@ -58,6 +59,15 @@ fn applications(plugin: &Plugin, overrides: Option<&BTreeMap<String, String>>) -
             .unwrap_or_else(|| {
                 if entry.platforms.contains(&"linux") {
                     entry.name.clone()
+                } else if plugin.id == "com.elgato.obsstudio"
+                    && matches!(
+                        entry.name.as_str(),
+                        "obs64.exe" | "com.obsproject.obs-studio"
+                    )
+                {
+                    // The official HTML plugin only starts its bridge connection
+                    // after applicationDidLaunch. Explicit user overrides still win.
+                    "obs".into()
                 } else {
                     String::new()
                 }
@@ -84,6 +94,7 @@ fn matches(process: &Process, executable: &str) -> bool {
 impl Host {
     pub(super) fn plugin_snapshot(&self, plugin: &Plugin) -> Value {
         let mut value = plugin.snapshot();
+        value["setup_actions"] = json!(self.plugin_setup_actions(plugin));
         value["enabled"] = json!(self.plugin_enabled(plugin));
         value["removal_mode"] = json!(self.plugin_removal_mode(plugin).as_str());
         value["rollback_available"] = json!(self.previous_plugins.contains_key(&plugin.root));
@@ -293,6 +304,39 @@ mod tests {
     }
     fn receive(receiver: &mut mpsc::UnboundedReceiver<Value>) -> Vec<Value> {
         std::iter::from_fn(|| receiver.try_recv().ok()).collect()
+    }
+
+    #[test]
+    fn obs_native_default_starts_bridge_client_and_respects_user_overrides() {
+        let root = tempfile::tempdir().unwrap();
+        let mut host = super::super::tests::fixture(root.path());
+        host.plugins[0].id = "com.elgato.obsstudio".into();
+        host.plugins[0].manifest = json!({"ApplicationsToMonitor":{"windows":["obs32.exe","obs64.exe"],"mac":["com.obsproject.obs-studio"]}});
+        let entries = applications(&host.plugins[0], None);
+        assert_eq!(
+            entries
+                .iter()
+                .map(|a| a.executable.as_str())
+                .collect::<Vec<_>>(),
+            vec!["", "obs", "obs"]
+        );
+        let overrides = BTreeMap::from([
+            ("obs64.exe".into(), "".into()),
+            (
+                "com.obsproject.obs-studio".into(),
+                "/opt/obs/bin/obs".into(),
+            ),
+        ]);
+        let entries = applications(&host.plugins[0], Some(&overrides));
+        assert_eq!(entries[1].executable, "");
+        assert_eq!(entries[2].executable, "/opt/obs/bin/obs");
+        let (sender, mut received) = mpsc::unbounded_channel();
+        host.plugins[0].sender = Some(sender);
+        host.dispatch_applications(&view(vec![process(99, 1, "/usr/bin/obs")]));
+        assert_eq!(
+            receive(&mut received),
+            vec![json!({"event":"applicationDidLaunch","payload":{"application":"obs64.exe"}})]
+        );
     }
 
     #[test]

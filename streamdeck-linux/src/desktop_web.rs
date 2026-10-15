@@ -386,6 +386,7 @@ fn dispatch(
         "icon_packs" => controller.icon_packs(&payload),
         "command_output" => controller.command_output(&payload),
         "application_catalog" => Ok(serde_json::to_value(crate::system_app::catalog())?),
+        "obs_bridge" => crate::obs_bridge::request(&payload),
         "bundled_plugins" => Ok(serde_json::to_value(crate::bundled_plugins::list()?)?),
         "fonts" => Ok(serde_json::to_value(crate::appearance::font_families()?)?),
         "marketplace" => {
@@ -692,14 +693,20 @@ pub fn run(
             .with_html(&html)
             .with_background_color((19, 23, 29, 255))
             .with_initialization_script(BRIDGE)
-            .with_drag_drop_handler(move |event| {
-                let _ = drag_proxy.send_event(UiEvent::FileDrag { generation, event });
-                true
-            })
             .with_navigation_handler(|uri| trusted_document(&uri))
             .with_new_window_req_handler(|_, _| wry::NewWindowResponse::Deny)
             .with_ipc_handler(move |request| {
                 match parse_request(&request.uri().to_string(), request.body()) {
+                    Ok(request) if testing && request.method == "_test_progress" => {
+                        eprintln!("Native fixture progress: {}", js_json(&request.payload));
+                        let _ = ipc_proxy.send_event(UiEvent::Reply {
+                            generation,
+                            script: format!(
+                                "window.__deckforgeReceive({});",
+                                js_json(&json!({"id":request.id,"result":null}))
+                            ),
+                        });
+                    }
                     Ok(request) if testing && request.method == "_test_result" => {
                         let _ = ipc_proxy.send_event(UiEvent::TestDone {
                             generation,
@@ -754,6 +761,10 @@ pub fn run(
                     .context("Native editor has no GTK container")?,
             )
             .context("Create native editor WebKit view")?;
+        use wry::WebViewExtUnix;
+        crate::desktop_file_drop::connect(&webview.webview(), move |event| {
+            let _ = drag_proxy.send_event(UiEvent::FileDrag { generation, event });
+        });
         let wake_proxy = proxy.clone();
         window.attach_wakeup(Arc::new(move || {
             let _ = wake_proxy.send_event(UiEvent::Wake);

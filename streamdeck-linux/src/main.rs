@@ -38,6 +38,7 @@ mod marketplace;
 mod mixer;
 mod multi;
 mod multi_editor;
+mod obs_bridge;
 mod package;
 mod plugin_entry;
 mod plugin_localization;
@@ -97,6 +98,11 @@ struct Args {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Check or install the optional bridge for native Linux OBS. Does not start OBS.
+    ObsBridge {
+        #[arg(long)]
+        install: bool,
+    },
     /// Inspect, install or list inert icon packs without launching the host.
     IconPack {
         #[arg(value_parser = ["inspect", "install", "list"])]
@@ -289,6 +295,12 @@ fn main() -> Result<()> {
         (Some(_), Some(_)) => anyhow::bail!("Use a standalone plugin URI or desktop --uri"),
     };
     match command {
+        Command::ObsBridge { install } => {
+            let value = obs_bridge::request(
+                &serde_json::json!({"operation":if install { "install" } else { "status" }}),
+            )?;
+            println!("{}", serde_json::to_string_pretty(&value)?);
+        }
         Command::IconPack {
             operation,
             path,
